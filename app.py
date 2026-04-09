@@ -60,6 +60,39 @@ WIREGUARD_DOWNLOAD_LINKS = {
     "android_apk": "https://download.wireguard.com/android-client/",
     "official": "https://www.wireguard.com/install/",
 }
+OPENVPN_ENABLED = os.environ.get("OPENVPN_ENABLED", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+OPENVPN_ENDPOINT_HOST = os.environ.get("OPENVPN_ENDPOINT_HOST", "").strip()
+OPENVPN_ENDPOINT_PORT_RAW = os.environ.get("OPENVPN_ENDPOINT_PORT", "1194").strip()
+try:
+    OPENVPN_ENDPOINT_PORT = int(OPENVPN_ENDPOINT_PORT_RAW)
+except ValueError:
+    OPENVPN_ENDPOINT_PORT = 1194
+if OPENVPN_ENDPOINT_PORT <= 0 or OPENVPN_ENDPOINT_PORT > 65535:
+    OPENVPN_ENDPOINT_PORT = 1194
+OPENVPN_PROTO = os.environ.get("OPENVPN_PROTO", "udp").strip().lower() or "udp"
+OPENVPN_CLIENT_DNS = os.environ.get("OPENVPN_CLIENT_DNS", WG_CLIENT_DNS).strip()
+OPENVPN_CIPHER = os.environ.get("OPENVPN_CIPHER", "AES-256-GCM").strip() or "AES-256-GCM"
+OPENVPN_AUTH = os.environ.get("OPENVPN_AUTH", "SHA256").strip() or "SHA256"
+OPENVPN_CA_CERT_FILE = Path(
+    os.environ.get("OPENVPN_CA_CERT_FILE", "/etc/openvpn/server/ca.crt")
+)
+OPENVPN_TLS_CRYPT_KEY_FILE = Path(
+    os.environ.get("OPENVPN_TLS_CRYPT_KEY_FILE", "/etc/openvpn/server/tls-crypt.key")
+)
+OPENVPN_DOWNLOAD_FALLBACK = "https://openvpn.net/client/"
+OPENVPN_DOWNLOAD_LINKS = {
+    "windows": "https://openvpn.net/client/client-connect-vpn-for-windows/",
+    "macos": "https://openvpn.net/client/client-connect-vpn-for-mac-os/",
+    "android": "https://play.google.com/store/apps/details?id=net.openvpn.openvpn",
+    "ios": "https://apps.apple.com/app/openvpn-connect-openvpn-app/id590379981",
+    "linux": "https://openvpn.net/client/",
+    "official": "https://openvpn.net/client/",
+}
 
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
 PLAN_OPTIONS = (1, 3, 6, 12)
@@ -94,6 +127,7 @@ ADMIN_UI_TZ_NAME = "北京时间 (UTC+8)"
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("PORTAL_SECRET_KEY", "change-this-secret")
 _CLIENT_ALLOWED_IPS_CACHE: str | None = None
+_OPENVPN_ROUTE_LINES_CACHE: list[str] | None = None
 
 
 def utcnow() -> datetime:
@@ -243,7 +277,7 @@ def get_client_allowed_ips() -> str:
     return _CLIENT_ALLOWED_IPS_CACHE
 
 
-def detect_wireguard_platform(user_agent: str) -> str:
+def detect_client_platform(user_agent: str) -> str:
     ua = (user_agent or "").lower()
     if "android" in ua:
         return "android"
@@ -256,6 +290,107 @@ def detect_wireguard_platform(user_agent: str) -> str:
     if "linux" in ua:
         return "linux"
     return "official"
+
+
+def detect_wireguard_platform(user_agent: str) -> str:
+    return detect_client_platform(user_agent)
+
+
+def detect_openvpn_platform(user_agent: str) -> str:
+    return detect_client_platform(user_agent)
+
+
+def get_openvpn_endpoint_host() -> str:
+    if OPENVPN_ENDPOINT_HOST:
+        return OPENVPN_ENDPOINT_HOST
+
+    wg_endpoint = (WG_ENDPOINT or "").strip()
+    if not wg_endpoint:
+        return "127.0.0.1"
+    if wg_endpoint.startswith("["):
+        idx = wg_endpoint.find("]")
+        if idx > 1:
+            return wg_endpoint[1:idx]
+    if wg_endpoint.count(":") == 1:
+        return wg_endpoint.rsplit(":", 1)[0]
+    return wg_endpoint
+
+
+def get_openvpn_route_lines() -> list[str]:
+    global _OPENVPN_ROUTE_LINES_CACHE
+    if _OPENVPN_ROUTE_LINES_CACHE is not None:
+        return _OPENVPN_ROUTE_LINES_CACHE
+
+    smart_modes = {"cn_local", "cn_split", "china-bypass", "overseas-proxy"}
+    if WG_ROUTE_POLICY in smart_modes:
+        routes = load_allowed_ips_from_file(WG_NON_CN_ROUTES_FILE)
+        lines = ["route-nopull"]
+        for cidr in routes:
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue
+            if network.version != 4:
+                continue
+            lines.append(f"route {network.network_address} {network.netmask}")
+        _OPENVPN_ROUTE_LINES_CACHE = lines
+        return _OPENVPN_ROUTE_LINES_CACHE
+
+    _OPENVPN_ROUTE_LINES_CACHE = ["redirect-gateway def1"]
+    return _OPENVPN_ROUTE_LINES_CACHE
+
+
+def read_required_text(path: Path, label: str) -> str:
+    if not path.exists():
+        raise RuntimeError(f"{label} 文件不存在：{path}")
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        raise RuntimeError(f"{label} 文件为空：{path}")
+    return content
+
+
+def build_openvpn_client_config(username: str) -> str:
+    if not OPENVPN_ENABLED:
+        raise RuntimeError("管理员尚未启用 OpenVPN 支持。")
+
+    ca_text = read_required_text(OPENVPN_CA_CERT_FILE, "OpenVPN CA 证书")
+    tls_crypt_text = ""
+    if OPENVPN_TLS_CRYPT_KEY_FILE.exists():
+        tls_crypt_text = OPENVPN_TLS_CRYPT_KEY_FILE.read_text(encoding="utf-8").strip()
+
+    remote_host = get_openvpn_endpoint_host()
+    lines = [
+        "client",
+        "dev tun",
+        f"proto {OPENVPN_PROTO}",
+        f"remote {remote_host} {OPENVPN_ENDPOINT_PORT}",
+        "resolv-retry infinite",
+        "nobind",
+        "persist-key",
+        "persist-tun",
+        "auth-user-pass",
+        "auth-nocache",
+        "remote-cert-tls server",
+        f"cipher {OPENVPN_CIPHER}",
+        f"auth {OPENVPN_AUTH}",
+        "verb 3",
+        f"setenv PORTAL_USER {safe_name(username)}",
+    ]
+    if OPENVPN_PROTO == "udp":
+        lines.append("explicit-exit-notify 1")
+    if OPENVPN_CLIENT_DNS:
+        lines.append(f"dhcp-option DNS {OPENVPN_CLIENT_DNS}")
+    lines.extend(get_openvpn_route_lines())
+
+    lines.append("<ca>")
+    lines.append(ca_text)
+    lines.append("</ca>")
+    if tls_crypt_text:
+        lines.append("<tls-crypt>")
+        lines.append(tls_crypt_text)
+        lines.append("</tls-crypt>")
+
+    return "\n".join(lines) + "\n"
 
 
 def get_registration_cooldown_seconds(
@@ -625,6 +760,7 @@ def inject_user():
         "usdt_receive_address": payment_settings["usdt_receive_address"],
         "usdt_default_network": payment_settings["usdt_default_network"],
         "usdt_network_options": USDT_NETWORK_OPTIONS,
+        "openvpn_enabled": OPENVPN_ENABLED,
     }
 
 
@@ -1171,6 +1307,30 @@ def wireguard_download_auto():
 def wireguard_download_redirect(platform: str):
     key = (platform or "").strip().lower()
     target_url = WIREGUARD_DOWNLOAD_LINKS.get(key, WIREGUARD_DOWNLOAD_FALLBACK)
+    return redirect(target_url, code=302)
+
+
+@app.route("/openvpn/download")
+def openvpn_download_page():
+    user = current_user()
+    dashboard_page = "guide" if user and user["role"] == "user" else None
+    return render_template(
+        "openvpn_download.html",
+        dashboard_page=dashboard_page,
+        openvpn_download_links=OPENVPN_DOWNLOAD_LINKS,
+    )
+
+
+@app.route("/openvpn/download/auto")
+def openvpn_download_auto():
+    platform = detect_openvpn_platform(request.headers.get("User-Agent", ""))
+    return redirect(url_for("openvpn_download_redirect", platform=platform))
+
+
+@app.route("/openvpn/download/<platform>")
+def openvpn_download_redirect(platform: str):
+    key = (platform or "").strip().lower()
+    target_url = OPENVPN_DOWNLOAD_LINKS.get(key, OPENVPN_DOWNLOAD_FALLBACK)
     return redirect(target_url, code=302)
 
 
@@ -2108,6 +2268,33 @@ def download_config():
         download_name=f"wg-{user['username']}.conf",
         mimetype="text/plain",
     )
+
+
+@app.route("/download/openvpn")
+@login_required
+def download_openvpn_config():
+    user = current_user()
+    if user["role"] != "user":
+        flash("管理员无需下载客户端配置。", "error")
+        return redirect(url_for("dashboard"))
+
+    db = get_db()
+    reconcile_expired_subscriptions(db)
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+
+    if not is_subscription_active(user):
+        flash("订阅未生效或已过期，请先续费。", "error")
+        return redirect(url_for("dashboard"))
+
+    try:
+        config_text = build_openvpn_client_config(user["username"])
+    except Exception as exc:
+        flash(f"OpenVPN 配置生成失败：{exc}", "error")
+        return redirect(url_for("dashboard_home"))
+
+    filename = f"ovpn-{safe_name(user['username'])}.ovpn"
+    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    return Response(config_text, headers=headers, mimetype="text/plain")
 
 
 

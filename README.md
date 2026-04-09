@@ -1,4 +1,4 @@
-# vpn-manager（WireGuard + USDT）
+# vpn-manager（WireGuard + OpenVPN + USDT）
 
 这是一个中文 VPN 门户项目，包含：
 
@@ -6,6 +6,7 @@
 - 订单购买（1/3/6/12 个月）
 - USDT 收款（支持 Webhook 自动确认）
 - WireGuard 配置下发（`.conf` 文件下载）
+- OpenVPN 配置下发（`.ovpn` 文件下载）
 - 用户有效期、流量统计、管理员后台管理
 
 ## 功能概览
@@ -27,7 +28,7 @@
 
 ## 重要说明
 
-- 当前已关闭“用户配置二维码下载”，统一使用 `.conf` 文件导入客户端。
+- 当前已关闭“用户配置二维码下载”，统一使用配置文件导入客户端（WireGuard `.conf` / OpenVPN `.ovpn`）。
 - USDT 支付二维码仍保留（用于收款地址展示）。
 
 ## 环境要求
@@ -35,6 +36,7 @@
 - Ubuntu 22.04/24.04（推荐）
 - Python 3.10+
 - WireGuard 工具：`wireguard wireguard-tools`
+- OpenVPN 服务端（如需启用 OpenVPN 下载）：`openvpn`
 - 其他依赖：`qrencode`
 - Web 服务：`gunicorn` + `nginx`（推荐）
 
@@ -79,6 +81,17 @@ WG_IP_ASSIGNMENT_MODE=dynamic
 # full 或 cn_local（cn_local=中国直连，境外走代理）
 WG_ROUTE_POLICY=cn_local
 WG_NON_CN_ROUTES_FILE=/opt/vpn-portal/data/non_cn_ipv4_routes.txt
+
+# OpenVPN（可选）
+OPENVPN_ENABLED=1
+OPENVPN_ENDPOINT_HOST=你的公网IP或域名
+OPENVPN_ENDPOINT_PORT=1194
+OPENVPN_PROTO=udp
+OPENVPN_CLIENT_DNS=10.7.0.1
+OPENVPN_CIPHER=AES-256-GCM
+OPENVPN_AUTH=SHA256
+OPENVPN_CA_CERT_FILE=/etc/openvpn/server/ca.crt
+OPENVPN_TLS_CRYPT_KEY_FILE=/etc/openvpn/server/tls-crypt.key
 
 PORTAL_DATA_DIR=/opt/vpn-portal/data
 PORTAL_DB_PATH=/opt/vpn-portal/data/portal.db
@@ -152,8 +165,8 @@ systemctl status vpn-portal
 1. 用户注册并登录
 2. 在“订单管理”选择套餐并创建订单
 3. 完成链上转账，提交 TxHash（或由 Webhook 自动确认）
-4. 订阅生效后，在“首页”下载 `.conf` 配置
-5. 导入 WireGuard 客户端后连接使用
+4. 订阅生效后，在“首页”下载 WireGuard `.conf` 或 OpenVPN `.ovpn` 配置
+5. 导入对应客户端后连接使用
 
 ## 管理端操作建议
 

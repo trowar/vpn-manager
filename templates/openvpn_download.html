@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>OpenVPN 客户端下载</h2>
+  <p class="helper">你现在在本站下载页。点击下方按钮后，系统会自动跳转到官方来源进行安装。</p>
+
+  <div class="actions">
+    <a class="btn" href="{{ url_for('openvpn_download_auto') }}">一键自动识别并下载</a>
+    <a class="btn secondary" href="{{ openvpn_download_links['official'] }}" target="_blank" rel="noopener">打开 OpenVPN 官方客户端页</a>
+  </div>
+</section>
+
+<section class="card">
+  <h3>按设备选择下载</h3>
+  <div class="feature-grid">
+    <div class="feature-item">
+      <h4>Windows</h4>
+      <p>自动跳转到 OpenVPN Windows 官方下载页。</p>
+      <div class="actions">
+        <a class="btn" href="{{ url_for('openvpn_download_redirect', platform='windows') }}">Windows 下载</a>
+      </div>
+    </div>
+
+    <div class="feature-item">
+      <h4>macOS</h4>
+      <p>自动跳转到 OpenVPN macOS 官方下载页。</p>
+      <div class="actions">
+        <a class="btn" href="{{ url_for('openvpn_download_redirect', platform='macos') }}">macOS 下载</a>
+      </div>
+    </div>
+
+    <div class="feature-item">
+      <h4>Android</h4>
+      <p>默认跳转到 Google Play 的 OpenVPN Connect。</p>
+      <div class="actions">
+        <a class="btn" href="{{ url_for('openvpn_download_redirect', platform='android') }}">Android 下载</a>
+      </div>
+    </div>
+
+    <div class="feature-item">
+      <h4>iOS</h4>
+      <p>自动跳转到 App Store 的 OpenVPN Connect。</p>
+      <div class="actions">
+        <a class="btn" href="{{ url_for('openvpn_download_redirect', platform='ios') }}">iOS 下载</a>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}

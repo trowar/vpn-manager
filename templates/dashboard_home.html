@@ -33,12 +33,15 @@
     {% if active %}
       <div class="actions">
         <a class="btn" href="{{ url_for('download_config') }}">下载 WireGuard 配置</a>
+        <a class="btn secondary" href="{{ url_for('download_openvpn_config') }}">下载 OpenVPN 配置</a>
         <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">客户端下载</a>
+        <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">OpenVPN 客户端</a>
       </div>
-      <p class="helper">已关闭配置二维码下载，请使用 `.conf` 配置文件导入 WireGuard 客户端。</p>
+      <p class="helper">已关闭配置二维码下载。WireGuard 使用 `.conf` 导入；OpenVPN 使用 `.ovpn` 导入。</p>
     {% else %}
       <div class="actions">
         <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">客户端下载</a>
+        <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">OpenVPN 客户端</a>
       </div>
     {% endif %}
   </section>
