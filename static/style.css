@@ -221,15 +221,37 @@ table {
 }
 
 .subscriptions-table tbody tr:nth-child(odd) {
-  background: #fbfdff;
+  background: #ffffff;
 }
 
 .subscriptions-table tbody tr:nth-child(even) {
-  background: #f4f8ff;
+  background: #edf3ff;
 }
 
 .subscriptions-table tbody tr:hover {
-  background: #eaf2ff;
+  background: #dbe8ff;
+}
+
+.subscriptions-table thead th {
+  background: #10243f;
+  color: #fff;
+}
+
+.subscriptions-table tbody tr:nth-child(odd) td {
+  background: #ffffff;
+}
+
+.subscriptions-table tbody tr:nth-child(even) td {
+  background: #edf3ff;
+}
+
+.subscriptions-table tbody tr:hover td {
+  background: #dbe8ff;
+}
+
+.subscriptions-table th,
+.subscriptions-table td {
+  white-space: nowrap;
 }
 
 th,
@@ -250,6 +272,10 @@ td {
   display: grid;
   gap: 8px;
   margin: 10px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: #f8fbff;
 }
 
 .admin-subscriptions-search-row {
@@ -267,7 +293,7 @@ td {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .subscription-actions .inline-form {
@@ -276,6 +302,7 @@ td {
 
 .subscription-actions .expiry-form {
   margin: 0;
+  flex-wrap: nowrap;
 }
 
 .dashboard-shell {
