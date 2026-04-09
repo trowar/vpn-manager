@@ -348,6 +348,23 @@ td {
   margin: 16px 0;
 }
 
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.section-title-row h3,
+.section-title-row h4 {
+  margin: 0;
+}
+
+.plan-create-modal-card {
+  width: min(620px, 100%);
+}
+
 .guide-steps {
   margin: 0 0 8px 22px;
   padding: 0;
@@ -591,6 +608,11 @@ code {
   .site-content {
     width: min(1120px, calc(100% - 20px));
     padding: 14px 0 28px;
+  }
+
+  .section-title-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .stats-grid {

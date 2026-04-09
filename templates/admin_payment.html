@@ -21,35 +21,11 @@
 
   <hr class="section-divider">
 
-  <h3>新增套餐</h3>
-  <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
-    <label>套餐名称
-      <input type="text" name="plan_name" placeholder="例如：月付基础版 / 200GB 流量包" required>
-    </label>
-    <label>收费模式
-      <select name="billing_mode" id="plan-billing-mode" required>
-        <option value="duration">按时长收费</option>
-        <option value="traffic">按流量收费</option>
-      </select>
-    </label>
-    <label id="plan-duration-row">时长（月）
-      <input type="number" name="duration_months" min="1" step="1" value="1">
-    </label>
-    <label id="plan-traffic-row" hidden>流量（GB）
-      <input type="number" name="traffic_gb" min="1" step="1">
-    </label>
-    <label>价格（USDT）
-      <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
-    </label>
-    <label>排序（数字越小越靠前）
-      <input type="number" name="sort_order" min="0" step="1" value="100">
-    </label>
-    <button type="submit">添加套餐</button>
-  </form>
+  <div class="section-title-row">
+    <h3>套餐列表（按行显示）</h3>
+    <button type="button" id="open-plan-create-modal">新增套餐</button>
+  </div>
 
-  <hr class="section-divider">
-
-  <h3>套餐列表（按行显示）</h3>
   {% if plans %}
     <table class="subscriptions-table">
       <thead>
@@ -98,11 +74,79 @@
   {% endif %}
 </section>
 
+<div class="payment-modal" id="plan-create-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>新增套餐</h4>
+      <button type="button" class="btn secondary" id="close-plan-create-modal">关闭</button>
+    </div>
+
+    <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
+      <label>套餐名称
+        <input type="text" name="plan_name" placeholder="例如：月付基础版 / 200GB 流量包" required>
+      </label>
+      <label>收费模式
+        <select name="billing_mode" id="plan-billing-mode" required>
+          <option value="duration">按时长收费</option>
+          <option value="traffic">按流量收费</option>
+        </select>
+      </label>
+      <label id="plan-duration-row">时长（月）
+        <input type="number" name="duration_months" min="1" step="1" value="1">
+      </label>
+      <label id="plan-traffic-row" hidden>流量（GB）
+        <input type="number" name="traffic_gb" min="1" step="1">
+      </label>
+      <label>价格（USDT）
+        <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" min="0" step="1" value="100">
+      </label>
+      <button type="submit">添加套餐</button>
+    </form>
+  </div>
+</div>
+
 <script>
   (function () {
+    var openBtn = document.getElementById("open-plan-create-modal");
+    var closeBtn = document.getElementById("close-plan-create-modal");
+    var modal = document.getElementById("plan-create-modal");
     var modeSelect = document.getElementById("plan-billing-mode");
     var durationRow = document.getElementById("plan-duration-row");
     var trafficRow = document.getElementById("plan-traffic-row");
+
+    function openModal() {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal() {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    if (openBtn) {
+      openBtn.addEventListener("click", openModal);
+    }
+    if (closeBtn) {
+      closeBtn.addEventListener("click", closeModal);
+    }
+    if (modal) {
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) {
+          closeModal();
+        }
+      });
+    }
+
     if (!modeSelect || !durationRow || !trafficRow) {
       return;
     }
