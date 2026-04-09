@@ -7,24 +7,33 @@
     <h4>购买套餐</h4>
     {% if not usdt_receive_address %}
       <p class="helper">管理员尚未配置 USDT 收款地址。</p>
+    {% elif not available_plans %}
+      <p class="helper">当前暂无可用套餐，请联系管理员在“套餐管理”中添加并启用套餐。</p>
     {% else %}
+      {% set default_plan = available_plans[0] %}
       <div class="purchase-layout">
-        <div class="purchase-month-row" id="purchase-month-row">
-          {% for m in plan_options %}
+        <div class="purchase-month-row" id="purchase-plan-row">
+          {% for plan in available_plans %}
             <button
               type="button"
               class="plan-option-btn {% if loop.first %}active{% endif %}"
-              data-months="{{ m }}"
-              data-price="{{ plan_prices[m] }}"
+              data-plan-id="{{ plan['id'] }}"
+              data-plan-name="{{ plan['plan_name'] }}"
+              data-plan-mode="{{ plan['mode_label'] }}"
+              data-plan-value="{{ plan['value_label'] }}"
+              data-plan-display="{{ plan['display_name'] }}"
+              data-price="{{ plan['price_usdt'] }}"
             >
-              {{ m }} 个月
+              {{ plan["display_name"] }}
             </button>
           {% endfor %}
         </div>
 
         <div class="purchase-summary">
-          <p>已选套餐：<strong><span id="selected-months">{{ plan_options[0] }}</span> 个月</strong></p>
-          <p>应付金额：<strong><span id="selected-price">{{ plan_prices[plan_options[0]] }}</span> USDT</strong>（{{ usdt_default_network }}）</p>
+          <p>已选套餐：<strong><span id="selected-plan-name">{{ default_plan['display_name'] }}</span></strong></p>
+          <p>计费模式：<strong><span id="selected-plan-mode">{{ default_plan['mode_label'] }}</span></strong></p>
+          <p>套餐内容：<strong><span id="selected-plan-value">{{ default_plan['value_label'] }}</span></strong></p>
+          <p>应付金额：<strong><span id="selected-price">{{ default_plan['price_usdt'] }}</span> USDT</strong>（{{ usdt_default_network }}）</p>
           <button type="button" id="purchase-next" {% if pending_orders %}disabled{% endif %}>下一步</button>
           {% if pending_orders %}
             <p class="helper">你有未完成订单，请先完成当前订单支付并提交 TxHash。</p>
@@ -35,8 +44,10 @@
       <div class="payment-modal" id="payment-modal" hidden>
         <div class="payment-modal-card">
           <h4>支付信息</h4>
-          <p>套餐：<strong><span id="modal-months">{{ plan_options[0] }}</span> 个月</strong></p>
-          <p>金额：<strong><span id="modal-price">{{ plan_prices[plan_options[0]] }}</span> USDT</strong>（{{ usdt_default_network }}）</p>
+          <p>套餐：<strong><span id="modal-plan-name">{{ default_plan['display_name'] }}</span></strong></p>
+          <p>计费模式：<strong><span id="modal-plan-mode">{{ default_plan['mode_label'] }}</span></strong></p>
+          <p>套餐内容：<strong><span id="modal-plan-value">{{ default_plan['value_label'] }}</span></strong></p>
+          <p>金额：<strong><span id="modal-price">{{ default_plan['price_usdt'] }}</span> USDT</strong>（{{ usdt_default_network }}）</p>
           <p>收款地址：<code>{{ usdt_receive_address }}</code></p>
 
           <div class="payment-qr-wrap">
@@ -46,7 +57,7 @@
           <p class="helper">请使用 <strong>{{ usdt_default_network }}</strong> 网络付款，完成后在下方待处理订单里提交 TxHash。</p>
 
           <form method="post" action="{{ url_for('create_subscription_order') }}" class="form">
-            <input type="hidden" name="months" id="confirm-months" value="{{ plan_options[0] }}">
+            <input type="hidden" name="plan_id" id="confirm-plan-id" value="{{ default_plan['id'] }}">
             <button type="submit" {% if pending_orders %}disabled{% endif %}>创建订单并继续</button>
           </form>
 
@@ -62,7 +73,7 @@
       {% for o in pending_orders %}
         <div class="order-item">
           <p><strong>订单号：</strong>{{ o["id"] }}</p>
-          <p><strong>套餐：</strong>{{ o["plan_months"] }} 个月</p>
+          <p><strong>套餐：</strong>{{ o|fmt_order_plan }}</p>
           <p><strong>金额：</strong>{{ o["usdt_amount"]|fmt_usdt }} USDT</p>
           <p><strong>网络：</strong>{{ o["usdt_network"] }}</p>
           <p><strong>收款地址：</strong><code>{{ o["pay_to_address"] }}</code></p>
@@ -95,6 +106,25 @@
     {% else %}
       <p class="helper">暂无待处理订单。</p>
     {% endif %}
+
+    <hr class="section-divider">
+
+    <h4>已支付订单（{{ paid_orders|length }}）</h4>
+    {% if paid_orders %}
+      {% for o in paid_orders %}
+        <div class="order-item">
+          <p><strong>订单号：</strong>{{ o["id"] }}</p>
+          <p><strong>套餐：</strong>{{ o|fmt_order_plan }}</p>
+          <p><strong>金额：</strong>{{ o["usdt_amount"]|fmt_usdt }} USDT</p>
+          <p><strong>支付时间：</strong>{{ o["paid_at"]|fmt_utc }}</p>
+          {% if o["tx_hash"] %}
+            <p><strong>TxHash：</strong><a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a></p>
+          {% endif %}
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="helper">暂无已支付订单。</p>
+    {% endif %}
   </section>
 </div>
 
@@ -105,11 +135,16 @@
       return;
     }
 
-    var selectedMonthsLabel = document.getElementById("selected-months");
+    var selectedPlanName = document.getElementById("selected-plan-name");
+    var selectedPlanMode = document.getElementById("selected-plan-mode");
+    var selectedPlanValue = document.getElementById("selected-plan-value");
     var selectedPriceLabel = document.getElementById("selected-price");
-    var modalMonthsLabel = document.getElementById("modal-months");
+
+    var modalPlanName = document.getElementById("modal-plan-name");
+    var modalPlanMode = document.getElementById("modal-plan-mode");
+    var modalPlanValue = document.getElementById("modal-plan-value");
     var modalPriceLabel = document.getElementById("modal-price");
-    var confirmMonthsInput = document.getElementById("confirm-months");
+    var confirmPlanIdInput = document.getElementById("confirm-plan-id");
 
     var nextBtn = document.getElementById("purchase-next");
     var modal = document.getElementById("payment-modal");
@@ -121,23 +156,39 @@
       });
       btn.classList.add("active");
 
-      var months = btn.getAttribute("data-months") || "";
+      var planId = btn.getAttribute("data-plan-id") || "";
+      var planDisplay = btn.getAttribute("data-plan-display") || "";
+      var planMode = btn.getAttribute("data-plan-mode") || "";
+      var planValue = btn.getAttribute("data-plan-value") || "";
       var price = btn.getAttribute("data-price") || "";
 
-      if (selectedMonthsLabel) {
-        selectedMonthsLabel.textContent = months;
+      if (selectedPlanName) {
+        selectedPlanName.textContent = planDisplay;
+      }
+      if (selectedPlanMode) {
+        selectedPlanMode.textContent = planMode;
+      }
+      if (selectedPlanValue) {
+        selectedPlanValue.textContent = planValue;
       }
       if (selectedPriceLabel) {
         selectedPriceLabel.textContent = price;
       }
-      if (modalMonthsLabel) {
-        modalMonthsLabel.textContent = months;
+
+      if (modalPlanName) {
+        modalPlanName.textContent = planDisplay;
+      }
+      if (modalPlanMode) {
+        modalPlanMode.textContent = planMode;
+      }
+      if (modalPlanValue) {
+        modalPlanValue.textContent = planValue;
       }
       if (modalPriceLabel) {
         modalPriceLabel.textContent = price;
       }
-      if (confirmMonthsInput) {
-        confirmMonthsInput.value = months;
+      if (confirmPlanIdInput) {
+        confirmPlanIdInput.value = planId;
       }
     }
 

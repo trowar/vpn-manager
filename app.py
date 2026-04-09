@@ -95,7 +95,6 @@ OPENVPN_DOWNLOAD_LINKS = {
 }
 
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
-PLAN_OPTIONS = (1, 3, 6, 12)
 USDT_NETWORK_OPTIONS = ("TRC20", "ERC20", "BEP20", "POLYGON")
 USDT_DEFAULT_NETWORK = os.environ.get("USDT_DEFAULT_NETWORK", "TRC20").upper()
 USDT_RECEIVE_ADDRESS = os.environ.get("USDT_RECEIVE_ADDRESS", "").strip()
@@ -115,11 +114,11 @@ if USDT_DEFAULT_NETWORK not in USDT_NETWORK_OPTIONS:
 PAYMENT_SETTING_KEYS = (
     "usdt_receive_address",
     "usdt_default_network",
-    "usdt_price_1m",
-    "usdt_price_3m",
-    "usdt_price_6m",
-    "usdt_price_12m",
 )
+PLAN_MODE_DURATION = "duration"
+PLAN_MODE_TRAFFIC = "traffic"
+PLAN_MODES = (PLAN_MODE_DURATION, PLAN_MODE_TRAFFIC)
+BYTES_PER_GB = 1024 * 1024 * 1024
 REGISTER_COOLDOWN_SECONDS = 5 * 60
 ADMIN_UI_TZ = timezone(timedelta(hours=8))
 ADMIN_UI_TZ_NAME = "北京时间 (UTC+8)"
@@ -198,14 +197,6 @@ def parse_usdt_amount(raw: str, fallback: str) -> Decimal:
         return Decimal(fallback).quantize(Decimal("0.01"))
 
 
-PLAN_PRICES = {
-    1: parse_usdt_amount(USDT_PRICE_1M, "10"),
-    3: parse_usdt_amount(USDT_PRICE_3M, "27"),
-    6: parse_usdt_amount(USDT_PRICE_6M, "50"),
-    12: parse_usdt_amount(USDT_PRICE_12M, "90"),
-}
-
-
 def parse_usdt_amount_strict(raw: str) -> Decimal:
     amount = Decimal((raw or "").strip())
     if amount <= 0:
@@ -217,11 +208,114 @@ def default_payment_settings() -> dict[str, str]:
     return {
         "usdt_receive_address": USDT_RECEIVE_ADDRESS,
         "usdt_default_network": USDT_DEFAULT_NETWORK,
-        "usdt_price_1m": format_usdt(PLAN_PRICES[1]),
-        "usdt_price_3m": format_usdt(PLAN_PRICES[3]),
-        "usdt_price_6m": format_usdt(PLAN_PRICES[6]),
-        "usdt_price_12m": format_usdt(PLAN_PRICES[12]),
     }
+
+
+def normalize_plan_mode(mode: str | None) -> str:
+    raw_mode = (mode or "").strip().lower()
+    if raw_mode in PLAN_MODES:
+        return raw_mode
+    if raw_mode in {"time", "month", "months"}:
+        return PLAN_MODE_DURATION
+    if raw_mode in {"traffic_gb", "gb", "flow", "data"}:
+        return PLAN_MODE_TRAFFIC
+    return PLAN_MODE_DURATION
+
+
+def plan_mode_label(mode: str | None) -> str:
+    normalized = normalize_plan_mode(mode)
+    if normalized == PLAN_MODE_TRAFFIC:
+        return "按流量收费"
+    return "按时长收费"
+
+
+def parse_positive_int(raw: str | None) -> int:
+    value = int((raw or "").strip())
+    if value <= 0:
+        raise ValueError("must be positive")
+    return value
+
+
+def to_non_negative_int(raw) -> int:
+    try:
+        value = int(raw or 0)
+    except Exception:
+        value = 0
+    return value if value >= 0 else 0
+
+
+def row_get(row, key: str, default=None):
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def format_plan_value(mode: str | None, duration_months: int, traffic_gb: int) -> str:
+    normalized = normalize_plan_mode(mode)
+    if normalized == PLAN_MODE_TRAFFIC:
+        if traffic_gb <= 0:
+            return "流量未设置"
+        return f"{traffic_gb} GB"
+    if duration_months <= 0:
+        return "时长未设置"
+    return f"{duration_months} 个月"
+
+
+def format_plan_display_name(
+    plan_name: str | None,
+    mode: str | None,
+    duration_months: int,
+    traffic_gb: int,
+) -> str:
+    name = (plan_name or "").strip()
+    mode_prefix = "时长" if normalize_plan_mode(mode) == PLAN_MODE_DURATION else "流量"
+    value_text = format_plan_value(mode, duration_months, traffic_gb)
+    if name:
+        return f"{name}（{mode_prefix} {value_text}）"
+    return f"{mode_prefix} {value_text}"
+
+
+def format_order_plan(order: sqlite3.Row | dict) -> str:
+    plan_name = (row_get(order, "plan_name", "") or "").strip()
+    plan_mode_raw = row_get(order, "plan_mode", "")
+    plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
+    duration_months = to_non_negative_int(row_get(order, "plan_duration_months", 0))
+    traffic_gb = to_non_negative_int(row_get(order, "plan_traffic_gb", 0))
+    if not duration_months:
+        duration_months = to_non_negative_int(row_get(order, "plan_months", 0))
+    if not plan_mode:
+        plan_mode = PLAN_MODE_TRAFFIC if traffic_gb > 0 else PLAN_MODE_DURATION
+    return format_plan_display_name(plan_name, plan_mode, duration_months, traffic_gb)
+
+
+def resolve_order_plan_snapshot(order: sqlite3.Row | dict) -> dict:
+    plan_name = (row_get(order, "plan_name", "") or "").strip()
+    plan_mode_raw = row_get(order, "plan_mode", "")
+    plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
+    duration_months = to_non_negative_int(row_get(order, "plan_duration_months", 0))
+    traffic_gb = to_non_negative_int(row_get(order, "plan_traffic_gb", 0))
+    if not duration_months:
+        duration_months = to_non_negative_int(row_get(order, "plan_months", 0))
+    if not plan_mode:
+        plan_mode = PLAN_MODE_TRAFFIC if traffic_gb > 0 else PLAN_MODE_DURATION
+    if not plan_name:
+        plan_name = "流量套餐" if plan_mode == PLAN_MODE_TRAFFIC else "时长套餐"
+
+    return {
+        "plan_name": plan_name,
+        "plan_mode": plan_mode,
+        "duration_months": duration_months,
+        "traffic_gb": traffic_gb,
+        "display_name": format_plan_display_name(
+            plan_name, plan_mode, duration_months, traffic_gb
+        ),
+    }
+
+
+@app.template_filter("fmt_order_plan")
+def fmt_order_plan_filter(order: sqlite3.Row | dict) -> str:
+    return format_order_plan(order)
 
 
 def get_client_ip() -> str:
@@ -496,27 +590,86 @@ def load_payment_settings(db: sqlite3.Connection) -> dict:
 
     address = (raw_map.get("usdt_receive_address") or defaults["usdt_receive_address"]).strip()
 
-    p1_raw = raw_map.get("usdt_price_1m") or defaults["usdt_price_1m"]
-    p3_raw = raw_map.get("usdt_price_3m") or defaults["usdt_price_3m"]
-    p6_raw = raw_map.get("usdt_price_6m") or defaults["usdt_price_6m"]
-    p12_raw = raw_map.get("usdt_price_12m") or defaults["usdt_price_12m"]
-
-    plan_prices = {
-        1: parse_usdt_amount(p1_raw, defaults["usdt_price_1m"]),
-        3: parse_usdt_amount(p3_raw, defaults["usdt_price_3m"]),
-        6: parse_usdt_amount(p6_raw, defaults["usdt_price_6m"]),
-        12: parse_usdt_amount(p12_raw, defaults["usdt_price_12m"]),
-    }
-
     return {
         "usdt_receive_address": address,
         "usdt_default_network": network,
-        "plan_prices": plan_prices,
-        "price_1m": format_usdt(plan_prices[1]),
-        "price_3m": format_usdt(plan_prices[3]),
-        "price_6m": format_usdt(plan_prices[6]),
-        "price_12m": format_usdt(plan_prices[12]),
     }
+
+
+def ensure_default_subscription_plans(db: sqlite3.Connection) -> None:
+    count = db.execute("SELECT COUNT(*) AS cnt FROM subscription_plans").fetchone()["cnt"]
+    if count > 0:
+        return
+
+    default_rows = [
+        ("月付 1个月", PLAN_MODE_DURATION, 1, None, format_usdt(parse_usdt_amount(USDT_PRICE_1M, "10")), 10),
+        ("季付 3个月", PLAN_MODE_DURATION, 3, None, format_usdt(parse_usdt_amount(USDT_PRICE_3M, "27")), 20),
+        ("半年 6个月", PLAN_MODE_DURATION, 6, None, format_usdt(parse_usdt_amount(USDT_PRICE_6M, "50")), 30),
+        ("年付 12个月", PLAN_MODE_DURATION, 12, None, format_usdt(parse_usdt_amount(USDT_PRICE_12M, "90")), 40),
+        ("流量包 100GB", PLAN_MODE_TRAFFIC, None, 100, format_usdt(parse_usdt_amount(USDT_PRICE_1M, "10")), 50),
+    ]
+    now_iso = utcnow_iso()
+    for name, mode, duration, traffic, price, sort_order in default_rows:
+        db.execute(
+            """
+            INSERT INTO subscription_plans (
+                plan_name, billing_mode, duration_months, traffic_gb,
+                price_usdt, is_active, sort_order, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+            """,
+            (name, mode, duration, traffic, price, sort_order, now_iso, now_iso),
+        )
+
+
+def load_subscription_plans(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
+    sql = """
+        SELECT
+            id,
+            plan_name,
+            billing_mode,
+            duration_months,
+            traffic_gb,
+            price_usdt,
+            is_active,
+            sort_order,
+            created_at,
+            updated_at
+        FROM subscription_plans
+    """
+    params: list[object] = []
+    if active_only:
+        sql += " WHERE is_active = 1"
+    sql += " ORDER BY sort_order ASC, id ASC"
+    rows = db.execute(sql, params).fetchall()
+
+    plans: list[dict] = []
+    for row in rows:
+        mode = normalize_plan_mode(row["billing_mode"])
+        duration_months = to_non_negative_int(row["duration_months"])
+        traffic_gb = to_non_negative_int(row["traffic_gb"])
+        if mode == PLAN_MODE_TRAFFIC:
+            duration_months = 0
+        else:
+            traffic_gb = 0
+
+        plan = {
+            "id": row["id"],
+            "plan_name": (row["plan_name"] or "").strip(),
+            "billing_mode": mode,
+            "mode_label": plan_mode_label(mode),
+            "duration_months": duration_months,
+            "traffic_gb": traffic_gb,
+            "value_label": format_plan_value(mode, duration_months, traffic_gb),
+            "price_usdt": format_usdt(row["price_usdt"]),
+            "is_active": 1 if int(row["is_active"] or 0) == 1 else 0,
+            "sort_order": to_non_negative_int(row["sort_order"]),
+            "display_name": format_plan_display_name(
+                row["plan_name"], mode, duration_months, traffic_gb
+            ),
+        }
+        plans.append(plan)
+    return plans
 
 
 def usdt_explorer_link(network: str, tx_hash: str) -> str:
@@ -575,7 +728,10 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             approved_at TEXT,
             subscription_expires_at TEXT,
-            wg_enabled INTEGER NOT NULL DEFAULT 0
+            wg_enabled INTEGER NOT NULL DEFAULT 0,
+            traffic_quota_bytes INTEGER NOT NULL DEFAULT 0,
+            traffic_used_bytes INTEGER NOT NULL DEFAULT 0,
+            traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -584,7 +740,12 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS payment_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            plan_months INTEGER NOT NULL,
+            plan_months INTEGER NOT NULL DEFAULT 0,
+            plan_id INTEGER,
+            plan_name TEXT,
+            plan_mode TEXT,
+            plan_duration_months INTEGER,
+            plan_traffic_gb INTEGER,
             payment_method TEXT NOT NULL DEFAULT 'usdt',
             usdt_network TEXT NOT NULL DEFAULT 'TRC20',
             usdt_amount TEXT NOT NULL DEFAULT '0',
@@ -596,6 +757,22 @@ def init_db() -> None:
             paid_at TEXT,
             note TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_name TEXT NOT NULL,
+            billing_mode TEXT NOT NULL,
+            duration_months INTEGER,
+            traffic_gb INTEGER,
+            price_usdt TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
         """
     )
@@ -618,6 +795,7 @@ def init_db() -> None:
     )
     migrate_schema(db)
     ensure_default_payment_settings(db)
+    ensure_default_subscription_plans(db)
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_status_created ON users(status, created_at)"
     )
@@ -639,6 +817,9 @@ def init_db() -> None:
         ON payment_orders(tx_hash) WHERE tx_hash IS NOT NULL AND tx_hash <> ''
         """
     )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_subscription_plans_active_sort ON subscription_plans(is_active, sort_order, id)"
+    )
     db.commit()
 
 
@@ -651,11 +832,29 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE users ADD COLUMN subscription_expires_at TEXT")
     if "wg_enabled" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN wg_enabled INTEGER NOT NULL DEFAULT 0")
+    if "traffic_quota_bytes" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN traffic_quota_bytes INTEGER NOT NULL DEFAULT 0")
+    if "traffic_used_bytes" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN traffic_used_bytes INTEGER NOT NULL DEFAULT 0")
+    if "traffic_last_total_bytes" not in user_columns:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0"
+        )
 
     order_columns = {
         row["name"]: row
         for row in db.execute("PRAGMA table_info(payment_orders)").fetchall()
     }
+    if "plan_id" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN plan_id INTEGER")
+    if "plan_name" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN plan_name TEXT")
+    if "plan_mode" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN plan_mode TEXT")
+    if "plan_duration_months" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN plan_duration_months INTEGER")
+    if "plan_traffic_gb" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN plan_traffic_gb INTEGER")
     if "payment_method" not in order_columns:
         db.execute(
             "ALTER TABLE payment_orders ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'usdt'"
@@ -674,6 +873,23 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE payment_orders ADD COLUMN tx_hash TEXT")
     if "tx_submitted_at" not in order_columns:
         db.execute("ALTER TABLE payment_orders ADD COLUMN tx_submitted_at TEXT")
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_name TEXT NOT NULL,
+            billing_mode TEXT NOT NULL,
+            duration_months INTEGER,
+            traffic_gb INTEGER,
+            price_usdt TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def ensure_admin_user() -> None:
@@ -753,10 +969,6 @@ def inject_user():
     payment_settings = load_payment_settings(db)
     return {
         "current_user": current_user(),
-        "plan_options": PLAN_OPTIONS,
-        "plan_prices": {
-            m: format_usdt(p) for m, p in payment_settings["plan_prices"].items()
-        },
         "usdt_receive_address": payment_settings["usdt_receive_address"],
         "usdt_default_network": payment_settings["usdt_default_network"],
         "usdt_network_options": USDT_NETWORK_OPTIONS,
@@ -769,7 +981,13 @@ def auto_reconcile_subscriptions():
     if request.endpoint == "static":
         return None
     try:
-        reconcile_expired_subscriptions(get_db())
+        db = get_db()
+        reconcile_expired_subscriptions(db)
+        user_id = session.get("user_id")
+        if user_id:
+            user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if user and user["role"] == "user":
+                sync_user_traffic_usage(db, user)
     except Exception:
         app.logger.exception("Failed to reconcile expired subscriptions")
     return None
@@ -852,6 +1070,11 @@ def get_wireguard_transfer_bytes(public_key: str | None) -> tuple[int, int]:
 def get_user_traffic_stats(user: sqlite3.Row) -> dict[str, int | str]:
     rx_bytes, tx_bytes = get_wireguard_transfer_bytes(user["client_public_key"])
     total_bytes = rx_bytes + tx_bytes
+    quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
+    used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
+    if quota_bytes > 0 and used_bytes > quota_bytes:
+        used_bytes = quota_bytes
+    remaining_bytes = max(0, quota_bytes - used_bytes)
     return {
         "rx_bytes": rx_bytes,
         "tx_bytes": tx_bytes,
@@ -859,6 +1082,12 @@ def get_user_traffic_stats(user: sqlite3.Row) -> dict[str, int | str]:
         "rx_human": format_bytes(rx_bytes),
         "tx_human": format_bytes(tx_bytes),
         "total_human": format_bytes(total_bytes),
+        "quota_bytes": quota_bytes,
+        "used_bytes": used_bytes,
+        "remaining_bytes": remaining_bytes,
+        "quota_human": format_bytes(quota_bytes),
+        "used_human": format_bytes(used_bytes),
+        "remaining_human": format_bytes(remaining_bytes),
     }
 
 
@@ -1091,18 +1320,91 @@ def calculate_new_expiry(current_expire_iso: str | None, months: int) -> str:
     return period_end.isoformat()
 
 
+def has_active_time_subscription(user: sqlite3.Row) -> bool:
+    expires_at = parse_iso(row_get(user, "subscription_expires_at"))
+    return bool(expires_at and expires_at >= utcnow())
+
+
+def has_active_traffic_subscription(user: sqlite3.Row) -> bool:
+    quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
+    used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
+    return quota_bytes > 0 and used_bytes < quota_bytes
+
+
+def sync_user_traffic_usage(
+    db: sqlite3.Connection,
+    user: sqlite3.Row,
+    *,
+    current_total_bytes: int | None = None,
+) -> sqlite3.Row:
+    quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
+    if quota_bytes <= 0:
+        return user
+
+    used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
+    last_total_bytes = to_non_negative_int(row_get(user, "traffic_last_total_bytes", 0))
+    if current_total_bytes is None:
+        rx_bytes, tx_bytes = get_wireguard_transfer_bytes(row_get(user, "client_public_key"))
+        current_total_bytes = rx_bytes + tx_bytes
+    current_total_bytes = max(0, int(current_total_bytes))
+
+    traffic_delta = current_total_bytes - last_total_bytes
+    if traffic_delta < 0:
+        # wg counter may reset after interface restart; skip negative delta
+        traffic_delta = 0
+    new_used_bytes = used_bytes + traffic_delta
+    if new_used_bytes > quota_bytes:
+        new_used_bytes = quota_bytes
+
+    changed = False
+    if new_used_bytes != used_bytes or current_total_bytes != last_total_bytes:
+        db.execute(
+            """
+            UPDATE users
+            SET traffic_used_bytes = ?,
+                traffic_last_total_bytes = ?
+            WHERE id = ?
+            """,
+            (new_used_bytes, current_total_bytes, user["id"]),
+        )
+        changed = True
+
+    exhausted = quota_bytes > 0 and new_used_bytes >= quota_bytes
+    if exhausted and int(row_get(user, "wg_enabled", 0) or 0) == 1 and not has_active_time_subscription(user):
+        if row_get(user, "client_public_key"):
+            remove_wireguard_peer(user["client_public_key"])
+        if is_dynamic_ip_assignment_mode():
+            db.execute(
+                "UPDATE users SET wg_enabled = 0, assigned_ip = NULL WHERE id = ?",
+                (user["id"],),
+            )
+        else:
+            db.execute("UPDATE users SET wg_enabled = 0 WHERE id = ?", (user["id"],))
+        changed = True
+
+    if changed:
+        db.commit()
+        user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return user
+
+
 def is_subscription_active(user: sqlite3.Row) -> bool:
-    expires_at = parse_iso(user["subscription_expires_at"])
-    if not expires_at:
+    if int(row_get(user, "wg_enabled", 0) or 0) != 1:
         return False
-    return user["wg_enabled"] == 1 and expires_at >= utcnow()
+    return has_active_time_subscription(user) or has_active_traffic_subscription(user)
 
 
 def reconcile_expired_subscriptions(db: sqlite3.Connection) -> None:
     now = utcnow()
     rows = db.execute(
         """
-        SELECT id, client_public_key, subscription_expires_at, wg_enabled
+        SELECT
+            id,
+            client_public_key,
+            subscription_expires_at,
+            wg_enabled,
+            traffic_quota_bytes,
+            traffic_used_bytes
         FROM users
         WHERE role = 'user' AND wg_enabled = 1 AND subscription_expires_at IS NOT NULL
         """
@@ -1112,6 +1414,8 @@ def reconcile_expired_subscriptions(db: sqlite3.Connection) -> None:
     for row in rows:
         expires_at = parse_iso(row["subscription_expires_at"])
         if not expires_at or expires_at >= now:
+            continue
+        if has_active_traffic_subscription(row):
             continue
         if row["client_public_key"]:
             remove_wireguard_peer(row["client_public_key"])
@@ -1225,9 +1529,44 @@ def settle_order_paid(
                 db.rollback()
                 raise ValueError("该交易哈希已用于其他已支付订单。")
 
-    new_expire_at = calculate_new_expiry(
-        user["subscription_expires_at"], int(order["plan_months"])
+    plan_snapshot = resolve_order_plan_snapshot(order)
+    plan_mode = plan_snapshot["plan_mode"]
+    plan_duration_months = to_non_negative_int(plan_snapshot["duration_months"])
+    plan_traffic_gb = to_non_negative_int(plan_snapshot["traffic_gb"])
+    if plan_mode == PLAN_MODE_DURATION and plan_duration_months <= 0:
+        db.rollback()
+        raise ValueError("时长套餐配置无效。")
+    if plan_mode == PLAN_MODE_TRAFFIC and plan_traffic_gb <= 0:
+        db.rollback()
+        raise ValueError("流量套餐配置无效。")
+
+    current_expire_iso = row_get(user, "subscription_expires_at")
+    if plan_mode == PLAN_MODE_DURATION:
+        new_expire_at = calculate_new_expiry(current_expire_iso, plan_duration_months)
+    else:
+        new_expire_at = current_expire_iso
+
+    current_quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
+    current_used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
+    current_last_total_bytes = to_non_negative_int(
+        row_get(user, "traffic_last_total_bytes", 0)
     )
+    if row_get(user, "client_public_key"):
+        rx_now, tx_now = get_wireguard_transfer_bytes(user["client_public_key"])
+        current_total_bytes = rx_now + tx_now
+        delta_bytes = current_total_bytes - current_last_total_bytes
+        if delta_bytes > 0 and current_quota_bytes > 0:
+            current_used_bytes = min(current_quota_bytes, current_used_bytes + delta_bytes)
+        current_last_total_bytes = current_total_bytes
+
+    added_traffic_bytes = 0
+    if plan_mode == PLAN_MODE_TRAFFIC:
+        added_traffic_bytes = plan_traffic_gb * BYTES_PER_GB
+        current_quota_bytes += added_traffic_bytes
+    if current_used_bytes > current_quota_bytes:
+        current_used_bytes = current_quota_bytes
+
+    remaining_traffic_bytes = max(0, current_quota_bytes - current_used_bytes)
     vpn_data = ensure_user_vpn_ready(db, user)
     paid_at_iso = paid_at_iso or utcnow_iso()
     tx_submitted_at = order["tx_submitted_at"] or (paid_at_iso if final_tx_hash else None)
@@ -1246,6 +1585,9 @@ def settle_order_paid(
             qr_path = ?,
             approved_at = ?,
             subscription_expires_at = ?,
+            traffic_quota_bytes = ?,
+            traffic_used_bytes = ?,
+            traffic_last_total_bytes = ?,
             wg_enabled = 1
         WHERE id = ?
         """,
@@ -1258,6 +1600,9 @@ def settle_order_paid(
             vpn_data["qr_path"],
             utcnow_iso(),
             new_expire_at,
+            current_quota_bytes,
+            current_used_bytes,
+            current_last_total_bytes,
             user["id"],
         ),
     )
@@ -1274,10 +1619,19 @@ def settle_order_paid(
         (paid_at_iso, final_tx_hash, tx_submitted_at, merged_note, order_id),
     )
     db.commit()
+    if plan_mode == PLAN_MODE_DURATION:
+        grant_text = f"时长套餐生效，到期时间：{format_utc(new_expire_at)}"
+    else:
+        grant_text = (
+            f"流量套餐生效，新增 {format_bytes(added_traffic_bytes)}，"
+            f"剩余 {format_bytes(remaining_traffic_bytes)}"
+        )
     return {
         "status": "paid",
         "username": user["username"],
         "expires_at": new_expire_at,
+        "grant_text": grant_text,
+        "plan_display": plan_snapshot["display_name"],
     }
 
 
@@ -1484,6 +1838,8 @@ def dashboard_home():
     db = get_db()
     reconcile_expired_subscriptions(db)
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    user = sync_user_traffic_usage(db, user)
+    user = sync_user_traffic_usage(db, user)
     traffic_stats = get_user_traffic_stats(user)
 
     return render_template(
@@ -1517,10 +1873,13 @@ def dashboard_orders():
     db = get_db()
     reconcile_expired_subscriptions(db)
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    user = sync_user_traffic_usage(db, user)
+    user = sync_user_traffic_usage(db, user)
+    available_plans = load_subscription_plans(db, active_only=True)
 
     pending_orders = db.execute(
         """
-        SELECT id, plan_months, status, created_at,
+        SELECT id, plan_months, plan_name, plan_mode, plan_duration_months, plan_traffic_gb, status, created_at,
                payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at
         FROM payment_orders
         WHERE user_id = ? AND status = 'pending'
@@ -1530,7 +1889,7 @@ def dashboard_orders():
     ).fetchall()
     paid_orders = db.execute(
         """
-        SELECT id, plan_months, status, created_at, paid_at,
+        SELECT id, plan_months, plan_name, plan_mode, plan_duration_months, plan_traffic_gb, status, created_at, paid_at,
                payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at
         FROM payment_orders
         WHERE user_id = ? AND status = 'paid'
@@ -1543,6 +1902,7 @@ def dashboard_orders():
     return render_template(
         "dashboard_orders.html",
         user=user,
+        available_plans=available_plans,
         pending_orders=pending_orders,
         paid_orders=paid_orders,
         usdt_explorer_link=usdt_explorer_link,
@@ -1557,13 +1917,13 @@ def create_subscription_order():
     if user["role"] != "user":
         return redirect(url_for("dashboard_orders"))
 
-    months_raw = request.form.get("months", "0").strip()
+    plan_id_raw = request.form.get("plan_id", "0").strip()
     try:
-        months = int(months_raw)
+        plan_id = int(plan_id_raw)
     except ValueError:
-        months = 0
+        plan_id = 0
 
-    if months not in PLAN_OPTIONS:
+    if plan_id <= 0:
         flash("套餐选择无效。", "error")
         return redirect(url_for("dashboard_orders"))
 
@@ -1587,18 +1947,49 @@ def create_subscription_order():
         flash("你已有待处理订单，请先提交 TxHash 并等待确认。", "error")
         return redirect(url_for("dashboard_orders"))
 
-    usdt_amount = payment_settings["plan_prices"][months]
+    plan = db.execute(
+        """
+        SELECT id, plan_name, billing_mode, duration_months, traffic_gb, price_usdt
+        FROM subscription_plans
+        WHERE id = ? AND is_active = 1
+        LIMIT 1
+        """,
+        (plan_id,),
+    ).fetchone()
+    if not plan:
+        flash("套餐不存在或已停用。", "error")
+        return redirect(url_for("dashboard_orders"))
+
+    plan_mode = normalize_plan_mode(plan["billing_mode"])
+    duration_months = to_non_negative_int(plan["duration_months"])
+    traffic_gb = to_non_negative_int(plan["traffic_gb"])
+    if plan_mode == PLAN_MODE_DURATION and duration_months <= 0:
+        flash("所选时长套餐配置无效，请联系管理员。", "error")
+        return redirect(url_for("dashboard_orders"))
+    if plan_mode == PLAN_MODE_TRAFFIC and traffic_gb <= 0:
+        flash("所选流量套餐配置无效，请联系管理员。", "error")
+        return redirect(url_for("dashboard_orders"))
+
+    usdt_amount = parse_usdt_amount(plan["price_usdt"], "1")
+    plan_display = format_plan_display_name(
+        plan["plan_name"], plan_mode, duration_months, traffic_gb
+    )
     db.execute(
         """
         INSERT INTO payment_orders (
-            user_id, plan_months, payment_method, usdt_network, usdt_amount,
-            pay_to_address, status, created_at
+            user_id, plan_months, plan_id, plan_name, plan_mode, plan_duration_months, plan_traffic_gb,
+            payment_method, usdt_network, usdt_amount, pay_to_address, status, created_at
         )
-        VALUES (?, ?, 'usdt', ?, ?, ?, 'pending', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'usdt', ?, ?, ?, 'pending', ?)
         """,
         (
             user["id"],
-            months,
+            duration_months,
+            plan["id"],
+            plan["plan_name"],
+            plan_mode,
+            duration_months if plan_mode == PLAN_MODE_DURATION else None,
+            traffic_gb if plan_mode == PLAN_MODE_TRAFFIC else None,
             network,
             format_usdt(usdt_amount),
             receive_address,
@@ -1607,7 +1998,7 @@ def create_subscription_order():
     )
     db.commit()
     flash(
-        f"USDT 订单已创建：{months} 个月 / {format_usdt(usdt_amount)} USDT。请完成支付后提交 TxHash。",
+        f"USDT 订单已创建：{plan_display} / {format_usdt(usdt_amount)} USDT。请完成支付后提交 TxHash。",
         "success",
     )
     return redirect(url_for("dashboard_orders"))
@@ -1710,6 +2101,10 @@ def load_admin_pending_orders(db: sqlite3.Connection):
             o.id,
             o.user_id,
             o.plan_months,
+            o.plan_name,
+            o.plan_mode,
+            o.plan_duration_months,
+            o.plan_traffic_gb,
             o.payment_method,
             o.usdt_network,
             o.usdt_amount,
@@ -1734,6 +2129,10 @@ def load_admin_paid_orders(db: sqlite3.Connection):
         SELECT
             o.id,
             o.plan_months,
+            o.plan_name,
+            o.plan_mode,
+            o.plan_duration_months,
+            o.plan_traffic_gb,
             o.payment_method,
             o.usdt_network,
             o.usdt_amount,
@@ -1810,9 +2209,11 @@ def admin_home():
 def admin_payment_settings():
     db = get_db()
     payment_settings = load_payment_settings(db)
+    plans = load_subscription_plans(db, active_only=False)
     return render_template(
         "admin_payment.html",
         payment_settings=payment_settings,
+        plans=plans,
         admin_page="payment",
     )
 
@@ -1877,10 +2278,6 @@ def admin_update_payment_settings():
     db = get_db()
     receive_address = request.form.get("usdt_receive_address", "").strip()
     network = request.form.get("usdt_default_network", "TRC20").strip().upper()
-    p1 = request.form.get("price_1m", "").strip()
-    p3 = request.form.get("price_3m", "").strip()
-    p6 = request.form.get("price_6m", "").strip()
-    p12 = request.form.get("price_12m", "").strip()
 
     if network not in USDT_NETWORK_OPTIONS:
         flash("默认 USDT 网络无效。", "error")
@@ -1889,23 +2286,110 @@ def admin_update_payment_settings():
         flash("USDT 收款地址不能为空。", "error")
         return redirect(url_for("admin_payment_settings"))
 
-    try:
-        price_1m = parse_usdt_amount_strict(p1)
-        price_3m = parse_usdt_amount_strict(p3)
-        price_6m = parse_usdt_amount_strict(p6)
-        price_12m = parse_usdt_amount_strict(p12)
-    except Exception:
-        flash("USDT 价格格式无效，请填写大于 0 的数字，例如 10 或 27.50。", "error")
-        return redirect(url_for("admin_payment_settings"))
-
     upsert_app_setting(db, "usdt_receive_address", receive_address)
     upsert_app_setting(db, "usdt_default_network", network)
-    upsert_app_setting(db, "usdt_price_1m", format_usdt(price_1m))
-    upsert_app_setting(db, "usdt_price_3m", format_usdt(price_3m))
-    upsert_app_setting(db, "usdt_price_6m", format_usdt(price_6m))
-    upsert_app_setting(db, "usdt_price_12m", format_usdt(price_12m))
     db.commit()
-    flash("支付设置已更新。", "success")
+    flash("基础支付设置已更新。", "success")
+    return redirect(url_for("admin_payment_settings"))
+
+
+@app.route("/admin/plans/create", methods=["POST"])
+@login_required
+@admin_required
+def admin_create_plan():
+    db = get_db()
+    plan_name = request.form.get("plan_name", "").strip()
+    billing_mode = normalize_plan_mode(request.form.get("billing_mode", "duration"))
+    duration_months_raw = request.form.get("duration_months", "").strip()
+    traffic_gb_raw = request.form.get("traffic_gb", "").strip()
+    price_raw = request.form.get("price_usdt", "").strip()
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if not plan_name:
+        flash("套餐名称不能为空。", "error")
+        return redirect(url_for("admin_payment_settings"))
+
+    try:
+        price_usdt = parse_usdt_amount_strict(price_raw)
+    except Exception:
+        flash("价格格式无效，请输入大于 0 的数字。", "error")
+        return redirect(url_for("admin_payment_settings"))
+
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    duration_months = None
+    traffic_gb = None
+    if billing_mode == PLAN_MODE_DURATION:
+        try:
+            duration_months = parse_positive_int(duration_months_raw)
+        except Exception:
+            flash("时长套餐必须填写大于 0 的时长（月）。", "error")
+            return redirect(url_for("admin_payment_settings"))
+    else:
+        try:
+            traffic_gb = parse_positive_int(traffic_gb_raw)
+        except Exception:
+            flash("流量套餐必须填写大于 0 的流量（GB）。", "error")
+            return redirect(url_for("admin_payment_settings"))
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        INSERT INTO subscription_plans (
+            plan_name, billing_mode, duration_months, traffic_gb,
+            price_usdt, is_active, sort_order, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+        """,
+        (
+            plan_name,
+            billing_mode,
+            duration_months,
+            traffic_gb,
+            format_usdt(price_usdt),
+            sort_order,
+            now_iso,
+            now_iso,
+        ),
+    )
+    db.commit()
+    flash("套餐已添加。", "success")
+    return redirect(url_for("admin_payment_settings"))
+
+
+@app.route("/admin/plans/<int:plan_id>/toggle", methods=["POST"])
+@login_required
+@admin_required
+def admin_toggle_plan(plan_id: int):
+    db = get_db()
+    plan = db.execute(
+        "SELECT id, plan_name, is_active FROM subscription_plans WHERE id = ?",
+        (plan_id,),
+    ).fetchone()
+    if not plan:
+        flash("套餐不存在。", "error")
+        return redirect(url_for("admin_payment_settings"))
+
+    next_active = 0 if int(plan["is_active"] or 0) == 1 else 1
+    db.execute(
+        """
+        UPDATE subscription_plans
+        SET is_active = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (next_active, utcnow_iso(), plan_id),
+    )
+    db.commit()
+    if next_active == 1:
+        flash(f"套餐 {plan['plan_name']} 已启用。", "success")
+    else:
+        flash(f"套餐 {plan['plan_name']} 已停用。", "success")
     return redirect(url_for("admin_payment_settings"))
 
 
@@ -2126,7 +2610,7 @@ def admin_mark_order_paid(order_id: int):
             flash("该订单已支付。", "success")
         else:
             flash(
-                f"订单确认成功。用户 {result['username']} 到期时间：{format_utc(result['expires_at'])}。",
+                f"订单确认成功。用户 {result['username']}，{result['plan_display']}，{result['grant_text']}。",
                 "success",
             )
     except ValueError as exc:
@@ -2243,6 +2727,8 @@ def usdt_payment_webhook():
             "status": "paid",
             "order_id": order_id,
             "expires_at": result["expires_at"],
+            "grant_text": result["grant_text"],
+            "plan_display": result["plan_display"],
         }
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}, 400

@@ -20,7 +20,7 @@
           <tr>
             <td>{{ o["id"] }}</td>
             <td>{{ o["username"] }}</td>
-            <td>{{ o["plan_months"] }} 个月</td>
+            <td>{{ o|fmt_order_plan }}</td>
             <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
             <td>{{ o["usdt_network"] }}</td>
             <td>

@@ -20,10 +20,14 @@ def parse_iso(value: str | None):
 
 
 def is_active_subscription(row: sqlite3.Row) -> bool:
-    expires_at = parse_iso(row["subscription_expires_at"])
-    if not expires_at:
+    if int(row["wg_enabled"] or 0) != 1:
         return False
-    return int(row["wg_enabled"] or 0) == 1 and expires_at >= datetime.now(timezone.utc)
+    expires_at = parse_iso(row["subscription_expires_at"])
+    if expires_at and expires_at >= datetime.now(timezone.utc):
+        return True
+    quota = int(row["traffic_quota_bytes"] or 0)
+    used = int(row["traffic_used_bytes"] or 0)
+    return quota > 0 and used < quota
 
 
 def load_credentials(auth_file: str) -> tuple[str, str]:
@@ -45,7 +49,15 @@ def authenticate(username: str, password: str) -> bool:
     try:
         row = conn.execute(
             """
-            SELECT email, username, password_hash, role, subscription_expires_at, wg_enabled
+            SELECT
+                email,
+                username,
+                password_hash,
+                role,
+                subscription_expires_at,
+                wg_enabled,
+                traffic_quota_bytes,
+                traffic_used_bytes
             FROM users
             WHERE (email = ? OR username = ?) AND role = 'user'
             LIMIT 1

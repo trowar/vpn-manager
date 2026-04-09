@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="card">
-  <h2>支付设置</h2>
+  <h2>套餐管理</h2>
+  <p class="helper">在这里维护 USDT 收款信息和可售套餐。套餐支持“按时长收费”和“按流量收费”。</p>
+
+  <h3>基础支付设置</h3>
   <form method="post" action="{{ url_for('admin_update_payment_settings') }}" class="form">
     <label>USDT 收款地址
       <input type="text" name="usdt_receive_address" value="{{ payment_settings['usdt_receive_address'] }}" required>
@@ -13,19 +16,125 @@
         {% endfor %}
       </select>
     </label>
-    <label>1 个月价格（USDT）
-      <input type="text" name="price_1m" value="{{ payment_settings['price_1m'] }}" required>
-    </label>
-    <label>3 个月价格（USDT）
-      <input type="text" name="price_3m" value="{{ payment_settings['price_3m'] }}" required>
-    </label>
-    <label>6 个月价格（USDT）
-      <input type="text" name="price_6m" value="{{ payment_settings['price_6m'] }}" required>
-    </label>
-    <label>12 个月价格（USDT）
-      <input type="text" name="price_12m" value="{{ payment_settings['price_12m'] }}" required>
-    </label>
-    <button type="submit">保存支付设置</button>
+    <button type="submit">保存基础设置</button>
   </form>
+
+  <hr class="section-divider">
+
+  <h3>新增套餐</h3>
+  <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
+    <label>套餐名称
+      <input type="text" name="plan_name" placeholder="例如：月付基础版 / 200GB 流量包" required>
+    </label>
+    <label>收费模式
+      <select name="billing_mode" id="plan-billing-mode" required>
+        <option value="duration">按时长收费</option>
+        <option value="traffic">按流量收费</option>
+      </select>
+    </label>
+    <label id="plan-duration-row">时长（月）
+      <input type="number" name="duration_months" min="1" step="1" value="1">
+    </label>
+    <label id="plan-traffic-row" hidden>流量（GB）
+      <input type="number" name="traffic_gb" min="1" step="1">
+    </label>
+    <label>价格（USDT）
+      <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
+    </label>
+    <label>排序（数字越小越靠前）
+      <input type="number" name="sort_order" min="0" step="1" value="100">
+    </label>
+    <button type="submit">添加套餐</button>
+  </form>
+
+  <hr class="section-divider">
+
+  <h3>套餐列表（按行显示）</h3>
+  {% if plans %}
+    <table class="subscriptions-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>套餐名称</th>
+          <th>收费模式</th>
+          <th>套餐内容</th>
+          <th>价格</th>
+          <th>状态</th>
+          <th>排序</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for plan in plans %}
+          <tr>
+            <td>{{ plan["id"] }}</td>
+            <td>{{ plan["plan_name"] }}</td>
+            <td>{{ plan["mode_label"] }}</td>
+            <td>{{ plan["value_label"] }}</td>
+            <td>{{ plan["price_usdt"] }} USDT</td>
+            <td>
+              {% if plan["is_active"] == 1 %}
+                <span class="tag tag-ok">启用中</span>
+              {% else %}
+                <span class="tag tag-warn">已停用</span>
+              {% endif %}
+            </td>
+            <td>{{ plan["sort_order"] }}</td>
+            <td>
+              <form method="post" action="{{ url_for('admin_toggle_plan', plan_id=plan['id']) }}" class="inline-form">
+                {% if plan["is_active"] == 1 %}
+                  <button type="submit">停用</button>
+                {% else %}
+                  <button type="submit">启用</button>
+                {% endif %}
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无套餐，请先添加套餐。</p>
+  {% endif %}
 </section>
+
+<script>
+  (function () {
+    var modeSelect = document.getElementById("plan-billing-mode");
+    var durationRow = document.getElementById("plan-duration-row");
+    var trafficRow = document.getElementById("plan-traffic-row");
+    if (!modeSelect || !durationRow || !trafficRow) {
+      return;
+    }
+
+    var durationInput = durationRow.querySelector("input");
+    var trafficInput = trafficRow.querySelector("input");
+
+    function refreshModeFields() {
+      var mode = modeSelect.value;
+      if (mode === "traffic") {
+        trafficRow.hidden = false;
+        durationRow.hidden = true;
+        if (durationInput) {
+          durationInput.removeAttribute("required");
+        }
+        if (trafficInput) {
+          trafficInput.setAttribute("required", "required");
+        }
+      } else {
+        trafficRow.hidden = true;
+        durationRow.hidden = false;
+        if (trafficInput) {
+          trafficInput.removeAttribute("required");
+        }
+        if (durationInput) {
+          durationInput.setAttribute("required", "required");
+        }
+      }
+    }
+
+    modeSelect.addEventListener("change", refreshModeFields);
+    refreshModeFields();
+  })();
+</script>
 {% endblock %}

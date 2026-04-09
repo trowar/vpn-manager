@@ -20,7 +20,7 @@
         {% if current_user %}
           {% if current_user["role"] == "admin" %}
             <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">首页</a>
-            <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">支付设置</a>
+            <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐管理</a>
             <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">待处理订单</a>
             <a class="site-nav-link {% if admin_page == 'paid_orders' %}active{% endif %}" href="{{ url_for('admin_paid_orders') }}">已支付订单</a>
             <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户订阅</a>

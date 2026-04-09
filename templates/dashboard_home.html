@@ -30,6 +30,23 @@
       </div>
     </div>
 
+    {% if traffic_stats["quota_bytes"] > 0 %}
+      <div class="stats-grid">
+        <div class="stat-item">
+          <span class="stat-label">流量套餐总量</span>
+          <strong class="stat-value">{{ traffic_stats["quota_human"] }}</strong>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">流量套餐已用</span>
+          <strong class="stat-value">{{ traffic_stats["used_human"] }}</strong>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">流量套餐剩余</span>
+          <strong class="stat-value">{{ traffic_stats["remaining_human"] }}</strong>
+        </div>
+      </div>
+    {% endif %}
+
     {% if active %}
       <div class="actions">
         <a class="btn" href="{{ url_for('download_config') }}">下载 WireGuard 配置</a>

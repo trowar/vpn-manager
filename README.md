@@ -17,7 +17,7 @@
   - 订单管理：创建订单、提交 TxHash、取消订单
 - 管理员侧（左侧分页导航）
   - 首页：基础运营概览
-  - 支付设置：收款地址、网络、套餐价格
+  - 套餐管理：收款地址、默认网络、套餐新增（按时长/按流量）、套餐启停
   - 待处理订单：手动确认支付
   - 已支付订单：历史订单查询
   - 用户订阅：设置期限、停用用户、删除用户
@@ -100,6 +100,7 @@ PORTAL_CLIENT_QR_DIR=/opt/vpn-portal/data/client-qr
 
 USDT_DEFAULT_NETWORK=TRC20
 USDT_RECEIVE_ADDRESS=你的USDT地址
+# 可选：仅用于首启时自动初始化默认套餐价格（已初始化后不再依赖）
 USDT_PRICE_1M=10
 USDT_PRICE_3M=27
 USDT_PRICE_6M=50
@@ -163,7 +164,7 @@ systemctl status vpn-portal
 ## 用户端使用流程
 
 1. 用户注册并登录
-2. 在“订单管理”选择套餐并创建订单
+2. 在“订单管理”选择套餐并创建订单（支持按时长或按流量）
 3. 完成链上转账，提交 TxHash（或由 Webhook 自动确认）
 4. 订阅生效后，在“首页”下载 WireGuard `.conf` 或 OpenVPN `.ovpn` 配置
 5. 导入对应客户端后连接使用
