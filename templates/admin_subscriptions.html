@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>用户订阅（{{ subscriptions|length }}）</h2>
+  <p class="helper">手动设置期限时间基准：{{ admin_ui_tz_name }}</p>
+  {% if subscriptions %}
+    <table>
+      <thead>
+        <tr>
+          <th>用户</th>
+          <th>邮箱</th>
+          <th>IP</th>
+          <th>到期时间</th>
+          <th>VPN 状态</th>
+          <th>手动设置期限</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in subscriptions %}
+          <tr>
+            <td>{{ u["username"] }}</td>
+            <td>{{ u["email"] }}</td>
+            <td>{{ u["assigned_ip"] or "-" }}</td>
+            <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
+            <td>
+              {% if u["wg_enabled"] == 1 %}
+                <span class="tag tag-ok">已启用</span>
+              {% else %}
+                <span class="tag tag-warn">已停用</span>
+              {% endif %}
+            </td>
+            <td>
+              <form method="post" action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}" class="expiry-form">
+                <input type="datetime-local" name="expires_at_local" value="{{ u['subscription_expires_at']|fmt_local_input }}" required>
+                <button type="submit">保存期限</button>
+              </form>
+              <form
+                method="post"
+                action="{{ url_for('admin_disable_user', user_id=u['id']) }}"
+                class="inline-form"
+                onsubmit="return confirm('确定停用该用户吗？停用后将立即断开 VPN。');"
+              >
+                <button type="submit">停用用户</button>
+              </form>
+              <form
+                method="post"
+                action="{{ url_for('admin_delete_user', user_id=u['id']) }}"
+                class="inline-form"
+                onsubmit="return confirm('确定删除该用户吗？删除后订单与配置将一并清理，且不可恢复。');"
+              >
+                <button type="submit" class="danger">删除用户</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无用户订阅记录。</p>
+  {% endif %}
+</section>
+{% endblock %}

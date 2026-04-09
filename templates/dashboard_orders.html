@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard-main">
+  <section class="card">
+    <h3>订单管理</h3>
+
+    <h4>购买套餐</h4>
+    {% if not usdt_receive_address %}
+      <p class="helper">管理员尚未配置 USDT 收款地址。</p>
+    {% else %}
+      <div class="purchase-layout">
+        <div class="purchase-month-row" id="purchase-month-row">
+          {% for m in plan_options %}
+            <button
+              type="button"
+              class="plan-option-btn {% if loop.first %}active{% endif %}"
+              data-months="{{ m }}"
+              data-price="{{ plan_prices[m] }}"
+            >
+              {{ m }} 个月
+            </button>
+          {% endfor %}
+        </div>
+
+        <div class="purchase-summary">
+          <p>已选套餐：<strong><span id="selected-months">{{ plan_options[0] }}</span> 个月</strong></p>
+          <p>应付金额：<strong><span id="selected-price">{{ plan_prices[plan_options[0]] }}</span> USDT</strong>（{{ usdt_default_network }}）</p>
+          <button type="button" id="purchase-next" {% if pending_orders %}disabled{% endif %}>下一步</button>
+          {% if pending_orders %}
+            <p class="helper">你有未完成订单，请先完成当前订单支付并提交 TxHash。</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="payment-modal" id="payment-modal" hidden>
+        <div class="payment-modal-card">
+          <h4>支付信息</h4>
+          <p>套餐：<strong><span id="modal-months">{{ plan_options[0] }}</span> 个月</strong></p>
+          <p>金额：<strong><span id="modal-price">{{ plan_prices[plan_options[0]] }}</span> USDT</strong>（{{ usdt_default_network }}）</p>
+          <p>收款地址：<code>{{ usdt_receive_address }}</code></p>
+
+          <div class="payment-qr-wrap">
+            <img src="{{ url_for('subscription_payment_qr') }}" alt="USDT 收款二维码" loading="lazy">
+          </div>
+
+          <p class="helper">请使用 <strong>{{ usdt_default_network }}</strong> 网络付款，完成后在下方待处理订单里提交 TxHash。</p>
+
+          <form method="post" action="{{ url_for('create_subscription_order') }}" class="form">
+            <input type="hidden" name="months" id="confirm-months" value="{{ plan_options[0] }}">
+            <button type="submit" {% if pending_orders %}disabled{% endif %}>创建订单并继续</button>
+          </form>
+
+          <button type="button" class="btn secondary" id="payment-modal-close">返回修改</button>
+        </div>
+      </div>
+    {% endif %}
+
+    <hr class="section-divider">
+
+    <h4>待处理订单（{{ pending_orders|length }}）</h4>
+    {% if pending_orders %}
+      {% for o in pending_orders %}
+        <div class="order-item">
+          <p><strong>订单号：</strong>{{ o["id"] }}</p>
+          <p><strong>套餐：</strong>{{ o["plan_months"] }} 个月</p>
+          <p><strong>金额：</strong>{{ o["usdt_amount"]|fmt_usdt }} USDT</p>
+          <p><strong>网络：</strong>{{ o["usdt_network"] }}</p>
+          <p><strong>收款地址：</strong><code>{{ o["pay_to_address"] }}</code></p>
+          <div class="payment-qr-wrap payment-qr-wrap-inline">
+            <img src="{{ url_for('subscription_payment_qr') }}" alt="支付二维码" loading="lazy">
+          </div>
+
+          {% if o["tx_hash"] %}
+            <p><strong>TxHash：</strong><code>{{ o["tx_hash"] }}</code></p>
+            <p><a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">在区块浏览器查看</a></p>
+          {% else %}
+            <form method="post" action="{{ url_for('submit_usdt_tx_hash', order_id=o['id']) }}" class="form tx-form">
+              <label>支付完成后提交 TxHash
+                <input type="text" name="tx_hash" placeholder="请输入 TxHash" required>
+              </label>
+              <button type="submit">提交 TxHash</button>
+            </form>
+          {% endif %}
+
+          <form
+            method="post"
+            action="{{ url_for('cancel_subscription_order', order_id=o['id']) }}"
+            class="inline-form"
+            onsubmit="return confirm('确定要取消这个订单吗？取消后需要重新下单。');"
+          >
+            <button type="submit" class="danger">取消订单</button>
+          </form>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="helper">暂无待处理订单。</p>
+    {% endif %}
+  </section>
+</div>
+
+<script>
+  (function () {
+    var optionButtons = Array.prototype.slice.call(document.querySelectorAll(".plan-option-btn"));
+    if (!optionButtons.length) {
+      return;
+    }
+
+    var selectedMonthsLabel = document.getElementById("selected-months");
+    var selectedPriceLabel = document.getElementById("selected-price");
+    var modalMonthsLabel = document.getElementById("modal-months");
+    var modalPriceLabel = document.getElementById("modal-price");
+    var confirmMonthsInput = document.getElementById("confirm-months");
+
+    var nextBtn = document.getElementById("purchase-next");
+    var modal = document.getElementById("payment-modal");
+    var modalClose = document.getElementById("payment-modal-close");
+
+    function setSelected(btn) {
+      optionButtons.forEach(function (item) {
+        item.classList.remove("active");
+      });
+      btn.classList.add("active");
+
+      var months = btn.getAttribute("data-months") || "";
+      var price = btn.getAttribute("data-price") || "";
+
+      if (selectedMonthsLabel) {
+        selectedMonthsLabel.textContent = months;
+      }
+      if (selectedPriceLabel) {
+        selectedPriceLabel.textContent = price;
+      }
+      if (modalMonthsLabel) {
+        modalMonthsLabel.textContent = months;
+      }
+      if (modalPriceLabel) {
+        modalPriceLabel.textContent = price;
+      }
+      if (confirmMonthsInput) {
+        confirmMonthsInput.value = months;
+      }
+    }
+
+    optionButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        setSelected(btn);
+      });
+    });
+
+    function closeModal() {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    if (nextBtn && modal) {
+      nextBtn.addEventListener("click", function () {
+        if (nextBtn.disabled) {
+          return;
+        }
+        modal.hidden = false;
+        document.body.classList.add("modal-open");
+      });
+    }
+
+    if (modalClose) {
+      modalClose.addEventListener("click", closeModal);
+    }
+
+    if (modal) {
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) {
+          closeModal();
+        }
+      });
+    }
+  })();
+</script>
+{% endblock %}

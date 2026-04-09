@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+  <h2>注册</h2>
+  <p class="helper">当前访问 IP：<code>{{ client_ip }}</code></p>
+  <p class="helper">限制规则：同一 IP 每 {{ register_limit_minutes }} 分钟（{{ register_limit_seconds }} 秒）只能成功注册 1 次。</p>
+
+  <form method="post" class="form" id="register-form">
+    <label>邮箱
+      <input type="email" name="email" required>
+    </label>
+    <label>密码
+      <input type="password" name="password" minlength="8" required>
+    </label>
+    <button
+      type="submit"
+      id="register-submit"
+      {% if cooldown_seconds and cooldown_seconds > 0 %}disabled{% endif %}
+    >
+      创建账号
+    </button>
+  </form>
+
+  <p class="helper" id="cooldown-tip" {% if not cooldown_seconds or cooldown_seconds <= 0 %}style="display:none;"{% endif %}>
+    当前 IP 触发注册限制，请等待 <strong><span id="cooldown-seconds">{{ cooldown_seconds or 0 }}</span> 秒</strong>后再提交。
+  </p>
+  <p class="helper">系统将使用你的邮箱作为用户名。</p>
+  <p class="helper">已有账号？<a href="{{ url_for('login') }}">去登录</a></p>
+</section>
+<script>
+  (function () {
+    var remaining = Number({{ cooldown_seconds|default(0, true) }});
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      return;
+    }
+
+    var form = document.getElementById("register-form");
+    var submitButton = document.getElementById("register-submit");
+    var tip = document.getElementById("cooldown-tip");
+    var secondsLabel = document.getElementById("cooldown-seconds");
+    var timerId = null;
+
+    if (submitButton) {
+      submitButton.disabled = true;
+    }
+
+    if (form) {
+      form.addEventListener("submit", function (event) {
+        if (remaining > 0) {
+          event.preventDefault();
+        }
+      });
+    }
+
+    function tick() {
+      if (secondsLabel) {
+        secondsLabel.textContent = String(Math.max(remaining, 0));
+      }
+      if (remaining <= 0) {
+        if (submitButton) {
+          submitButton.disabled = false;
+        }
+        if (tip) {
+          tip.textContent = "已到可注册时间，现在可以提交。";
+        }
+        if (timerId !== null) {
+          window.clearInterval(timerId);
+        }
+        return;
+      }
+      remaining -= 1;
+    }
+
+    tick();
+    timerId = window.setInterval(tick, 1000);
+  })();
+</script>
+{% endblock %}

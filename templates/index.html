@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card hero">
+  <h2>WireGuard VPN 门户（支持 USDT 付费）</h2>
+  <p>
+    注册后可直接登录。用户下单并使用 USDT 转账，提交交易哈希后系统会通过 Webhook 自动核验到账并开通或续费 VPN。
+    管理员也可以在后台手动兜底确认订单。
+  </p>
+  <div class="actions">
+    <a class="btn" href="{{ url_for('register') }}">注册账号</a>
+    <a class="btn secondary" href="{{ url_for('login') }}">登录控制台</a>
+    <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">客户端下载</a>
+  </div>
+</section>
+
+<section class="card">
+  <h3>开通流程</h3>
+  <div class="feature-grid">
+    <div class="feature-item">
+      <h4>1. 注册并登录</h4>
+      <p>用户使用邮箱注册后可立即登录，无需人工审核账号。</p>
+    </div>
+    <div class="feature-item">
+      <h4>2. 创建 USDT 订单</h4>
+      <p>可选择 1 / 3 / 6 / 12 个月套餐，系统自动生成应付金额和收款地址。</p>
+    </div>
+    <div class="feature-item">
+      <h4>3. 支付并提交 TxHash</h4>
+      <p>完成链上转账后提交交易哈希，等待 Webhook 自动核验或管理员兜底处理。</p>
+    </div>
+    <div class="feature-item">
+      <h4>4. 下载配置接入 VPN</h4>
+      <p>订单确认后自动开通，可下载 `.conf` 文件或扫码导入 WireGuard 客户端。</p>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h3>如何设置 VPN（新手说明）</h3>
+  <ol class="guide-steps">
+    <li>在手机或电脑安装 WireGuard 客户端。</li>
+    <li>登录用户控制台，确认订阅状态为“已生效”。</li>
+    <li>点击“下载 WireGuard 配置”。</li>
+    <li>在客户端中导入 `.conf` 配置文件。</li>
+    <li>开启连接，首次连接成功后即可访问外网。</li>
+  </ol>
+  <p class="helper">
+    如果连接失败，请先检查：套餐是否生效、设备系统时间是否准确、网络是否允许 UDP。
+  </p>
+</section>
+{% endblock %}

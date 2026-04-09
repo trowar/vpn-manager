@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>管理员首页</h2>
+  <p class="helper">Webhook 地址：<code>/webhook/usdt</code></p>
+  <p class="helper">
+    Webhook 签名状态：
+    {% if webhook_enabled %}
+      <span class="tag tag-ok">已启用</span>
+    {% else %}
+      <span class="tag tag-warn">未配置</span>
+    {% endif %}
+    ｜最小确认数：{{ webhook_min_confirmations }}
+  </p>
+</section>
+
+<section class="card">
+  <h3>运营概览</h3>
+  <div class="stats-grid">
+    <div class="stat-item">
+      <span class="stat-label">待处理订单</span>
+      <strong class="stat-value">{{ pending_count }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">已支付订单</span>
+      <strong class="stat-value">{{ paid_count }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">在线订阅</span>
+      <strong class="stat-value">{{ active_subscriptions }}</strong>
+    </div>
+  </div>
+  <p class="helper">用户总数：{{ total_users }}</p>
+</section>
+{% endblock %}

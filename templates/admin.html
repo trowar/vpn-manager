@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card" id="admin-home">
+  <h2>管理员后台</h2>
+  <p class="helper">Webhook 地址：<code>/webhook/usdt</code></p>
+  <p class="helper">
+    Webhook 签名状态：
+    {% if webhook_enabled %}
+      <span class="tag tag-ok">已启用</span>
+    {% else %}
+      <span class="tag tag-warn">未配置</span>
+    {% endif %}
+    ｜最小确认数：{{ webhook_min_confirmations }}
+  </p>
+</section>
+
+<section class="card" id="payment-settings">
+  <h3>支付设置</h3>
+  <form method="post" action="{{ url_for('admin_update_payment_settings') }}" class="form">
+    <label>USDT 收款地址
+      <input type="text" name="usdt_receive_address" value="{{ payment_settings['usdt_receive_address'] }}" required>
+    </label>
+    <label>默认网络
+      <select name="usdt_default_network">
+        {% for network in usdt_network_options %}
+          <option value="{{ network }}" {% if payment_settings['usdt_default_network'] == network %}selected{% endif %}>{{ network }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>1 个月价格（USDT）
+      <input type="text" name="price_1m" value="{{ payment_settings['price_1m'] }}" required>
+    </label>
+    <label>3 个月价格（USDT）
+      <input type="text" name="price_3m" value="{{ payment_settings['price_3m'] }}" required>
+    </label>
+    <label>6 个月价格（USDT）
+      <input type="text" name="price_6m" value="{{ payment_settings['price_6m'] }}" required>
+    </label>
+    <label>12 个月价格（USDT）
+      <input type="text" name="price_12m" value="{{ payment_settings['price_12m'] }}" required>
+    </label>
+    <button type="submit">保存支付设置</button>
+  </form>
+</section>
+
+<section class="card" id="pending-orders">
+  <h3>待处理订单（{{ pending_orders|length }}）</h3>
+  {% if pending_orders %}
+    <table>
+      <thead>
+        <tr>
+          <th>订单号</th>
+          <th>用户</th>
+          <th>套餐</th>
+          <th>金额</th>
+          <th>网络</th>
+          <th>收款地址</th>
+          <th>TxHash</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in pending_orders %}
+          <tr>
+            <td>{{ o["id"] }}</td>
+            <td>{{ o["username"] }}</td>
+            <td>{{ o["plan_months"] }} 个月</td>
+            <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+            <td>{{ o["usdt_network"] }}</td>
+            <td><code>{{ o["pay_to_address"] }}</code></td>
+            <td>
+              {% if o["tx_hash"] %}
+                <a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a>
+              {% else %}
+                <span class="tag tag-warn">未提交</span>
+              {% endif %}
+            </td>
+            <td>
+              <form method="post" action="{{ url_for('admin_mark_order_paid', order_id=o['id']) }}" class="inline-form">
+                <button type="submit">确认已支付</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无待处理订单。</p>
+  {% endif %}
+</section>
+
+<section class="card" id="paid-orders">
+  <h3>已支付订单（{{ paid_orders|length }}）</h3>
+  {% if paid_orders %}
+    <table>
+      <thead>
+        <tr>
+          <th>订单号</th>
+          <th>用户</th>
+          <th>套餐</th>
+          <th>金额</th>
+          <th>网络</th>
+          <th>TxHash</th>
+          <th>支付时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in paid_orders %}
+          <tr>
+            <td>{{ o["id"] }}</td>
+            <td>{{ o["username"] }}</td>
+            <td>{{ o["plan_months"] }} 个月</td>
+            <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+            <td>{{ o["usdt_network"] }}</td>
+            <td>
+              {% if o["tx_hash"] %}
+                <a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>{{ o["paid_at"]|fmt_utc }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无已支付订单。</p>
+  {% endif %}
+</section>
+
+<section class="card" id="subscriptions">
+  <h3>订阅状态（{{ subscriptions|length }}）</h3>
+  <p class="helper">手动设置期限时间基准：{{ admin_ui_tz_name }}</p>
+  {% if subscriptions %}
+    <table>
+      <thead>
+        <tr>
+          <th>用户</th>
+          <th>邮箱</th>
+          <th>IP</th>
+          <th>到期时间</th>
+          <th>VPN 状态</th>
+          <th>手动设置期限</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in subscriptions %}
+          <tr>
+            <td>{{ u["username"] }}</td>
+            <td>{{ u["email"] }}</td>
+            <td>{{ u["assigned_ip"] or "-" }}</td>
+            <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
+            <td>
+              {% if u["wg_enabled"] == 1 %}
+                <span class="tag tag-ok">已启用</span>
+              {% else %}
+                <span class="tag tag-warn">已停用</span>
+              {% endif %}
+            </td>
+            <td>
+              <form method="post" action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}" class="expiry-form">
+                <input type="datetime-local" name="expires_at_local" value="{{ u['subscription_expires_at']|fmt_local_input }}" required>
+                <button type="submit">保存期限</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无用户订阅记录。</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard-main">
+  <section class="card">
+    <h3>使用说明：如何设置 VPN</h3>
+    <ol class="guide-steps">
+      <li>下载安装 WireGuard 客户端（Windows、macOS、Android、iOS 均可）。</li>
+      <li>进入“控制台首页”确认订阅状态为“已生效”。</li>
+      <li>点击“下载 WireGuard 配置”。</li>
+      <li>客户端选择“导入隧道”，导入 `.conf` 配置文件。</li>
+      <li>导入后点击“连接”，显示成功即可使用。</li>
+    </ol>
+    <div class="feature-grid guide-grid">
+      <div class="feature-item">
+        <h4>Windows / macOS</h4>
+        <p>建议使用导入 `.conf` 文件方式，更稳定，也便于后续备份。</p>
+      </div>
+      <div class="feature-item">
+        <h4>Android / iOS</h4>
+        <p>推荐扫码导入，速度快；如果扫码失败可改用配置文件导入。</p>
+      </div>
+    </div>
+    <p class="helper">常见问题：连接不上时，优先检查套餐有效期、设备时间是否准确、是否被本地防火墙拦截。</p>
+    <div class="actions">
+      <a class="btn" href="{{ url_for('wireguard_download_auto') }}">一键下载 WireGuard 客户端</a>
+      <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">查看全部下载入口</a>
+    </div>
+  </section>
+</div>
+{% endblock %}

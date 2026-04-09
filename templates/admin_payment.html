@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>支付设置</h2>
+  <form method="post" action="{{ url_for('admin_update_payment_settings') }}" class="form">
+    <label>USDT 收款地址
+      <input type="text" name="usdt_receive_address" value="{{ payment_settings['usdt_receive_address'] }}" required>
+    </label>
+    <label>默认网络
+      <select name="usdt_default_network">
+        {% for network in usdt_network_options %}
+          <option value="{{ network }}" {% if payment_settings['usdt_default_network'] == network %}selected{% endif %}>{{ network }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>1 个月价格（USDT）
+      <input type="text" name="price_1m" value="{{ payment_settings['price_1m'] }}" required>
+    </label>
+    <label>3 个月价格（USDT）
+      <input type="text" name="price_3m" value="{{ payment_settings['price_3m'] }}" required>
+    </label>
+    <label>6 个月价格（USDT）
+      <input type="text" name="price_6m" value="{{ payment_settings['price_6m'] }}" required>
+    </label>
+    <label>12 个月价格（USDT）
+      <input type="text" name="price_12m" value="{{ payment_settings['price_12m'] }}" required>
+    </label>
+    <button type="submit">保存支付设置</button>
+  </form>
+</section>
+{% endblock %}

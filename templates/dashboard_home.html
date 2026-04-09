@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard-main">
+  <section class="card">
+    <h2>用户首页</h2>
+    <p><strong>账号：</strong>{{ user["username"] }}</p>
+    <p><strong>分配 IP：</strong>{{ user["assigned_ip"] or "暂未分配" }}</p>
+    <p>
+      <strong>订阅状态：</strong>
+      {% if active %}
+        <span class="tag tag-ok">已生效</span>
+      {% else %}
+        <span class="tag tag-warn">未生效 / 已过期</span>
+      {% endif %}
+    </p>
+    <p><strong>有效期至：</strong>{{ user["subscription_expires_at"]|fmt_utc }}</p>
+
+    <div class="stats-grid">
+      <div class="stat-item">
+        <span class="stat-label">已用总流量</span>
+        <strong class="stat-value">{{ traffic_stats["total_human"] }}</strong>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">下载流量</span>
+        <strong class="stat-value">{{ traffic_stats["rx_human"] }}</strong>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">上传流量</span>
+        <strong class="stat-value">{{ traffic_stats["tx_human"] }}</strong>
+      </div>
+    </div>
+
+    {% if active %}
+      <div class="actions">
+        <a class="btn" href="{{ url_for('download_config') }}">下载 WireGuard 配置</a>
+        <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">客户端下载</a>
+      </div>
+      <p class="helper">已关闭配置二维码下载，请使用 `.conf` 配置文件导入 WireGuard 客户端。</p>
+    {% else %}
+      <div class="actions">
+        <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">客户端下载</a>
+      </div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>已支付订单（{{ paid_orders|length }}）</h2>
+  {% if paid_orders %}
+    <table>
+      <thead>
+        <tr>
+          <th>订单号</th>
+          <th>用户</th>
+          <th>套餐</th>
+          <th>金额</th>
+          <th>网络</th>
+          <th>TxHash</th>
+          <th>支付时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in paid_orders %}
+          <tr>
+            <td>{{ o["id"] }}</td>
+            <td>{{ o["username"] }}</td>
+            <td>{{ o["plan_months"] }} 个月</td>
+            <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+            <td>{{ o["usdt_network"] }}</td>
+            <td>
+              {% if o["tx_hash"] %}
+                <a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>{{ o["paid_at"]|fmt_utc }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无已支付订单。</p>
+  {% endif %}
+</section>
+{% endblock %}

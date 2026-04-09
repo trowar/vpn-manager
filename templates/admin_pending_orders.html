@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>待处理订单（{{ pending_orders|length }}）</h2>
+  {% if pending_orders %}
+    <table>
+      <thead>
+        <tr>
+          <th>订单号</th>
+          <th>用户</th>
+          <th>套餐</th>
+          <th>金额</th>
+          <th>网络</th>
+          <th>收款地址</th>
+          <th>TxHash</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in pending_orders %}
+          <tr>
+            <td>{{ o["id"] }}</td>
+            <td>{{ o["username"] }}</td>
+            <td>{{ o["plan_months"] }} 个月</td>
+            <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+            <td>{{ o["usdt_network"] }}</td>
+            <td><code>{{ o["pay_to_address"] }}</code></td>
+            <td>
+              {% if o["tx_hash"] %}
+                <a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a>
+              {% else %}
+                <span class="tag tag-warn">未提交</span>
+              {% endif %}
+            </td>
+            <td>
+              <form method="post" action="{{ url_for('admin_mark_order_paid', order_id=o['id']) }}" class="inline-form">
+                <button type="submit">确认已支付</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无待处理订单。</p>
+  {% endif %}
+</section>
+{% endblock %}
