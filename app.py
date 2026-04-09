@@ -1751,9 +1751,8 @@ def load_admin_paid_orders(db: sqlite3.Connection):
     ).fetchall()
 
 
-def load_admin_subscriptions(db: sqlite3.Connection):
-    return db.execute(
-        """
+def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
+    base_sql = """
         SELECT
             id,
             username,
@@ -1763,9 +1762,14 @@ def load_admin_subscriptions(db: sqlite3.Connection):
             wg_enabled
         FROM users
         WHERE role = 'user'
-        ORDER BY subscription_expires_at DESC, id DESC
-        """
-    ).fetchall()
+    """
+    params = []
+    normalized_query = (email_query or "").strip()
+    if normalized_query:
+        base_sql += " AND email LIKE ? COLLATE NOCASE"
+        params.append(f"%{normalized_query}%")
+    base_sql += " ORDER BY subscription_expires_at DESC, id DESC"
+    return db.execute(base_sql, params).fetchall()
 
 
 @app.route("/admin/home")
@@ -1848,13 +1852,22 @@ def admin_paid_orders():
 def admin_subscriptions():
     db = get_db()
     reconcile_expired_subscriptions(db)
-    subscriptions = load_admin_subscriptions(db)
+    search_email = request.args.get("q", "").strip()
+    subscriptions = load_admin_subscriptions(db, search_email)
     return render_template(
         "admin_subscriptions.html",
         subscriptions=subscriptions,
+        search_email=search_email,
         admin_ui_tz_name=ADMIN_UI_TZ_NAME,
         admin_page="subscriptions",
     )
+
+
+def redirect_admin_subscriptions():
+    search_email = request.values.get("q", "").strip()
+    if search_email:
+        return redirect(url_for("admin_subscriptions", q=search_email))
+    return redirect(url_for("admin_subscriptions"))
 
 
 @app.route("/admin/settings/payment", methods=["POST"])
@@ -1903,13 +1916,13 @@ def admin_set_user_expiry(user_id: int):
     expires_raw = request.form.get("expires_at_local", "").strip()
     if not expires_raw:
         flash("请选择到期时间。", "error")
-        return redirect(url_for("admin_subscriptions"))
+        return redirect_admin_subscriptions()
 
     try:
         expires_at_utc = parse_admin_local_datetime(expires_raw)
     except Exception:
         flash("到期时间格式无效。", "error")
-        return redirect(url_for("admin_subscriptions"))
+        return redirect_admin_subscriptions()
 
     expires_iso = expires_at_utc.isoformat()
     db = get_db()
@@ -1924,7 +1937,7 @@ def admin_set_user_expiry(user_id: int):
     ).fetchone()
     if not user:
         flash("用户不存在。", "error")
-        return redirect(url_for("admin_subscriptions"))
+        return redirect_admin_subscriptions()
 
     try:
         if expires_at_utc >= utcnow():
@@ -1960,7 +1973,7 @@ def admin_set_user_expiry(user_id: int):
                 f"已设置用户 {user['username']} 的到期时间：{format_utc(expires_iso)}，VPN 已启用。",
                 "success",
             )
-            return redirect(url_for("admin_subscriptions"))
+            return redirect_admin_subscriptions()
 
         if user["client_public_key"]:
             remove_wireguard_peer(user["client_public_key"])
@@ -1996,7 +2009,7 @@ def admin_set_user_expiry(user_id: int):
         except Exception:
             pass
         flash(f"设置用户期限失败：{exc}", "error")
-    return redirect(url_for("admin_subscriptions"))
+    return redirect_admin_subscriptions()
 
 
 @app.route("/admin/users/<int:user_id>/delete", methods=["POST"])
@@ -2015,7 +2028,7 @@ def admin_delete_user(user_id: int):
     ).fetchone()
     if not user:
         flash("用户不存在。", "error")
-        return redirect(url_for("admin_subscriptions"))
+        return redirect_admin_subscriptions()
 
     try:
         if user["client_public_key"]:
@@ -2038,7 +2051,7 @@ def admin_delete_user(user_id: int):
         except Exception:
             pass
         flash(f"删除用户失败：{exc}", "error")
-    return redirect(url_for("admin_subscriptions"))
+    return redirect_admin_subscriptions()
 
 
 @app.route("/admin/users/<int:user_id>/disable", methods=["POST"])
@@ -2057,7 +2070,7 @@ def admin_disable_user(user_id: int):
     ).fetchone()
     if not user:
         flash("用户不存在。", "error")
-        return redirect(url_for("admin_subscriptions"))
+        return redirect_admin_subscriptions()
 
     try:
         if user["client_public_key"]:
@@ -2094,7 +2107,7 @@ def admin_disable_user(user_id: int):
         except Exception:
             pass
         flash(f"停用用户失败：{exc}", "error")
-    return redirect(url_for("admin_subscriptions"))
+    return redirect_admin_subscriptions()
 
 
 @app.route("/admin/orders/<int:order_id>/mark-paid", methods=["POST"])

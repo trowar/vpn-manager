@@ -220,6 +220,18 @@ table {
   border-collapse: collapse;
 }
 
+.subscriptions-table tbody tr:nth-child(odd) {
+  background: #fbfdff;
+}
+
+.subscriptions-table tbody tr:nth-child(even) {
+  background: #f4f8ff;
+}
+
+.subscriptions-table tbody tr:hover {
+  background: #eaf2ff;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--border);
@@ -232,6 +244,38 @@ td {
 .inline-form {
   display: inline-block;
   margin-right: 6px;
+}
+
+.admin-subscriptions-search {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+
+.admin-subscriptions-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-subscriptions-search-row input {
+  width: min(420px, 100%);
+}
+
+.subscription-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.subscription-actions .inline-form {
+  margin-right: 0;
+}
+
+.subscription-actions .expiry-form {
+  margin: 0;
 }
 
 .dashboard-shell {
@@ -534,6 +578,24 @@ code {
   td {
     font-size: 13px;
     padding: 8px 6px;
+  }
+
+  .subscriptions-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .subscription-actions {
+    align-items: stretch;
+  }
+
+  .subscription-actions .expiry-form {
+    width: 100%;
+  }
+
+  .admin-subscriptions-search-row input {
+    width: 100%;
   }
 
   .feature-grid {
