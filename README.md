@@ -1,4 +1,4 @@
-# VPN 门户系统（WireGuard + USDT）
+# vpn-manager（WireGuard + USDT）
 
 这是一个中文 VPN 门户项目，包含：
 
