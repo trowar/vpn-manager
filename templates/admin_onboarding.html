@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>初始化向导</h2>
+  <p class="helper">首次登录请完成基础配置：首个套餐、收款码、域名、Cloudflare 账号以及第一台 VPN 服务器部署。</p>
+
+  <form method="post" class="form">
+    <div class="section-title-row">
+      <h3>1. 首个套餐</h3>
+    </div>
+    <label>套餐名称
+      <input type="text" name="plan_name" value="{{ request.form.get('plan_name', first_plan['plan_name']) }}" required>
+    </label>
+    <label>计费模式
+      {% set selected_mode = request.form.get('plan_mode', save_mode or first_plan['billing_mode']) %}
+      <select name="plan_mode" id="onboarding-plan-mode" required>
+        <option value="duration" {% if selected_mode == 'duration' %}selected{% endif %}>按时长收费</option>
+        <option value="traffic" {% if selected_mode == 'traffic' %}selected{% endif %}>按流量收费</option>
+      </select>
+    </label>
+    <label id="onboarding-duration-row">时长（月）
+      <input type="number" name="plan_duration_months" min="1" step="1" value="{{ request.form.get('plan_duration_months', first_plan['duration_months']) }}">
+    </label>
+    <label id="onboarding-traffic-row" hidden>流量（GB）
+      <input type="number" name="plan_traffic_gb" min="1" step="1" value="{{ request.form.get('plan_traffic_gb', first_plan['traffic_gb']) }}">
+    </label>
+    <label>价格（USDT）
+      <input type="text" name="plan_price_usdt" value="{{ request.form.get('plan_price_usdt', first_plan['price_usdt']) }}" required>
+    </label>
+
+    <hr class="section-divider">
+    <div class="section-title-row">
+      <h3>2. 收款与域名</h3>
+    </div>
+    <label>收款网络
+      {% set selected_network = request.form.get('payment_network', payment_settings['usdt_default_network']) %}
+      <select name="payment_network" required>
+        {% for network in usdt_network_options %}
+          <option value="{{ network }}" {% if selected_network == network %}selected{% endif %}>{{ network }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>收款地址（用于生成收款二维码）
+      <input type="text" name="payment_address" value="{{ request.form.get('payment_address', payment_settings['usdt_receive_address']) }}" required>
+    </label>
+    <label>站点域名（例如：www.network000.com）
+      <input type="text" name="portal_domain" value="{{ request.form.get('portal_domain', settings['portal_domain']) }}" required>
+    </label>
+
+    <hr class="section-divider">
+    <div class="section-title-row">
+      <h3>3. Cloudflare</h3>
+    </div>
+    <label>Cloudflare 账号
+      <input type="text" name="cloudflare_account" value="{{ request.form.get('cloudflare_account', settings['cloudflare_account']) }}" required>
+    </label>
+    <label>Cloudflare 密码
+      <input type="password" name="cloudflare_password" value="{{ request.form.get('cloudflare_password', settings['cloudflare_password']) }}" required>
+    </label>
+
+    <hr class="section-divider">
+    <div class="section-title-row">
+      <h3>4. 第一台服务器（自动部署 VPN 服务端）</h3>
+    </div>
+    <label>服务器名称（可选）
+      <input type="text" name="server_name" value="{{ request.form.get('server_name', '') }}" placeholder="例如：香港节点1">
+    </label>
+    <label>服务器 IP/域名
+      <input type="text" name="server_host" value="{{ request.form.get('server_host', '') }}" placeholder="例如：193.134.209.54" required>
+    </label>
+    <label>SSH 端口
+      <input type="number" name="server_port" min="1" max="65535" value="{{ request.form.get('server_port', '22') }}" required>
+    </label>
+    <label>登录账号
+      <input type="text" name="server_username" value="{{ request.form.get('server_username', 'root') }}" required>
+    </label>
+    <label>登录密码
+      <input type="password" name="server_password" value="{{ request.form.get('server_password', '') }}" required>
+    </label>
+
+    <div class="actions">
+      <button type="submit" name="action" value="test_server" class="btn secondary">测试服务器连接</button>
+      <button type="submit" name="action" value="save_and_deploy">保存并部署服务端</button>
+    </div>
+  </form>
+</section>
+
+<script>
+  (function () {
+    var modeSelect = document.getElementById("onboarding-plan-mode");
+    var durationRow = document.getElementById("onboarding-duration-row");
+    var trafficRow = document.getElementById("onboarding-traffic-row");
+
+    function refreshMode() {
+      if (!modeSelect || !durationRow || !trafficRow) {
+        return;
+      }
+      var durationInput = durationRow.querySelector("input");
+      var trafficInput = trafficRow.querySelector("input");
+      if (modeSelect.value === "traffic") {
+        durationRow.hidden = true;
+        trafficRow.hidden = false;
+        if (durationInput) durationInput.removeAttribute("required");
+        if (trafficInput) trafficInput.setAttribute("required", "required");
+      } else {
+        durationRow.hidden = false;
+        trafficRow.hidden = true;
+        if (trafficInput) trafficInput.removeAttribute("required");
+        if (durationInput) durationInput.setAttribute("required", "required");
+      }
+    }
+
+    if (modeSelect) {
+      modeSelect.addEventListener("change", refreshMode);
+      refreshMode();
+    }
+  })();
+</script>
+{% endblock %}

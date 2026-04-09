@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import textwrap
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
@@ -15,6 +16,7 @@ from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+import paramiko
 from flask import (
     Flask,
     Response,
@@ -138,6 +140,23 @@ ADMIN_UI_TZ = timezone(timedelta(hours=8))
 ADMIN_UI_TZ_NAME = "北京时间 (UTC+8)"
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_INITIAL_PASSWORD = "admin"
+ONBOARDING_SETTING_PORTAL_DOMAIN = "portal_domain"
+ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT = "cloudflare_account"
+ONBOARDING_SETTING_CLOUDFLARE_PASSWORD = "cloudflare_password"
+ONBOARDING_SETTING_SETUP_COMPLETED = "setup_completed"
+ONBOARDING_SETTING_SETUP_COMPLETED_AT = "setup_completed_at"
+ONBOARDING_SETTING_LAST_SERVER_ID = "setup_last_server_id"
+ONBOARDING_SETTINGS_DEFAULTS = {
+    ONBOARDING_SETTING_PORTAL_DOMAIN: "",
+    ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT: "",
+    ONBOARDING_SETTING_CLOUDFLARE_PASSWORD: "",
+    ONBOARDING_SETTING_SETUP_COMPLETED: "0",
+    ONBOARDING_SETTING_SETUP_COMPLETED_AT: "",
+    ONBOARDING_SETTING_LAST_SERVER_ID: "",
+}
+SERVER_DEPLOY_DEFAULT_WG_PORT = 51820
+SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 1194
+SERVER_DEPLOY_DEFAULT_DNS_PORT = 53
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("PORTAL_SECRET_KEY", "change-this-secret")
@@ -441,10 +460,22 @@ def detect_openvpn_platform(user_agent: str) -> str:
 
 
 def get_openvpn_endpoint_host() -> str:
+    portal_domain = get_portal_domain_setting()
+    if portal_domain:
+        if portal_domain.startswith("["):
+            idx = portal_domain.find("]")
+            if idx > 1:
+                return portal_domain[1:idx]
+        if portal_domain.count(":") == 1:
+            host_part, port_part = portal_domain.rsplit(":", 1)
+            if host_part and port_part.isdigit():
+                return host_part
+        return portal_domain
+
     if OPENVPN_ENDPOINT_HOST:
         return OPENVPN_ENDPOINT_HOST
 
-    wg_endpoint = (WG_ENDPOINT or "").strip()
+    wg_endpoint = (get_wireguard_endpoint_for_clients() or "").strip()
     if not wg_endpoint:
         return "127.0.0.1"
     if wg_endpoint.startswith("["):
@@ -602,6 +633,132 @@ def upsert_app_setting(db: sqlite3.Connection, key: str, value: str) -> None:
         """,
         (key, value, utcnow_iso()),
     )
+
+
+def get_app_setting(db: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = db.execute(
+        """
+        SELECT setting_value
+        FROM app_settings
+        WHERE setting_key = ?
+        LIMIT 1
+        """,
+        (key,),
+    ).fetchone()
+    if not row:
+        return default
+    return (row["setting_value"] or "").strip() or default
+
+
+def load_named_settings(db: sqlite3.Connection, keys: tuple[str, ...]) -> dict[str, str]:
+    if not keys:
+        return {}
+    rows = db.execute(
+        """
+        SELECT setting_key, setting_value
+        FROM app_settings
+        WHERE setting_key IN ({})
+        """.format(",".join("?" for _ in keys)),
+        keys,
+    ).fetchall()
+    values = {key: "" for key in keys}
+    for row in rows:
+        values[row["setting_key"]] = (row["setting_value"] or "").strip()
+    return values
+
+
+def parse_bool_setting(raw: str | None, default: bool = False) -> bool:
+    value = (raw or "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def ensure_default_onboarding_settings(db: sqlite3.Connection) -> None:
+    existing = load_named_settings(db, tuple(ONBOARDING_SETTINGS_DEFAULTS.keys()))
+    for key, default_value in ONBOARDING_SETTINGS_DEFAULTS.items():
+        if key not in existing or existing.get(key, "") == "":
+            if key == ONBOARDING_SETTING_SETUP_COMPLETED:
+                # keep explicit boolean semantics
+                upsert_app_setting(db, key, existing.get(key, default_value) or default_value)
+            else:
+                upsert_app_setting(db, key, existing.get(key, default_value) or default_value)
+
+
+def load_onboarding_settings(db: sqlite3.Connection) -> dict[str, str | bool]:
+    values = load_named_settings(db, tuple(ONBOARDING_SETTINGS_DEFAULTS.keys()))
+    merged = {**ONBOARDING_SETTINGS_DEFAULTS, **values}
+    return {
+        "portal_domain": merged[ONBOARDING_SETTING_PORTAL_DOMAIN],
+        "cloudflare_account": merged[ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT],
+        "cloudflare_password": merged[ONBOARDING_SETTING_CLOUDFLARE_PASSWORD],
+        "setup_completed": parse_bool_setting(merged[ONBOARDING_SETTING_SETUP_COMPLETED], False),
+        "setup_completed_at": merged[ONBOARDING_SETTING_SETUP_COMPLETED_AT],
+        "last_server_id": merged[ONBOARDING_SETTING_LAST_SERVER_ID],
+    }
+
+
+def is_admin_onboarding_completed(db: sqlite3.Connection) -> bool:
+    raw_value = get_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED, "0")
+    return parse_bool_setting(raw_value, False)
+
+
+def parse_wg_endpoint_port() -> str:
+    raw = (WG_ENDPOINT or "").strip()
+    if not raw:
+        return str(SERVER_DEPLOY_DEFAULT_WG_PORT)
+    if raw.startswith("["):
+        idx = raw.find("]")
+        if idx > 0 and len(raw) > idx + 2 and raw[idx + 1] == ":":
+            tail = raw[idx + 2 :]
+            if tail.isdigit():
+                return tail
+    if raw.count(":") == 1:
+        _, port = raw.rsplit(":", 1)
+        if port.isdigit():
+            return port
+    return str(SERVER_DEPLOY_DEFAULT_WG_PORT)
+
+
+def normalize_domain_host(raw_domain: str | None) -> str:
+    value = (raw_domain or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
+    value = value.split("/", 1)[0].strip()
+    return value
+
+
+def get_portal_domain_setting() -> str:
+    try:
+        db = get_db()
+    except Exception:
+        return ""
+    return normalize_domain_host(
+        get_app_setting(db, ONBOARDING_SETTING_PORTAL_DOMAIN, "")
+    )
+
+
+def get_wireguard_endpoint_for_clients() -> str:
+    portal_domain = get_portal_domain_setting()
+    if not portal_domain:
+        return WG_ENDPOINT
+
+    if portal_domain.startswith("[") and "]" in portal_domain:
+        # IPv6 with optional port
+        idx = portal_domain.find("]")
+        if idx > 0 and len(portal_domain) > idx + 2 and portal_domain[idx + 1] == ":":
+            return portal_domain
+        return f"{portal_domain}:{parse_wg_endpoint_port()}"
+
+    if portal_domain.count(":") == 1:
+        host_part, port_part = portal_domain.rsplit(":", 1)
+        if host_part and port_part.isdigit():
+            return portal_domain
+
+    return f"{portal_domain}:{parse_wg_endpoint_port()}"
 
 
 def ensure_default_payment_settings(db: sqlite3.Connection) -> None:
@@ -860,6 +1017,307 @@ def usdt_explorer_link(network: str, tx_hash: str) -> str:
     return tpl.format(tx=tx_hash)
 
 
+def normalize_server_port(raw: str | int | None, default: int = 22) -> int:
+    try:
+        port = int(raw or default)
+    except Exception:
+        port = default
+    if port <= 0 or port > 65535:
+        return default
+    return port
+
+
+def normalize_remote_host(raw: str | None) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
+    value = value.split("/", 1)[0].strip()
+    return value
+
+
+def mask_secret(raw: str, visible: int = 2) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if len(value) <= visible:
+        return "*" * len(value)
+    return "*" * max(0, len(value) - visible) + value[-visible:]
+
+
+def summarize_text(raw: str, limit: int = 600) -> str:
+    text = (raw or "").strip()
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
+
+
+def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
+    rows = db.execute(
+        """
+        SELECT
+            id,
+            server_name,
+            host,
+            port,
+            username,
+            password,
+            domain,
+            vpn_api_token,
+            wg_port,
+            openvpn_port,
+            dns_port,
+            status,
+            last_test_at,
+            last_test_ok,
+            last_test_message,
+            last_deploy_at,
+            last_deploy_ok,
+            last_deploy_message,
+            created_at,
+            updated_at
+        FROM vpn_servers
+        ORDER BY id DESC
+        """
+    ).fetchall()
+
+    servers: list[dict] = []
+    for row in rows:
+        status = (row["status"] or "").strip() or "pending"
+        servers.append(
+            {
+                "id": row["id"],
+                "server_name": (row["server_name"] or "").strip() or (row["host"] or "").strip(),
+                "host": (row["host"] or "").strip(),
+                "port": normalize_server_port(row["port"], 22),
+                "username": (row["username"] or "").strip(),
+                "password_masked": mask_secret(row["password"] or ""),
+                "domain": (row["domain"] or "").strip(),
+                "vpn_api_token_masked": mask_secret(row["vpn_api_token"] or "", visible=4),
+                "wg_port": normalize_server_port(row["wg_port"], SERVER_DEPLOY_DEFAULT_WG_PORT),
+                "openvpn_port": normalize_server_port(
+                    row["openvpn_port"], SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
+                ),
+                "dns_port": normalize_server_port(row["dns_port"], SERVER_DEPLOY_DEFAULT_DNS_PORT),
+                "status": status,
+                "last_test_at": row["last_test_at"],
+                "last_test_ok": int(row["last_test_ok"] or 0) == 1,
+                "last_test_message": summarize_text(row["last_test_message"] or "", 220),
+                "last_deploy_at": row["last_deploy_at"],
+                "last_deploy_ok": int(row["last_deploy_ok"] or 0) == 1,
+                "last_deploy_message": summarize_text(row["last_deploy_message"] or "", 280),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+    return servers
+
+
+def open_ssh_client(
+    host: str, port: int, username: str, password: str, *, timeout: int = 10
+) -> paramiko.SSHClient:
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        hostname=host,
+        port=port,
+        username=username,
+        password=password,
+        timeout=timeout,
+        auth_timeout=timeout,
+        banner_timeout=timeout,
+    )
+    return client
+
+
+def test_server_connectivity(
+    host: str, port: int, username: str, password: str
+) -> tuple[bool, str]:
+    safe_host = normalize_remote_host(host)
+    safe_port = normalize_server_port(port)
+    safe_username = (username or "").strip()
+    if not safe_host or not safe_username or not password:
+        return False, "服务器连接信息不完整。"
+
+    client: paramiko.SSHClient | None = None
+    try:
+        client = open_ssh_client(
+            safe_host,
+            safe_port,
+            safe_username,
+            password,
+            timeout=8,
+        )
+        stdin, stdout, stderr = client.exec_command(
+            "hostname && uname -srm", timeout=10
+        )
+        out = stdout.read().decode("utf-8", errors="ignore").strip()
+        err = stderr.read().decode("utf-8", errors="ignore").strip()
+        if err:
+            return False, f"连接成功，但命令执行异常：{summarize_text(err, 120)}"
+        return True, f"连接成功：{summarize_text(out, 120)}"
+    except Exception as exc:
+        return False, f"连接失败：{exc}"
+    finally:
+        if client:
+            client.close()
+
+
+def build_vpn_node_deploy_script(
+    *,
+    vpn_api_token: str,
+    wg_port: int,
+    openvpn_port: int,
+    dns_port: int,
+) -> str:
+    return textwrap.dedent(
+        f"""
+        #!/usr/bin/env bash
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+
+        log() {{ echo "[deploy] $1"; }}
+
+        if ! command -v git >/dev/null 2>&1; then
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates curl >/dev/null
+        fi
+
+        if ! command -v docker >/dev/null 2>&1; then
+          apt-get update -qq
+          apt-get install -y -qq docker.io >/dev/null
+        fi
+
+        if ! docker compose version >/dev/null 2>&1; then
+          apt-get update -qq
+          apt-get install -y -qq docker-compose-plugin >/dev/null || \
+          apt-get install -y -qq docker-compose-v2 >/dev/null || \
+          apt-get install -y -qq docker-compose >/dev/null
+        fi
+
+        if ! command -v wg >/dev/null 2>&1; then
+          apt-get update -qq
+          apt-get install -y -qq wireguard-tools >/dev/null
+        fi
+
+        systemctl enable --now docker >/dev/null 2>&1 || true
+
+        if [ ! -d /opt/vpn-node/.git ]; then
+          rm -rf /opt/vpn-node
+          git clone --depth 1 https://github.com/trowar/vpn-manager.git /opt/vpn-node >/dev/null 2>&1
+        else
+          git -C /opt/vpn-node fetch --depth 1 origin main >/dev/null 2>&1
+          git -C /opt/vpn-node checkout -f main >/dev/null 2>&1
+          git -C /opt/vpn-node pull --ff-only origin main >/dev/null 2>&1
+        fi
+
+        cd /opt/vpn-node
+        mkdir -p docker/vpn/wireguard docker/vpn/openvpn
+
+        if [ ! -f docker/vpn/wireguard/server_private.key ]; then
+          wg genkey > docker/vpn/wireguard/server_private.key
+          chmod 600 docker/vpn/wireguard/server_private.key
+        fi
+
+        if [ ! -f docker/vpn/wireguard/server_public.key ]; then
+          cat docker/vpn/wireguard/server_private.key | wg pubkey > docker/vpn/wireguard/server_public.key
+          chmod 600 docker/vpn/wireguard/server_public.key
+        fi
+
+        if [ ! -f docker/vpn/wireguard/wg0.conf ]; then
+          UPLINK_IF=$(ip route | awk '/default/ {{print $5; exit}}')
+          if [ -z "$UPLINK_IF" ]; then
+            UPLINK_IF=eth0
+          fi
+          WG_PRIV=$(cat docker/vpn/wireguard/server_private.key)
+          cat > docker/vpn/wireguard/wg0.conf <<EOF
+[Interface]
+Address = 10.7.0.1/24
+ListenPort = {wg_port}
+PrivateKey = $WG_PRIV
+SaveConfig = true
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $UPLINK_IF -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $UPLINK_IF -j MASQUERADE
+EOF
+          chmod 600 docker/vpn/wireguard/wg0.conf
+        fi
+
+        if [ ! -f docker/vpn/openvpn/server.conf ] && [ -f docker/vpn/openvpn/server.conf.example ]; then
+          cp docker/vpn/openvpn/server.conf.example docker/vpn/openvpn/server.conf
+        fi
+
+        cat > .env <<EOF
+VPN_API_TOKEN={vpn_api_token}
+WG_INTERFACE=wg0
+WG_PUBLIC_PORT={wg_port}
+OPENVPN_PUBLIC_PORT={openvpn_port}
+DNS_PUBLIC_PORT={dns_port}
+VPN_ENABLE_WIREGUARD=1
+VPN_ENABLE_DNSMASQ=1
+VPN_ENABLE_OPENVPN=0
+EOF
+
+        docker compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpn >/dev/null
+        docker compose -f docker-compose.vpn-node.yml --env-file .env ps
+        log "completed"
+        """
+    ).strip() + "\n"
+
+
+def deploy_vpn_node_server(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    wg_port: int,
+    openvpn_port: int,
+    dns_port: int,
+    vpn_api_token: str | None = None,
+) -> tuple[bool, str, str]:
+    safe_token = (vpn_api_token or "").strip()
+    if not safe_token:
+        safe_token = hashlib.sha256(os.urandom(32)).hexdigest()[:48]
+
+    script = build_vpn_node_deploy_script(
+        vpn_api_token=safe_token,
+        wg_port=normalize_server_port(wg_port, SERVER_DEPLOY_DEFAULT_WG_PORT),
+        openvpn_port=normalize_server_port(
+            openvpn_port, SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
+        ),
+        dns_port=normalize_server_port(dns_port, SERVER_DEPLOY_DEFAULT_DNS_PORT),
+    )
+
+    client: paramiko.SSHClient | None = None
+    try:
+        client = open_ssh_client(
+            normalize_remote_host(host),
+            normalize_server_port(port, 22),
+            (username or "").strip(),
+            password,
+            timeout=12,
+        )
+        stdin, stdout, stderr = client.exec_command(
+            "bash -s",
+            get_pty=True,
+            timeout=2400,
+        )
+        stdin.write(script)
+        stdin.channel.shutdown_write()
+        out = stdout.read().decode("utf-8", errors="ignore")
+        err = stderr.read().decode("utf-8", errors="ignore")
+        code = stdout.channel.recv_exit_status()
+        merged = summarize_text((out + "\n" + err).strip(), 1200)
+        if code == 0:
+            return True, f"部署成功。{merged}", safe_token
+        return False, f"部署失败（exit={code}）。{merged}", safe_token
+    except Exception as exc:
+        return False, f"部署异常：{exc}", safe_token
+    finally:
+        if client:
+            client.close()
+
+
 def ensure_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CLIENT_CONF_DIR.mkdir(parents=True, exist_ok=True)
@@ -984,8 +1442,35 @@ def init_db() -> None:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vpn_servers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_name TEXT NOT NULL,
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL DEFAULT 22,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            domain TEXT,
+            vpn_api_token TEXT,
+            wg_port INTEGER NOT NULL DEFAULT 51820,
+            openvpn_port INTEGER NOT NULL DEFAULT 1194,
+            dns_port INTEGER NOT NULL DEFAULT 53,
+            status TEXT NOT NULL DEFAULT 'pending',
+            last_test_at TEXT,
+            last_test_ok INTEGER NOT NULL DEFAULT 0,
+            last_test_message TEXT,
+            last_deploy_at TEXT,
+            last_deploy_ok INTEGER NOT NULL DEFAULT 0,
+            last_deploy_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     migrate_schema(db)
     ensure_default_payment_settings(db)
+    ensure_default_onboarding_settings(db)
     ensure_default_payment_methods(db)
     sync_legacy_payment_settings_with_default_method(db)
     ensure_default_subscription_plans(db)
@@ -1016,6 +1501,7 @@ def init_db() -> None:
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_payment_methods_active_sort ON payment_methods(is_active, sort_order, id)"
     )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_vpn_servers_host ON vpn_servers(host)")
     db.commit()
 
 
@@ -1126,6 +1612,84 @@ def migrate_schema(db: sqlite3.Connection) -> None:
     if "updated_at" not in payment_method_columns:
         db.execute("ALTER TABLE payment_methods ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
 
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vpn_servers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_name TEXT NOT NULL,
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL DEFAULT 22,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            domain TEXT,
+            vpn_api_token TEXT,
+            wg_port INTEGER NOT NULL DEFAULT 51820,
+            openvpn_port INTEGER NOT NULL DEFAULT 1194,
+            dns_port INTEGER NOT NULL DEFAULT 53,
+            status TEXT NOT NULL DEFAULT 'pending',
+            last_test_at TEXT,
+            last_test_ok INTEGER NOT NULL DEFAULT 0,
+            last_test_message TEXT,
+            last_deploy_at TEXT,
+            last_deploy_ok INTEGER NOT NULL DEFAULT 0,
+            last_deploy_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    vpn_server_columns = {
+        row["name"]: row
+        for row in db.execute("PRAGMA table_info(vpn_servers)").fetchall()
+    }
+    if "server_name" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN server_name TEXT NOT NULL DEFAULT ''")
+    if "host" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN host TEXT NOT NULL DEFAULT ''")
+    if "port" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN port INTEGER NOT NULL DEFAULT 22")
+    if "username" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN username TEXT NOT NULL DEFAULT 'root'")
+    if "password" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN password TEXT NOT NULL DEFAULT ''")
+    if "domain" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN domain TEXT")
+    if "vpn_api_token" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN vpn_api_token TEXT")
+    if "wg_port" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN wg_port INTEGER NOT NULL DEFAULT 51820")
+    if "openvpn_port" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN openvpn_port INTEGER NOT NULL DEFAULT 1194")
+    if "dns_port" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN dns_port INTEGER NOT NULL DEFAULT 53")
+    if "status" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+    if "last_test_at" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_test_at TEXT")
+    if "last_test_ok" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_test_ok INTEGER NOT NULL DEFAULT 0")
+    if "last_test_message" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_test_message TEXT")
+    if "last_deploy_at" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_at TEXT")
+    if "last_deploy_ok" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_ok INTEGER NOT NULL DEFAULT 0")
+    if "last_deploy_message" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_message TEXT")
+    if "created_at" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+    if "updated_at" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+
 
 def ensure_admin_user() -> None:
     admin_username = os.environ.get("ADMIN_USERNAME", DEFAULT_ADMIN_USERNAME)
@@ -1227,12 +1791,14 @@ def user_api_payload(user) -> dict:
 def inject_user():
     db = get_db()
     payment_settings = load_payment_settings(db)
+    onboarding_settings = load_onboarding_settings(db)
     return {
         "current_user": current_user(),
         "usdt_receive_address": payment_settings["usdt_receive_address"],
         "usdt_default_network": payment_settings["usdt_default_network"],
         "usdt_network_options": USDT_NETWORK_OPTIONS,
         "openvpn_enabled": OPENVPN_ENABLED,
+        "admin_setup_completed": onboarding_settings["setup_completed"],
     }
 
 
@@ -1276,6 +1842,41 @@ def enforce_admin_password_change():
 
     flash("首次登录请先修改管理员密码。", "error")
     return redirect(url_for("admin_change_password"))
+
+
+@app.before_request
+def enforce_admin_onboarding():
+    endpoint = request.endpoint or ""
+    if endpoint == "static":
+        return None
+
+    user = current_user()
+    if not user or row_get(user, "role") != "admin":
+        return None
+    if admin_must_change_password(user):
+        return None
+    if is_admin_onboarding_completed(get_db()):
+        return None
+
+    allowed_endpoints = {
+        "logout",
+        "admin_change_password",
+        "admin_onboarding",
+        "admin_test_server_connection",
+        "static",
+    }
+    if endpoint in allowed_endpoints:
+        return None
+
+    if request.path.startswith("/api/"):
+        return {
+            "ok": False,
+            "error": "admin_onboarding_required",
+            "redirect": url_for("admin_onboarding"),
+        }, 403
+
+    flash("首次登录请先完成初始化向导。", "error")
+    return redirect(url_for("admin_onboarding"))
 
 
 def login_required(view):
@@ -1556,7 +2157,7 @@ def build_client_config(
             f"PublicKey = {server_public_key}",
             f"PresharedKey = {client_psk}",
             f"AllowedIPs = {resolved_allowed_ips}",
-            f"Endpoint = {WG_ENDPOINT}",
+            f"Endpoint = {get_wireguard_endpoint_for_clients()}",
             f"PersistentKeepalive = {WG_CLIENT_KEEPALIVE}",
             "",
         ]
@@ -2674,6 +3275,684 @@ def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
         params.append(f"%{normalized_query}%")
     base_sql += " ORDER BY subscription_expires_at DESC, id DESC"
     return db.execute(base_sql, params).fetchall()
+
+
+def load_first_plan_for_onboarding(db: sqlite3.Connection) -> dict:
+    plan = db.execute(
+        """
+        SELECT id, plan_name, billing_mode, duration_months, traffic_gb, price_usdt, sort_order
+        FROM subscription_plans
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not plan:
+        return {
+            "plan_name": "月付 1个月",
+            "billing_mode": PLAN_MODE_DURATION,
+            "duration_months": 1,
+            "traffic_gb": 0,
+            "price_usdt": "10.00",
+            "sort_order": 10,
+        }
+    mode = normalize_plan_mode(plan["billing_mode"])
+    return {
+        "plan_name": (plan["plan_name"] or "").strip() or "基础套餐",
+        "billing_mode": mode,
+        "duration_months": max(1, to_non_negative_int(plan["duration_months"]) or 1),
+        "traffic_gb": max(1, to_non_negative_int(plan["traffic_gb"]) or 1),
+        "price_usdt": format_usdt(plan["price_usdt"]),
+        "sort_order": to_non_negative_int(plan["sort_order"]),
+    }
+
+
+def upsert_first_plan_from_onboarding(
+    db: sqlite3.Connection,
+    *,
+    plan_name: str,
+    billing_mode: str,
+    duration_months: int | None,
+    traffic_gb: int | None,
+    price_usdt: Decimal,
+    sort_order: int = 10,
+) -> None:
+    existing = db.execute(
+        """
+        SELECT id
+        FROM subscription_plans
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    now_iso = utcnow_iso()
+    normalized_mode = normalize_plan_mode(billing_mode)
+
+    if existing:
+        db.execute(
+            """
+            UPDATE subscription_plans
+            SET plan_name = ?,
+                billing_mode = ?,
+                duration_months = ?,
+                traffic_gb = ?,
+                price_usdt = ?,
+                is_active = 1,
+                sort_order = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                plan_name,
+                normalized_mode,
+                duration_months if normalized_mode == PLAN_MODE_DURATION else None,
+                traffic_gb if normalized_mode == PLAN_MODE_TRAFFIC else None,
+                format_usdt(price_usdt),
+                sort_order,
+                now_iso,
+                existing["id"],
+            ),
+        )
+        return
+
+    db.execute(
+        """
+        INSERT INTO subscription_plans (
+            plan_name,
+            billing_mode,
+            duration_months,
+            traffic_gb,
+            price_usdt,
+            is_active,
+            sort_order,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+        """,
+        (
+            plan_name,
+            normalized_mode,
+            duration_months if normalized_mode == PLAN_MODE_DURATION else None,
+            traffic_gb if normalized_mode == PLAN_MODE_TRAFFIC else None,
+            format_usdt(price_usdt),
+            sort_order,
+            now_iso,
+            now_iso,
+        ),
+    )
+
+
+def upsert_primary_payment_method_from_onboarding(
+    db: sqlite3.Connection,
+    *,
+    network: str,
+    receive_address: str,
+) -> None:
+    existing = db.execute(
+        """
+        SELECT id
+        FROM payment_methods
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    now_iso = utcnow_iso()
+    method_name = f"USDT {network}"
+    if existing:
+        db.execute(
+            """
+            UPDATE payment_methods
+            SET method_code = 'usdt',
+                method_name = ?,
+                network = ?,
+                receive_address = ?,
+                is_active = 1,
+                sort_order = 10,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (method_name, network, receive_address, now_iso, existing["id"]),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO payment_methods (
+                method_code, method_name, network, receive_address,
+                is_active, sort_order, created_at, updated_at
+            )
+            VALUES ('usdt', ?, ?, ?, 1, 10, ?, ?)
+            """,
+            (method_name, network, receive_address, now_iso, now_iso),
+        )
+    sync_legacy_payment_settings_with_default_method(db)
+
+
+def create_server_record(
+    db: sqlite3.Connection,
+    *,
+    server_name: str,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    domain: str,
+    wg_port: int,
+    openvpn_port: int,
+    dns_port: int,
+    vpn_api_token: str,
+    status: str = "pending",
+) -> int:
+    now_iso = utcnow_iso()
+    cursor = db.execute(
+        """
+        INSERT INTO vpn_servers (
+            server_name, host, port, username, password, domain, vpn_api_token,
+            wg_port, openvpn_port, dns_port, status,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            server_name,
+            host,
+            port,
+            username,
+            password,
+            domain,
+            vpn_api_token,
+            wg_port,
+            openvpn_port,
+            dns_port,
+            status,
+            now_iso,
+            now_iso,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def update_server_test_result(
+    db: sqlite3.Connection,
+    server_id: int,
+    *,
+    ok: bool,
+    message: str,
+) -> None:
+    db.execute(
+        """
+        UPDATE vpn_servers
+        SET last_test_at = ?,
+            last_test_ok = ?,
+            last_test_message = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            utcnow_iso(),
+            1 if ok else 0,
+            summarize_text(message, 1200),
+            utcnow_iso(),
+            server_id,
+        ),
+    )
+
+
+def update_server_deploy_result(
+    db: sqlite3.Connection,
+    server_id: int,
+    *,
+    ok: bool,
+    message: str,
+    status: str,
+    vpn_api_token: str | None = None,
+) -> None:
+    params: list[object] = [
+        status,
+        utcnow_iso(),
+        1 if ok else 0,
+        summarize_text(message, 1200),
+        utcnow_iso(),
+        server_id,
+    ]
+    sql = """
+        UPDATE vpn_servers
+        SET status = ?,
+            last_deploy_at = ?,
+            last_deploy_ok = ?,
+            last_deploy_message = ?,
+            updated_at = ?
+    """
+    if vpn_api_token:
+        sql += ", vpn_api_token = ?"
+        params.insert(-1, vpn_api_token)
+    sql += " WHERE id = ?"
+    db.execute(sql, params)
+
+
+@app.route("/admin/onboarding", methods=["GET", "POST"])
+@login_required
+@admin_required
+def admin_onboarding():
+    db = get_db()
+    settings = load_onboarding_settings(db)
+    if settings["setup_completed"]:
+        flash("初始化已完成。", "success")
+        return redirect(url_for("admin_home"))
+
+    first_plan = load_first_plan_for_onboarding(db)
+    payment_settings = load_payment_settings(db)
+    save_mode = request.form.get("plan_mode", first_plan["billing_mode"]) if request.method == "POST" else first_plan["billing_mode"]
+
+    if request.method == "POST":
+        action = (request.form.get("action", "save_and_deploy") or "").strip().lower()
+        if action == "test_server":
+            host = request.form.get("server_host", "").strip()
+            port = normalize_server_port(request.form.get("server_port", "22"), 22)
+            username = request.form.get("server_username", "").strip()
+            password = request.form.get("server_password", "")
+            ok, message = test_server_connectivity(host, port, username, password)
+            flash(message, "success" if ok else "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=save_mode,
+                admin_page="onboarding",
+            )
+
+        plan_name = request.form.get("plan_name", "").strip()
+        plan_mode = normalize_plan_mode(request.form.get("plan_mode", PLAN_MODE_DURATION))
+        plan_price_raw = request.form.get("plan_price_usdt", "").strip()
+        plan_duration_raw = request.form.get("plan_duration_months", "").strip()
+        plan_traffic_raw = request.form.get("plan_traffic_gb", "").strip()
+
+        payment_network = request.form.get("payment_network", "TRC20").strip().upper()
+        payment_address = request.form.get("payment_address", "").strip()
+
+        portal_domain = normalize_domain_host(request.form.get("portal_domain", ""))
+        cloudflare_account = request.form.get("cloudflare_account", "").strip()
+        cloudflare_password = request.form.get("cloudflare_password", "").strip()
+
+        server_name = request.form.get("server_name", "").strip()
+        server_host = normalize_remote_host(request.form.get("server_host", ""))
+        server_port = normalize_server_port(request.form.get("server_port", "22"), 22)
+        server_username = request.form.get("server_username", "").strip()
+        server_password = request.form.get("server_password", "")
+
+        if not plan_name:
+            flash("请填写第一个套餐名称。", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+        try:
+            plan_price = parse_usdt_amount_strict(plan_price_raw)
+        except Exception:
+            flash("套餐价格格式无效。", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+
+        if plan_mode == PLAN_MODE_DURATION:
+            try:
+                plan_duration = parse_positive_int(plan_duration_raw)
+            except Exception:
+                flash("按时长套餐请填写大于 0 的月数。", "error")
+                return render_template(
+                    "admin_onboarding.html",
+                    settings=settings,
+                    first_plan=first_plan,
+                    payment_settings=payment_settings,
+                    save_mode=plan_mode,
+                    admin_page="onboarding",
+                )
+            plan_traffic = None
+        else:
+            try:
+                plan_traffic = parse_positive_int(plan_traffic_raw)
+            except Exception:
+                flash("按流量套餐请填写大于 0 的流量（GB）。", "error")
+                return render_template(
+                    "admin_onboarding.html",
+                    settings=settings,
+                    first_plan=first_plan,
+                    payment_settings=payment_settings,
+                    save_mode=plan_mode,
+                    admin_page="onboarding",
+                )
+            plan_duration = None
+
+        if payment_network not in USDT_NETWORK_OPTIONS:
+            flash("收款网络无效。", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+        if not payment_address:
+            flash("请填写收款地址（用于收款二维码）。", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+        if not portal_domain:
+            flash("请填写站点域名。", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+        if not cloudflare_account or not cloudflare_password:
+            flash("请填写 Cloudflare 账号和密码。", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+
+        if not server_host or not server_username or not server_password:
+            flash("请填写服务器 IP/域名、账号、密码。", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+
+        ok, test_message = test_server_connectivity(
+            server_host,
+            server_port,
+            server_username,
+            server_password,
+        )
+        if not ok:
+            flash(f"服务器连通测试失败：{test_message}", "error")
+            return render_template(
+                "admin_onboarding.html",
+                settings=settings,
+                first_plan=first_plan,
+                payment_settings=payment_settings,
+                save_mode=plan_mode,
+                admin_page="onboarding",
+            )
+
+        upsert_primary_payment_method_from_onboarding(
+            db,
+            network=payment_network,
+            receive_address=payment_address,
+        )
+        upsert_first_plan_from_onboarding(
+            db,
+            plan_name=plan_name,
+            billing_mode=plan_mode,
+            duration_months=plan_duration,
+            traffic_gb=plan_traffic,
+            price_usdt=plan_price,
+            sort_order=10,
+        )
+        upsert_app_setting(db, ONBOARDING_SETTING_PORTAL_DOMAIN, portal_domain)
+        upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT, cloudflare_account)
+        upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_PASSWORD, cloudflare_password)
+
+        if not server_name:
+            server_name = server_host
+        deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
+        server_id = create_server_record(
+            db,
+            server_name=server_name,
+            host=server_host,
+            port=server_port,
+            username=server_username,
+            password=server_password,
+            domain=portal_domain,
+            wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+            openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+            dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+            vpn_api_token=deploy_token,
+            status="deploying",
+        )
+        update_server_test_result(
+            db,
+            server_id,
+            ok=True,
+            message=test_message,
+        )
+
+        deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+            host=server_host,
+            port=server_port,
+            username=server_username,
+            password=server_password,
+            wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+            openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+            dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+            vpn_api_token=deploy_token,
+        )
+        update_server_deploy_result(
+            db,
+            server_id,
+            ok=deploy_ok,
+            message=deploy_message,
+            status="online" if deploy_ok else "deploy_failed",
+            vpn_api_token=final_token,
+        )
+        if deploy_ok:
+            upsert_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED, "1")
+            upsert_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED_AT, utcnow_iso())
+            upsert_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, str(server_id))
+            db.commit()
+            flash("初始化完成，VPN 服务端部署成功。", "success")
+            return redirect(url_for("admin_home"))
+
+        db.commit()
+        flash(f"初始化信息已保存，但服务端部署失败：{deploy_message}", "error")
+        return render_template(
+            "admin_onboarding.html",
+            settings=load_onboarding_settings(db),
+            first_plan=load_first_plan_for_onboarding(db),
+            payment_settings=load_payment_settings(db),
+            save_mode=plan_mode,
+            admin_page="onboarding",
+        )
+
+    return render_template(
+        "admin_onboarding.html",
+        settings=settings,
+        first_plan=first_plan,
+        payment_settings=payment_settings,
+        save_mode=first_plan["billing_mode"],
+        admin_page="onboarding",
+    )
+
+
+@app.route("/admin/servers")
+@login_required
+@admin_required
+def admin_servers():
+    db = get_db()
+    servers = load_admin_servers(db)
+    onboarding_settings = load_onboarding_settings(db)
+    return render_template(
+        "admin_servers.html",
+        servers=servers,
+        onboarding_settings=onboarding_settings,
+        admin_page="servers",
+    )
+
+
+@app.route("/admin/servers/test", methods=["POST"])
+@login_required
+@admin_required
+def admin_test_server_connection():
+    payload = request.get_json(silent=True) or request.form
+    host = normalize_remote_host(payload.get("host", ""))
+    port = normalize_server_port(payload.get("port", "22"), 22)
+    username = (payload.get("username", "") or "").strip()
+    password = payload.get("password", "") or ""
+
+    ok, message = test_server_connectivity(host, port, username, password)
+    status_code = 200 if ok else 400
+    return {"ok": ok, "message": message}, status_code
+
+
+@app.route("/admin/servers/create", methods=["POST"])
+@login_required
+@admin_required
+def admin_create_server():
+    db = get_db()
+    server_name = request.form.get("server_name", "").strip()
+    host = normalize_remote_host(request.form.get("host", ""))
+    port = normalize_server_port(request.form.get("port", "22"), 22)
+    username = (request.form.get("username", "") or "").strip()
+    password = request.form.get("password", "") or ""
+    domain = normalize_domain_host(request.form.get("domain", "")) or get_portal_domain_setting()
+    wg_port = normalize_server_port(
+        request.form.get("wg_port", str(SERVER_DEPLOY_DEFAULT_WG_PORT)),
+        SERVER_DEPLOY_DEFAULT_WG_PORT,
+    )
+    openvpn_port = normalize_server_port(
+        request.form.get("openvpn_port", str(SERVER_DEPLOY_DEFAULT_OPENVPN_PORT)),
+        SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+    )
+    dns_port = normalize_server_port(
+        request.form.get("dns_port", str(SERVER_DEPLOY_DEFAULT_DNS_PORT)),
+        SERVER_DEPLOY_DEFAULT_DNS_PORT,
+    )
+
+    if not host or not username or not password:
+        flash("请完整填写服务器地址、账号和密码。", "error")
+        return redirect(url_for("admin_servers"))
+
+    ok, test_message = test_server_connectivity(host, port, username, password)
+    if not ok:
+        flash(f"服务器连接测试失败：{test_message}", "error")
+        return redirect(url_for("admin_servers"))
+
+    if not server_name:
+        server_name = host
+    deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
+    server_id = create_server_record(
+        db,
+        server_name=server_name,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        domain=domain,
+        wg_port=wg_port,
+        openvpn_port=openvpn_port,
+        dns_port=dns_port,
+        vpn_api_token=deploy_token,
+        status="deploying",
+    )
+    update_server_test_result(db, server_id, ok=True, message=test_message)
+
+    deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        wg_port=wg_port,
+        openvpn_port=openvpn_port,
+        dns_port=dns_port,
+        vpn_api_token=deploy_token,
+    )
+    update_server_deploy_result(
+        db,
+        server_id,
+        ok=deploy_ok,
+        message=deploy_message,
+        status="online" if deploy_ok else "deploy_failed",
+        vpn_api_token=final_token,
+    )
+    db.commit()
+
+    if deploy_ok:
+        flash("服务器已保存并完成 VPN 服务部署。", "success")
+    else:
+        flash(f"服务器已保存，但部署失败：{deploy_message}", "error")
+    return redirect(url_for("admin_servers"))
+
+
+@app.route("/admin/servers/<int:server_id>/test", methods=["POST"])
+@login_required
+@admin_required
+def admin_test_saved_server(server_id: int):
+    db = get_db()
+    row = db.execute("SELECT * FROM vpn_servers WHERE id = ?", (server_id,)).fetchone()
+    if not row:
+        flash("服务器不存在。", "error")
+        return redirect(url_for("admin_servers"))
+    ok, message = test_server_connectivity(
+        row["host"],
+        normalize_server_port(row["port"], 22),
+        row["username"],
+        row["password"],
+    )
+    update_server_test_result(db, server_id, ok=ok, message=message)
+    db.commit()
+    flash(message, "success" if ok else "error")
+    return redirect(url_for("admin_servers"))
+
+
+@app.route("/admin/servers/<int:server_id>/deploy", methods=["POST"])
+@login_required
+@admin_required
+def admin_deploy_saved_server(server_id: int):
+    db = get_db()
+    row = db.execute("SELECT * FROM vpn_servers WHERE id = ?", (server_id,)).fetchone()
+    if not row:
+        flash("服务器不存在。", "error")
+        return redirect(url_for("admin_servers"))
+
+    deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+        host=row["host"],
+        port=normalize_server_port(row["port"], 22),
+        username=row["username"],
+        password=row["password"],
+        wg_port=normalize_server_port(row_get(row, "wg_port"), SERVER_DEPLOY_DEFAULT_WG_PORT),
+        openvpn_port=normalize_server_port(
+            row_get(row, "openvpn_port"), SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
+        ),
+        dns_port=normalize_server_port(row_get(row, "dns_port"), SERVER_DEPLOY_DEFAULT_DNS_PORT),
+        vpn_api_token=row_get(row, "vpn_api_token", ""),
+    )
+    update_server_deploy_result(
+        db,
+        server_id,
+        ok=deploy_ok,
+        message=deploy_message,
+        status="online" if deploy_ok else "deploy_failed",
+        vpn_api_token=final_token,
+    )
+    db.commit()
+    flash(deploy_message, "success" if deploy_ok else "error")
+    return redirect(url_for("admin_servers"))
 
 
 @app.route("/admin/home")

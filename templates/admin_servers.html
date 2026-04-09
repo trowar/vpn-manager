@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>服务器管理</h2>
+  <p class="helper">按行管理已接入服务器。新增服务器时可先测试 SSH 连通，再保存并自动部署 VPN 服务端。</p>
+
+  <div class="section-title-row">
+    <h3>服务器列表</h3>
+    <button type="button" id="open-server-modal">新增服务器</button>
+  </div>
+
+  {% if servers %}
+    <table class="subscriptions-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>名称</th>
+          <th>地址</th>
+          <th>账号</th>
+          <th>域名</th>
+          <th>状态</th>
+          <th>最近测试</th>
+          <th>最近部署</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in servers %}
+          <tr>
+            <td>{{ s["id"] }}</td>
+            <td>{{ s["server_name"] }}</td>
+            <td>
+              <div><strong>{{ s["host"] }}</strong>:{{ s["port"] }}</div>
+              <div class="helper">WG {{ s["wg_port"] }} / OVPN {{ s["openvpn_port"] }} / DNS {{ s["dns_port"] }}</div>
+            </td>
+            <td>
+              <div>{{ s["username"] }}</div>
+              <div class="helper">{{ s["password_masked"] }}</div>
+            </td>
+            <td>{{ s["domain"] or "-" }}</td>
+            <td>
+              {% if s["status"] == "online" %}
+                <span class="tag tag-ok">在线</span>
+              {% elif s["status"] == "deploy_failed" %}
+                <span class="tag tag-warn">部署失败</span>
+              {% elif s["status"] == "deploying" %}
+                <span class="tag tag-warn">部署中</span>
+              {% else %}
+                <span class="tag tag-warn">{{ s["status"] }}</span>
+              {% endif %}
+            </td>
+            <td>
+              <div>{{ s["last_test_at"]|fmt_utc }}</div>
+              <div class="helper">{{ s["last_test_message"] or "-" }}</div>
+            </td>
+            <td>
+              <div>{{ s["last_deploy_at"]|fmt_utc }}</div>
+              <div class="helper">{{ s["last_deploy_message"] or "-" }}</div>
+            </td>
+            <td>
+              <div class="subscription-actions">
+                <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
+                  <button type="submit" class="btn secondary">测试</button>
+                </form>
+                <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
+                  <button type="submit">部署</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无服务器，点击右上角“新增服务器”开始。</p>
+  {% endif %}
+</section>
+
+<div class="payment-modal" id="server-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>新增服务器</h4>
+      <button type="button" class="btn secondary modal-close-x" id="close-server-modal">×</button>
+    </div>
+
+    <form method="post" action="{{ url_for('admin_create_server') }}" class="form" id="server-create-form">
+      <label>服务器名称（可选）
+        <input type="text" name="server_name" id="server-name-input" placeholder="例如：香港节点1">
+      </label>
+      <label>服务器 IP/域名
+        <input type="text" name="host" id="server-host-input" placeholder="例如：193.134.209.54" required>
+      </label>
+      <label>SSH 端口
+        <input type="number" name="port" id="server-port-input" min="1" max="65535" value="22" required>
+      </label>
+      <label>登录账号
+        <input type="text" name="username" id="server-user-input" value="root" required>
+      </label>
+      <label>登录密码
+        <input type="password" name="password" id="server-pass-input" required>
+      </label>
+      <label>绑定域名（可选）
+        <input type="text" name="domain" id="server-domain-input" value="{{ onboarding_settings['portal_domain'] }}">
+      </label>
+      <label>WireGuard 端口
+        <input type="number" name="wg_port" min="1" max="65535" value="51820" required>
+      </label>
+      <label>OpenVPN 端口
+        <input type="number" name="openvpn_port" min="1" max="65535" value="1194" required>
+      </label>
+      <label>DNS 端口
+        <input type="number" name="dns_port" min="1" max="65535" value="53" required>
+      </label>
+
+      <div class="actions">
+        <button type="button" class="btn secondary" id="server-test-btn">测试连通</button>
+        <button type="submit">保存并部署</button>
+      </div>
+      <p class="helper" id="server-test-result">未测试</p>
+    </form>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var openBtn = document.getElementById("open-server-modal");
+    var closeBtn = document.getElementById("close-server-modal");
+    var modal = document.getElementById("server-modal");
+    var testBtn = document.getElementById("server-test-btn");
+    var resultNode = document.getElementById("server-test-result");
+
+    function openModal() {
+      if (!modal) return;
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal() {
+      if (!modal) return;
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    if (openBtn) openBtn.addEventListener("click", openModal);
+    if (closeBtn) closeBtn.addEventListener("click", closeModal);
+    if (modal) {
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) closeModal();
+      });
+    }
+
+    async function testServerConnection() {
+      if (!testBtn) return;
+      var host = document.getElementById("server-host-input");
+      var port = document.getElementById("server-port-input");
+      var username = document.getElementById("server-user-input");
+      var password = document.getElementById("server-pass-input");
+      if (!host || !port || !username || !password) return;
+
+      if (!host.value.trim() || !username.value.trim() || !password.value) {
+        if (resultNode) {
+          resultNode.textContent = "请先填写服务器地址、账号和密码。";
+          resultNode.style.color = "#b91c1c";
+        }
+        return;
+      }
+
+      testBtn.disabled = true;
+      testBtn.textContent = "测试中...";
+      if (resultNode) {
+        resultNode.textContent = "正在测试连接，请稍候...";
+        resultNode.style.color = "#5f6b7a";
+      }
+      try {
+        var response = await fetch("{{ url_for('admin_test_server_connection') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            host: host.value.trim(),
+            port: port.value.trim(),
+            username: username.value.trim(),
+            password: password.value
+          })
+        });
+        var data = await response.json();
+        if (resultNode) {
+          resultNode.textContent = data.message || (response.ok ? "连接成功" : "连接失败");
+          resultNode.style.color = response.ok ? "#065f46" : "#b91c1c";
+        }
+      } catch (err) {
+        if (resultNode) {
+          resultNode.textContent = "请求失败：" + err;
+          resultNode.style.color = "#b91c1c";
+        }
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = "测试连通";
+      }
+    }
+
+    if (testBtn) testBtn.addEventListener("click", testServerConnection);
+  })();
+</script>
+{% endblock %}

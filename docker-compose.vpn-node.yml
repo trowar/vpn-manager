@@ -1,0 +1,47 @@
+services:
+  vpn:
+    build:
+      context: .
+      dockerfile: docker/vpn/Dockerfile
+    container_name: vpn-core
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+    environment:
+      WG_INTERFACE: ${WG_INTERFACE:-wg0}
+      WG_SERVER_PUBLIC_KEY_FILE: /srv/vpn-shared/server_public.key
+      VPN_API_TOKEN: ${VPN_API_TOKEN}
+      VPN_API_PORT: 8081
+      VPN_ENABLE_WIREGUARD: ${VPN_ENABLE_WIREGUARD:-1}
+      VPN_ENABLE_OPENVPN: ${VPN_ENABLE_OPENVPN:-0}
+      VPN_ENABLE_DNSMASQ: ${VPN_ENABLE_DNSMASQ:-1}
+      OPENVPN_SERVER_CONF: /etc/openvpn/server/server.conf
+      DNSMASQ_CONF: /etc/dnsmasq.d/vpn.conf
+      PORTAL_DB_PATH: /app/data/portal.db
+    volumes:
+      - ./docker/vpn/wireguard:/etc/wireguard
+      - ./docker/vpn/openvpn:/etc/openvpn/server
+      - ./docker/vpn/dnsmasq.conf:/etc/dnsmasq.d/vpn.conf:ro
+      - portal_data:/app/data
+      - vpn_shared:/srv/vpn-shared
+    ports:
+      - "${WG_PUBLIC_PORT:-51820}:51820/udp"
+      - "${OPENVPN_PUBLIC_PORT:-1194}:1194/udp"
+      - "${DNS_PUBLIC_PORT:-53}:53/udp"
+      - "${DNS_PUBLIC_PORT:-53}:53/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 8s
+
+volumes:
+  portal_data:
+  vpn_shared:
