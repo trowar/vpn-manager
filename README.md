@@ -1,199 +1,139 @@
-# vpn-manager（WireGuard + OpenVPN + USDT）
+# vpn-manager（Docker 架构）
 
-这是一个中文 VPN 门户项目，包含：
+本项目已拆分为两个主要容器服务：
 
-- 用户注册/登录（邮箱即用户名）
-- 订单购买（1/3/6/12 个月）
-- USDT 收款（支持 Webhook 自动确认）
-- WireGuard 配置下发（`.conf` 文件下载）
-- OpenVPN 配置下发（`.ovpn` 文件下载）
-- 用户有效期、流量统计、管理员后台管理
+- `web`：中文管理后台 + 用户门户（Flask）
+- `vpn`：WireGuard + OpenVPN + dnsmasq + VPN API（同一个容器）
 
-## 功能概览
+其中 DNS 与 VPN 放在同一个 `vpn` 容器里，符合“Web 单独容器、VPN 作为独立服务、DNS 和 VPN 一起部署”的需求。
 
-- 用户侧
-  - 控制台首页：账号、IP、订阅状态、到期时间、流量统计
-  - 使用说明：安装/导入/连接指引
-  - 订单管理：创建订单、提交 TxHash、取消订单
-- 管理员侧（左侧分页导航）
-  - 首页：基础运营概览
-  - 套餐管理：收款地址、默认网络、套餐新增（按时长/按流量）、套餐启停
-  - 待处理订单：手动确认支付
-  - 已支付订单：历史订单查询
-  - 用户订阅：设置期限、停用用户、删除用户
-- 安全与控制
-  - 注册 IP 限速：同一 IP 5 分钟内仅允许成功注册 1 次
-  - 订阅到期自动停用 WireGuard peer
-  - 支持动态 IP 分配模式（可配置）
+## 架构说明
 
-## 重要说明
+- `web` 不再直接执行本地 `wg` 命令，而是通过 `VPN_API_URL` 调用 `vpn` 容器内 API。
+- `vpn` 容器负责：
+  - WireGuard 接口拉起与 peer 管理
+  - OpenVPN 服务（账号密码认证，读取同一套用户库）
+  - dnsmasq DNS 解析
+- 两个容器共享持久化卷：
+  - `portal_data`：数据库与用户配置
+  - `vpn_shared`：服务端公钥等共享文件
 
-- 当前已关闭“用户配置二维码下载”，统一使用配置文件导入客户端（WireGuard `.conf` / OpenVPN `.ovpn`）。
-- USDT 支付二维码仍保留（用于收款地址展示）。
+## 目录
 
-## 环境要求
+```text
+docker/
+  web/
+    Dockerfile
+  vpn/
+    Dockerfile
+    entrypoint.sh
+    vpn_api.py
+    dnsmasq.conf
+    wireguard/
+      wg0.conf.example
+    openvpn/
+      server.conf.example
+docker-compose.yml
+.env.docker.example
+```
 
-- Ubuntu 22.04/24.04（推荐）
-- Python 3.10+
-- WireGuard 工具：`wireguard wireguard-tools`
-- OpenVPN 服务端（如需启用 OpenVPN 下载）：`openvpn`
-- 其他依赖：`qrencode`
-- Web 服务：`gunicorn` + `nginx`（推荐）
+## 快速启动
 
-## 快速部署（Ubuntu）
-
-1. 安装系统依赖
+1. 复制环境变量文件
 
 ```bash
-apt update
-apt install -y python3 python3-venv python3-pip wireguard wireguard-tools qrencode nginx
+cp .env.docker.example .env
 ```
 
-2. 上传项目并安装 Python 依赖
+2. 准备 WireGuard 配置
 
 ```bash
-mkdir -p /opt/vpn-portal
-cd /opt/vpn-portal
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
+sudo apt update
+sudo apt install -y wireguard-tools
+
+wg genkey | tee docker/vpn/wireguard/server_private.key | wg pubkey > docker/vpn/wireguard/server_public.key
+cp docker/vpn/wireguard/wg0.conf.example docker/vpn/wireguard/wg0.conf
 ```
 
-3. 配置环境变量文件 `/etc/vpn-portal.env`
+把 `docker/vpn/wireguard/wg0.conf` 里的 `PrivateKey` 替换成 `server_private.key` 内容，并按需修改网段/端口。
+
+3. 准备 OpenVPN（可选）
 
 ```bash
-PORTAL_SECRET_KEY=请替换为随机字符串
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=请替换为强密码
-
-WG_INTERFACE=wg0
-WG_NETWORK=10.7.0.0/24
-WG_SERVER_ADDRESS=10.7.0.1
-WG_SERVER_PUBLIC_KEY_FILE=/etc/wireguard/server_public.key
-WG_ENDPOINT=你的公网IP或域名:51820
-WG_CLIENT_DNS=10.7.0.1
-WG_CLIENT_ALLOWED_IPS=0.0.0.0/0, ::/0
-WG_CLIENT_KEEPALIVE=25
-
-# static 或 dynamic（推荐 dynamic）
-WG_IP_ASSIGNMENT_MODE=dynamic
-
-# full 或 cn_local（cn_local=中国直连，境外走代理）
-WG_ROUTE_POLICY=cn_local
-WG_NON_CN_ROUTES_FILE=/opt/vpn-portal/data/non_cn_ipv4_routes.txt
-
-# OpenVPN（可选）
-OPENVPN_ENABLED=1
-OPENVPN_ENDPOINT_HOST=你的公网IP或域名
-OPENVPN_ENDPOINT_PORT=1194
-OPENVPN_PROTO=udp
-OPENVPN_CLIENT_DNS=10.7.0.1
-OPENVPN_CIPHER=AES-256-GCM
-OPENVPN_AUTH=SHA256
-OPENVPN_CA_CERT_FILE=/etc/openvpn/server/ca.crt
-OPENVPN_TLS_CRYPT_KEY_FILE=/etc/openvpn/server/tls-crypt.key
-
-PORTAL_DATA_DIR=/opt/vpn-portal/data
-PORTAL_DB_PATH=/opt/vpn-portal/data/portal.db
-PORTAL_CLIENT_CONF_DIR=/opt/vpn-portal/data/client-configs
-PORTAL_CLIENT_QR_DIR=/opt/vpn-portal/data/client-qr
-
-USDT_DEFAULT_NETWORK=TRC20
-USDT_RECEIVE_ADDRESS=你的USDT地址
-# 可选：仅用于首启时自动初始化默认套餐价格（已初始化后不再依赖）
-USDT_PRICE_1M=10
-USDT_PRICE_3M=27
-USDT_PRICE_6M=50
-USDT_PRICE_12M=90
-
-PAYMENT_WEBHOOK_SECRET=请替换为强随机密钥
-PAYMENT_MIN_CONFIRMATIONS=1
+cp docker/vpn/openvpn/server.conf.example docker/vpn/openvpn/server.conf
 ```
 
-4. 创建 systemd 服务 `/etc/systemd/system/vpn-portal.service`
+将以下文件放到 `docker/vpn/openvpn/`：
 
-```ini
-[Unit]
-Description=VPN Portal
-After=network-online.target wg-quick@wg0.service
-Wants=network-online.target
+- `ca.crt`
+- `server.crt`
+- `server.key`
+- `tls-crypt.key`
 
-[Service]
-Type=simple
-User=root
-Group=root
-WorkingDirectory=/opt/vpn-portal
-EnvironmentFile=/etc/vpn-portal.env
-ExecStart=/opt/vpn-portal/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8080 wsgi:app
-Restart=always
-RestartSec=3
+如果暂时不启用 OpenVPN，在 `.env` 中设置：
 
-[Install]
-WantedBy=multi-user.target
+```env
+VPN_ENABLE_OPENVPN=0
+OPENVPN_ENABLED=0
 ```
 
-启动服务：
+4. 启动服务
 
 ```bash
-systemctl daemon-reload
-systemctl enable vpn-portal
-systemctl restart vpn-portal
-systemctl status vpn-portal
+docker compose up -d --build
 ```
 
-5. 反向代理到 Nginx（443）
+5. 查看状态
 
-- 将 `www.network000.com` 代理到 `127.0.0.1:8080`
-- 开启 `80 -> 443` 跳转
-- 证书建议使用 `certbot` 自动续期
+```bash
+docker compose ps
+docker compose logs -f vpn
+docker compose logs -f web
+```
 
-## Webhook 接口
+## 关键环境变量
 
-- 地址：`POST /webhook/usdt`
-- 签名头：`X-Webhook-Signature`
-- 算法：`HMAC-SHA256(raw_body, PAYMENT_WEBHOOK_SECRET)`（十六进制）
+`.env` 中重点关注：
 
-支持字段示例：
+- `PORTAL_SECRET_KEY`：Web 密钥，必须修改
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD`：管理员账号（默认 `admin / admin`，首次登录会强制修改密码）
+- `VPN_API_TOKEN`：Web 与 VPN API 通讯令牌
+- `WG_ENDPOINT`：用户下载 WireGuard 配置里的公网入口（如 `www.network000.com:51820`）
+- `OPENVPN_ENDPOINT_HOST`：OpenVPN 客户端连接域名/IP
 
-- `order_id` 或 `merchant_order_id` 或 `metadata.order_id`
-- `tx_hash`
-- `amount`（可选）
-- `network`（可选）
-- `confirmations`（可选）
+开关项：
 
-## 用户端使用流程
+- `VPN_ENABLE_WIREGUARD`：`1/0`
+- `VPN_ENABLE_DNSMASQ`：`1/0`
+- `VPN_ENABLE_OPENVPN`：`1/0`
+- `OPENVPN_ENABLED`：Web 是否展示 OpenVPN 下载入口（`1/0`）
 
-1. 用户注册并登录
-2. 在“订单管理”选择套餐并创建订单（支持按时长或按流量）
-3. 完成链上转账，提交 TxHash（或由 Webhook 自动确认）
-4. 订阅生效后，在“首页”下载 WireGuard `.conf` 或 OpenVPN `.ovpn` 配置
-5. 导入对应客户端后连接使用
+## 端口
 
-## 管理端操作建议
+- Web：`${WEB_PUBLIC_PORT}` -> 容器 `8080`
+- WireGuard：`${WG_PUBLIC_PORT}/udp` -> 容器 `51820/udp`
+- OpenVPN：`${OPENVPN_PUBLIC_PORT}/udp` -> 容器 `1194/udp`
+- DNS：`${DNS_PUBLIC_PORT}` -> 容器 `53/tcp,53/udp`
 
-- 日常：处理“待处理订单”、维护支付参数
-- 风险控制：使用“停用用户”可立即断开
-- 清理：使用“删除用户”会删除用户及关联订单/配置数据
+## 域名与 HTTPS（443）
+
+当前 Compose 保持两容器架构，不额外引入 Nginx 容器。  
+生产环境建议在宿主机用 Nginx/Caddy 反代到 `web`（如 `127.0.0.1:8080`），并配置：
+
+- `80 -> 443` 自动跳转
+- Let’s Encrypt 免费证书
+- 自动续期（`certbot renew` 定时任务）
+
+## OpenVPN 认证机制
+
+OpenVPN 使用 `scripts/openvpn_auth.py` 校验账号密码，读取 `portal.db` 用户数据。  
+用户在前台下载 `.ovpn` 后，可在 OpenVPN Connect 中通过“Upload File”导入配置使用。
 
 ## 常用运维命令
 
 ```bash
-systemctl restart vpn-portal
-systemctl status vpn-portal
-journalctl -u vpn-portal -n 200 --no-pager
+docker compose restart web
+docker compose restart vpn
+docker compose logs -f --tail=200 web
+docker compose logs -f --tail=200 vpn
 ```
-
-## 目录结构
-
-```text
-vpn-portal/
-├─ app.py
-├─ wsgi.py
-├─ requirements.txt
-├─ templates/
-└─ static/
-```
-
-## 许可证
-
-可按你的业务需求自行添加 License 文件。

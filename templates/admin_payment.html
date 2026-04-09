@@ -2,27 +2,10 @@
 {% block content %}
 <section class="card">
   <h2>套餐管理</h2>
-  <p class="helper">在这里维护 USDT 收款信息和可售套餐。套餐支持“按时长收费”和“按流量收费”。</p>
-
-  <h3>基础支付设置</h3>
-  <form method="post" action="{{ url_for('admin_update_payment_settings') }}" class="form">
-    <label>USDT 收款地址
-      <input type="text" name="usdt_receive_address" value="{{ payment_settings['usdt_receive_address'] }}" required>
-    </label>
-    <label>默认网络
-      <select name="usdt_default_network">
-        {% for network in usdt_network_options %}
-          <option value="{{ network }}" {% if payment_settings['usdt_default_network'] == network %}selected{% endif %}>{{ network }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <button type="submit">保存基础设置</button>
-  </form>
-
-  <hr class="section-divider">
+  <p class="helper">按行管理可售套餐，支持按时长收费与按流量收费。</p>
 
   <div class="section-title-row">
-    <h3>套餐列表（按行显示）</h3>
+    <h3>套餐列表</h3>
     <button type="button" id="open-plan-create-modal">新增套餐</button>
   </div>
 
@@ -57,13 +40,33 @@
             </td>
             <td>{{ plan["sort_order"] }}</td>
             <td>
-              <form method="post" action="{{ url_for('admin_toggle_plan', plan_id=plan['id']) }}" class="inline-form">
-                {% if plan["is_active"] == 1 %}
-                  <button type="submit">停用</button>
-                {% else %}
-                  <button type="submit">启用</button>
-                {% endif %}
-              </form>
+              <div class="subscription-actions">
+                <form method="post" action="{{ url_for('admin_toggle_plan', plan_id=plan['id']) }}" class="inline-form">
+                  {% if plan["is_active"] == 1 %}
+                    <button type="submit">停用</button>
+                  {% else %}
+                    <button type="submit">启用</button>
+                  {% endif %}
+                </form>
+                <button
+                  type="button"
+                  class="btn secondary open-plan-edit-modal"
+                  data-plan-id="{{ plan['id'] }}"
+                  data-plan-name="{{ plan['plan_name'] }}"
+                  data-billing-mode="{{ plan['billing_mode'] }}"
+                  data-duration-months="{{ plan['duration_months'] }}"
+                  data-traffic-gb="{{ plan['traffic_gb'] }}"
+                  data-price-usdt="{{ plan['price_usdt'] }}"
+                  data-sort-order="{{ plan['sort_order'] }}"
+                  data-update-url="{{ url_for('admin_update_plan', plan_id=plan['id']) }}"
+                >编辑</button>
+                <button
+                  type="button"
+                  class="danger open-plan-delete-modal"
+                  data-plan-name="{{ plan['plan_name'] }}"
+                  data-delete-url="{{ url_for('admin_delete_plan', plan_id=plan['id']) }}"
+                >删除</button>
+              </div>
             </td>
           </tr>
         {% endfor %}
@@ -108,16 +111,84 @@
   </div>
 </div>
 
+<div class="payment-modal" id="plan-edit-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>编辑套餐</h4>
+      <button type="button" class="btn secondary" id="close-plan-edit-modal">关闭</button>
+    </div>
+
+    <form method="post" id="plan-edit-form" class="form plan-create-form">
+      <label>套餐名称
+        <input type="text" name="plan_name" id="plan-edit-name" required>
+      </label>
+      <label>收费模式
+        <select name="billing_mode" id="plan-edit-billing-mode" required>
+          <option value="duration">按时长收费</option>
+          <option value="traffic">按流量收费</option>
+        </select>
+      </label>
+      <label id="plan-edit-duration-row">时长（月）
+        <input type="number" name="duration_months" id="plan-edit-duration-input" min="1" step="1">
+      </label>
+      <label id="plan-edit-traffic-row" hidden>流量（GB）
+        <input type="number" name="traffic_gb" id="plan-edit-traffic-input" min="1" step="1">
+      </label>
+      <label>价格（USDT）
+        <input type="text" name="price_usdt" id="plan-edit-price" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" id="plan-edit-sort" min="0" step="1" value="100">
+      </label>
+      <button type="submit">保存修改</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="plan-delete-modal" hidden>
+  <div class="payment-modal-card" style="max-width: 460px;">
+    <div class="section-title-row">
+      <h4>确认删除</h4>
+      <button type="button" class="btn secondary" id="close-plan-delete-modal">关闭</button>
+    </div>
+    <p id="plan-delete-message">确定删除这个套餐吗？删除后无法恢复。</p>
+    <form method="post" id="plan-delete-form" class="actions">
+      <button type="submit" class="danger">确认删除</button>
+      <button type="button" class="btn secondary" id="cancel-plan-delete-modal">取消</button>
+    </form>
+  </div>
+</div>
+
 <script>
   (function () {
-    var openBtn = document.getElementById("open-plan-create-modal");
-    var closeBtn = document.getElementById("close-plan-create-modal");
-    var modal = document.getElementById("plan-create-modal");
-    var modeSelect = document.getElementById("plan-billing-mode");
-    var durationRow = document.getElementById("plan-duration-row");
-    var trafficRow = document.getElementById("plan-traffic-row");
+    var createOpenBtn = document.getElementById("open-plan-create-modal");
+    var createCloseBtn = document.getElementById("close-plan-create-modal");
+    var createModal = document.getElementById("plan-create-modal");
+    var createModeSelect = document.getElementById("plan-billing-mode");
+    var createDurationRow = document.getElementById("plan-duration-row");
+    var createTrafficRow = document.getElementById("plan-traffic-row");
 
-    function openModal() {
+    var editButtons = document.querySelectorAll(".open-plan-edit-modal");
+    var editModal = document.getElementById("plan-edit-modal");
+    var editCloseBtn = document.getElementById("close-plan-edit-modal");
+    var editForm = document.getElementById("plan-edit-form");
+    var editNameInput = document.getElementById("plan-edit-name");
+    var editModeSelect = document.getElementById("plan-edit-billing-mode");
+    var editDurationRow = document.getElementById("plan-edit-duration-row");
+    var editTrafficRow = document.getElementById("plan-edit-traffic-row");
+    var editDurationInput = document.getElementById("plan-edit-duration-input");
+    var editTrafficInput = document.getElementById("plan-edit-traffic-input");
+    var editPriceInput = document.getElementById("plan-edit-price");
+    var editSortInput = document.getElementById("plan-edit-sort");
+
+    var deleteButtons = document.querySelectorAll(".open-plan-delete-modal");
+    var deleteModal = document.getElementById("plan-delete-modal");
+    var deleteCloseBtn = document.getElementById("close-plan-delete-modal");
+    var deleteCancelBtn = document.getElementById("cancel-plan-delete-modal");
+    var deleteForm = document.getElementById("plan-delete-form");
+    var deleteMessage = document.getElementById("plan-delete-message");
+
+    function openModal(modal) {
       if (!modal) {
         return;
       }
@@ -125,7 +196,7 @@
       document.body.classList.add("modal-open");
     }
 
-    function closeModal() {
+    function closeModal(modal) {
       if (!modal) {
         return;
       }
@@ -133,30 +204,24 @@
       document.body.classList.remove("modal-open");
     }
 
-    if (openBtn) {
-      openBtn.addEventListener("click", openModal);
-    }
-    if (closeBtn) {
-      closeBtn.addEventListener("click", closeModal);
-    }
-    if (modal) {
+    function bindOverlayClose(modal) {
+      if (!modal) {
+        return;
+      }
       modal.addEventListener("click", function (event) {
         if (event.target === modal) {
-          closeModal();
+          closeModal(modal);
         }
       });
     }
 
-    if (!modeSelect || !durationRow || !trafficRow) {
-      return;
-    }
-
-    var durationInput = durationRow.querySelector("input");
-    var trafficInput = trafficRow.querySelector("input");
-
-    function refreshModeFields() {
-      var mode = modeSelect.value;
-      if (mode === "traffic") {
+    function refreshModeFields(modeSelect, durationRow, trafficRow) {
+      if (!modeSelect || !durationRow || !trafficRow) {
+        return;
+      }
+      var durationInput = durationRow.querySelector("input");
+      var trafficInput = trafficRow.querySelector("input");
+      if (modeSelect.value === "traffic") {
         trafficRow.hidden = false;
         durationRow.hidden = true;
         if (durationInput) {
@@ -177,8 +242,98 @@
       }
     }
 
-    modeSelect.addEventListener("change", refreshModeFields);
-    refreshModeFields();
+    if (createOpenBtn) {
+      createOpenBtn.addEventListener("click", function () {
+        openModal(createModal);
+      });
+    }
+    if (createCloseBtn) {
+      createCloseBtn.addEventListener("click", function () {
+        closeModal(createModal);
+      });
+    }
+    bindOverlayClose(createModal);
+    if (createModeSelect) {
+      createModeSelect.addEventListener("change", function () {
+        refreshModeFields(createModeSelect, createDurationRow, createTrafficRow);
+      });
+      refreshModeFields(createModeSelect, createDurationRow, createTrafficRow);
+    }
+
+    if (editCloseBtn) {
+      editCloseBtn.addEventListener("click", function () {
+        closeModal(editModal);
+      });
+    }
+    bindOverlayClose(editModal);
+    if (editModeSelect) {
+      editModeSelect.addEventListener("change", function () {
+        refreshModeFields(editModeSelect, editDurationRow, editTrafficRow);
+      });
+    }
+
+    editButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!editForm) {
+          return;
+        }
+        editForm.action = btn.dataset.updateUrl || "";
+        if (editNameInput) {
+          editNameInput.value = btn.dataset.planName || "";
+        }
+        if (editModeSelect) {
+          editModeSelect.value = btn.dataset.billingMode || "duration";
+        }
+        if (editDurationInput) {
+          var durationValue = btn.dataset.durationMonths || "1";
+          if (!durationValue || durationValue === "0") {
+            durationValue = "1";
+          }
+          editDurationInput.value = durationValue;
+        }
+        if (editTrafficInput) {
+          var trafficValue = btn.dataset.trafficGb || "1";
+          if (!trafficValue || trafficValue === "0") {
+            trafficValue = "1";
+          }
+          editTrafficInput.value = trafficValue;
+        }
+        if (editPriceInput) {
+          editPriceInput.value = btn.dataset.priceUsdt || "";
+        }
+        if (editSortInput) {
+          editSortInput.value = btn.dataset.sortOrder || "100";
+        }
+
+        refreshModeFields(editModeSelect, editDurationRow, editTrafficRow);
+        openModal(editModal);
+      });
+    }
+
+    if (deleteCloseBtn) {
+      deleteCloseBtn.addEventListener("click", function () {
+        closeModal(deleteModal);
+      });
+    }
+    if (deleteCancelBtn) {
+      deleteCancelBtn.addEventListener("click", function () {
+        closeModal(deleteModal);
+      });
+    }
+    bindOverlayClose(deleteModal);
+
+    deleteButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var planName = btn.dataset.planName || "该套餐";
+        if (deleteMessage) {
+          deleteMessage.textContent = "确定删除套餐“" + planName + "”吗？删除后无法恢复。";
+        }
+        if (deleteForm) {
+          deleteForm.action = btn.dataset.deleteUrl || "";
+        }
+        openModal(deleteModal);
+      });
+    });
   })();
 </script>
 {% endblock %}

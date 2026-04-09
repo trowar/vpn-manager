@@ -376,10 +376,40 @@ td {
   margin-top: 10px;
 }
 
+.guide-image-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.guide-image-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fafcff;
+  padding: 10px;
+  margin: 0;
+}
+
+.guide-image-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.guide-image-card figcaption {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .stats-grid {
   margin: 10px 0 14px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
 }
 
@@ -467,6 +497,26 @@ td {
   align-items: center;
 }
 
+.purchase-plan-table th:first-child,
+.purchase-plan-table td:first-child {
+  width: 60px;
+  text-align: center;
+}
+
+.purchase-plan-row {
+  cursor: pointer;
+}
+
+.purchase-plan-row.active td {
+  background: #dbe8ff !important;
+}
+
+.purchase-plan-radio {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
 .purchase-month-row {
   display: flex;
   gap: 10px;
@@ -535,6 +585,19 @@ td {
   margin: 7px 0;
 }
 
+.modal-close-x {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  line-height: 1;
+  font-size: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .payment-qr-wrap {
   width: 220px;
   margin: 10px auto;
@@ -573,6 +636,18 @@ body.modal-open {
 
 .tx-form {
   margin-top: 8px;
+}
+
+.tx-form-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.order-tx-input {
+  min-width: 220px;
 }
 
 code {
@@ -648,6 +723,10 @@ code {
   }
 
   .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .guide-image-grid {
     grid-template-columns: 1fr;
   }
 

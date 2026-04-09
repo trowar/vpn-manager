@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>付款方式</h2>
+  <p class="helper">按行管理付款方式。当前下单与 Webhook 仅支持 USDT 网络。</p>
+
+  <div class="section-title-row">
+    <h3>付款方式列表（按行显示）</h3>
+    <button type="button" id="open-payment-method-modal">新增付款方式</button>
+  </div>
+
+  {% if payment_methods %}
+    <table class="subscriptions-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>名称</th>
+          <th>方式</th>
+          <th>网络</th>
+          <th>收款地址</th>
+          <th>状态</th>
+          <th>排序</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in payment_methods %}
+          <tr>
+            <td>{{ m["id"] }}</td>
+            <td>{{ m["method_name"] }}</td>
+            <td>{{ m["method_label"] }}</td>
+            <td>{{ m["network"] }}</td>
+            <td><code>{{ m["receive_address"] }}</code></td>
+            <td>
+              {% if m["is_active"] == 1 %}
+                <span class="tag tag-ok">启用中</span>
+              {% else %}
+                <span class="tag tag-warn">已停用</span>
+              {% endif %}
+            </td>
+            <td>{{ m["sort_order"] }}</td>
+            <td>
+              <form method="post" action="{{ url_for('admin_toggle_payment_method', method_id=m['id']) }}" class="inline-form">
+                {% if m["is_active"] == 1 %}
+                  <button type="submit">停用</button>
+                {% else %}
+                  <button type="submit">启用</button>
+                {% endif %}
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无付款方式，请先添加。</p>
+  {% endif %}
+</section>
+
+<div class="payment-modal" id="payment-method-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>新增付款方式</h4>
+      <button type="button" class="btn secondary" id="close-payment-method-modal">关闭</button>
+    </div>
+
+    <form method="post" action="{{ url_for('admin_create_payment_method') }}" class="form">
+      <label>付款方式
+        <select name="method_code" required>
+          <option value="usdt">USDT</option>
+        </select>
+      </label>
+      <label>显示名称
+        <input type="text" name="method_name" placeholder="例如：USDT 主钱包">
+      </label>
+      <label>网络
+        <select name="network" required>
+          {% for network in usdt_network_options %}
+            <option value="{{ network }}">{{ network }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>收款地址
+        <input type="text" name="receive_address" placeholder="请输入收款地址" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" min="0" step="1" value="100">
+      </label>
+      <button type="submit">添加付款方式</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var openBtn = document.getElementById("open-payment-method-modal");
+    var closeBtn = document.getElementById("close-payment-method-modal");
+    var modal = document.getElementById("payment-method-modal");
+
+    function openModal() {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal() {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    if (openBtn) {
+      openBtn.addEventListener("click", openModal);
+    }
+    if (closeBtn) {
+      closeBtn.addEventListener("click", closeModal);
+    }
+    if (modal) {
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) {
+          closeModal();
+        }
+      });
+    }
+  })();
+</script>
+{% endblock %}

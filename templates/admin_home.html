@@ -17,18 +17,18 @@
 <section class="card">
   <h3>运营概览</h3>
   <div class="stats-grid">
-    <div class="stat-item">
+    <a href="{{ url_for('admin_pending_orders') }}" class="stat-item" style="text-decoration:none;color:inherit;">
       <span class="stat-label">待处理订单</span>
       <strong class="stat-value">{{ pending_count }}</strong>
-    </div>
-    <div class="stat-item">
+    </a>
+    <a href="{{ url_for('admin_paid_orders') }}" class="stat-item" style="text-decoration:none;color:inherit;">
       <span class="stat-label">已支付订单</span>
       <strong class="stat-value">{{ paid_count }}</strong>
-    </div>
-    <div class="stat-item">
+    </a>
+    <a href="{{ url_for('admin_subscriptions') }}" class="stat-item" style="text-decoration:none;color:inherit;">
       <span class="stat-label">在线订阅</span>
       <strong class="stat-value">{{ active_subscriptions }}</strong>
-    </div>
+    </a>
   </div>
   <p class="helper">用户总数：{{ total_users }}</p>
 </section>

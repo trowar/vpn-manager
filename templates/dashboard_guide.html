@@ -6,7 +6,7 @@
     <ol class="guide-steps">
       <li>选择客户端类型：WireGuard 或 OpenVPN。</li>
       <li>进入“控制台首页”确认订阅状态为“已生效”。</li>
-      <li>下载对应配置文件：WireGuard 为 `.conf`，OpenVPN 为 `.ovpn`。</li>
+      <li>下载对应配置文件：WireGuard 与 OpenVPN 统一为“全局代理”模式（`.conf` / `.ovpn`）。</li>
       <li>在客户端中导入配置文件并连接。</li>
       <li>连接成功后即可使用。</li>
     </ol>
@@ -14,7 +14,7 @@
     <div class="feature-grid guide-grid">
       <div class="feature-item">
         <h4>WireGuard</h4>
-        <p>速度快、配置简单，推荐优先使用。</p>
+        <p>速度快、配置简单，统一使用全局代理；支持二维码导入。</p>
         <div class="actions">
           <a class="btn" href="{{ url_for('wireguard_download_auto') }}">一键下载 WireGuard 客户端</a>
           <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部 WireGuard 下载入口</a>
@@ -22,7 +22,24 @@
       </div>
       <div class="feature-item">
         <h4>OpenVPN</h4>
-        <p>兼容性广，适合需要 OpenVPN 生态的场景。</p>
+        <p>兼容性广，统一使用全局代理 `.ovpn` 配置。</p>
+        <ol class="guide-steps">
+          <li>打开 OpenVPN Connect 客户端。</li>
+          <li>如果显示 “Connect with Server URL or Cloud ID” 页面，点击下方 “Have a configuration file instead (.ovpn)?”。</li>
+          <li>点击 “Upload File”。</li>
+          <li>在文件选择框中定位到下载目录，选择 `ovpn-用户名-global.ovpn`。</li>
+          <li>点击“打开”，导入成功后点连接即可使用。</li>
+        </ol>
+        <div class="guide-image-grid">
+          <figure class="guide-image-card">
+            <img src="{{ url_for('static', filename='openvpn_import_step1.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤1：点击 Have a configuration file instead 和 Upload File">
+            <figcaption>步骤1：在 OpenVPN Connect 中点击 “Have a configuration file instead (.ovpn)?”，然后点 “Upload File”。</figcaption>
+          </figure>
+          <figure class="guide-image-card">
+            <img src="{{ url_for('static', filename='openvpn_import_step2.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤2：选择 ovpn 配置并打开">
+            <figcaption>步骤2：在下载目录选中 `ovpn-用户名-global.ovpn`，点击“打开”完成导入。</figcaption>
+          </figure>
+        </div>
         <div class="actions">
           <a class="btn" href="{{ url_for('openvpn_download_auto') }}">一键下载 OpenVPN 客户端</a>
           <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">全部 OpenVPN 下载入口</a>

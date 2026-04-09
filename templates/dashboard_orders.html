@@ -12,21 +12,45 @@
     {% else %}
       {% set default_plan = available_plans[0] %}
       <div class="purchase-layout">
-        <div class="purchase-month-row" id="purchase-plan-row">
-          {% for plan in available_plans %}
-            <button
-              type="button"
-              class="plan-option-btn {% if loop.first %}active{% endif %}"
-              data-plan-id="{{ plan['id'] }}"
-              data-plan-name="{{ plan['plan_name'] }}"
-              data-plan-mode="{{ plan['mode_label'] }}"
-              data-plan-value="{{ plan['value_label'] }}"
-              data-plan-display="{{ plan['display_name'] }}"
-              data-price="{{ plan['price_usdt'] }}"
-            >
-              {{ plan["display_name"] }}
-            </button>
-          {% endfor %}
+        <div>
+          <table class="subscriptions-table purchase-plan-table">
+            <thead>
+              <tr>
+                <th>选择</th>
+                <th>套餐名称</th>
+                <th>收费模式</th>
+                <th>套餐内容</th>
+                <th>价格</th>
+              </tr>
+            </thead>
+            <tbody id="purchase-plan-body">
+              {% for plan in available_plans %}
+                <tr
+                  class="purchase-plan-row {% if loop.first %}active{% endif %}"
+                  data-plan-id="{{ plan['id'] }}"
+                  data-plan-name="{{ plan['plan_name'] }}"
+                  data-plan-mode="{{ plan['mode_label'] }}"
+                  data-plan-value="{{ plan['value_label'] }}"
+                  data-plan-display="{{ plan['display_name'] }}"
+                  data-price="{{ plan['price_usdt'] }}"
+                >
+                  <td>
+                    <input
+                      type="radio"
+                      name="selected_plan"
+                      class="purchase-plan-radio"
+                      value="{{ plan['id'] }}"
+                      {% if loop.first %}checked{% endif %}
+                    >
+                  </td>
+                  <td>{{ plan["plan_name"] }}</td>
+                  <td>{{ plan["mode_label"] }}</td>
+                  <td>{{ plan["value_label"] }}</td>
+                  <td>{{ plan["price_usdt"] }} USDT</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
 
         <div class="purchase-summary">
@@ -43,7 +67,10 @@
 
       <div class="payment-modal" id="payment-modal" hidden>
         <div class="payment-modal-card">
-          <h4>支付信息</h4>
+          <div class="section-title-row">
+            <h4>支付信息</h4>
+            <button type="button" class="btn secondary modal-close-x" id="payment-modal-close" aria-label="close">x</button>
+          </div>
           <p>套餐：<strong><span id="modal-plan-name">{{ default_plan['display_name'] }}</span></strong></p>
           <p>计费模式：<strong><span id="modal-plan-mode">{{ default_plan['mode_label'] }}</span></strong></p>
           <p>套餐内容：<strong><span id="modal-plan-value">{{ default_plan['value_label'] }}</span></strong></p>
@@ -60,8 +87,6 @@
             <input type="hidden" name="plan_id" id="confirm-plan-id" value="{{ default_plan['id'] }}">
             <button type="submit" {% if pending_orders %}disabled{% endif %}>创建订单并继续</button>
           </form>
-
-          <button type="button" class="btn secondary" id="payment-modal-close">返回修改</button>
         </div>
       </div>
     {% endif %}
@@ -70,39 +95,51 @@
 
     <h4>待处理订单（{{ pending_orders|length }}）</h4>
     {% if pending_orders %}
-      {% for o in pending_orders %}
-        <div class="order-item">
-          <p><strong>订单号：</strong>{{ o["id"] }}</p>
-          <p><strong>套餐：</strong>{{ o|fmt_order_plan }}</p>
-          <p><strong>金额：</strong>{{ o["usdt_amount"]|fmt_usdt }} USDT</p>
-          <p><strong>网络：</strong>{{ o["usdt_network"] }}</p>
-          <p><strong>收款地址：</strong><code>{{ o["pay_to_address"] }}</code></p>
-          <div class="payment-qr-wrap payment-qr-wrap-inline">
-            <img src="{{ url_for('subscription_payment_qr') }}" alt="支付二维码" loading="lazy">
-          </div>
-
-          {% if o["tx_hash"] %}
-            <p><strong>TxHash：</strong><code>{{ o["tx_hash"] }}</code></p>
-            <p><a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">在区块浏览器查看</a></p>
-          {% else %}
-            <form method="post" action="{{ url_for('submit_usdt_tx_hash', order_id=o['id']) }}" class="form tx-form">
-              <label>支付完成后提交 TxHash
-                <input type="text" name="tx_hash" placeholder="请输入 TxHash" required>
-              </label>
-              <button type="submit">提交 TxHash</button>
-            </form>
-          {% endif %}
-
-          <form
-            method="post"
-            action="{{ url_for('cancel_subscription_order', order_id=o['id']) }}"
-            class="inline-form"
-            onsubmit="return confirm('确定要取消这个订单吗？取消后需要重新下单。');"
-          >
-            <button type="submit" class="danger">取消订单</button>
-          </form>
-        </div>
-      {% endfor %}
+      <table class="subscriptions-table">
+        <thead>
+          <tr>
+            <th>订单号</th>
+            <th>套餐</th>
+            <th>金额</th>
+            <th>网络</th>
+            <th>收款地址</th>
+            <th>TxHash</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for o in pending_orders %}
+            <tr>
+              <td>{{ o["id"] }}</td>
+              <td>{{ o|fmt_order_plan }}</td>
+              <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+              <td>{{ o["usdt_network"] }}</td>
+              <td><code>{{ o["pay_to_address"] }}</code></td>
+              <td>
+                {% if o["tx_hash"] %}
+                  <code>{{ o["tx_hash"] }}</code>
+                  <div><a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">区块浏览器</a></div>
+                {% else %}
+                  <form method="post" action="{{ url_for('submit_usdt_tx_hash', order_id=o['id']) }}" class="inline-form tx-form-inline">
+                    <input type="text" name="tx_hash" class="order-tx-input" placeholder="输入 TxHash" required>
+                    <button type="submit">提交</button>
+                  </form>
+                {% endif %}
+              </td>
+              <td>
+                <form
+                  method="post"
+                  action="{{ url_for('cancel_subscription_order', order_id=o['id']) }}"
+                  class="inline-form"
+                  onsubmit="return confirm('确定要取消这个订单吗？取消后需要重新下单。');"
+                >
+                  <button type="submit" class="danger">取消订单</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     {% else %}
       <p class="helper">暂无待处理订单。</p>
     {% endif %}
@@ -111,17 +148,34 @@
 
     <h4>已支付订单（{{ paid_orders|length }}）</h4>
     {% if paid_orders %}
-      {% for o in paid_orders %}
-        <div class="order-item">
-          <p><strong>订单号：</strong>{{ o["id"] }}</p>
-          <p><strong>套餐：</strong>{{ o|fmt_order_plan }}</p>
-          <p><strong>金额：</strong>{{ o["usdt_amount"]|fmt_usdt }} USDT</p>
-          <p><strong>支付时间：</strong>{{ o["paid_at"]|fmt_utc }}</p>
-          {% if o["tx_hash"] %}
-            <p><strong>TxHash：</strong><a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a></p>
-          {% endif %}
-        </div>
-      {% endfor %}
+      <table class="subscriptions-table">
+        <thead>
+          <tr>
+            <th>订单号</th>
+            <th>套餐</th>
+            <th>金额</th>
+            <th>支付时间</th>
+            <th>TxHash</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for o in paid_orders %}
+            <tr>
+              <td>{{ o["id"] }}</td>
+              <td>{{ o|fmt_order_plan }}</td>
+              <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+              <td>{{ o["paid_at"]|fmt_utc }}</td>
+              <td>
+                {% if o["tx_hash"] %}
+                  <a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     {% else %}
       <p class="helper">暂无已支付订单。</p>
     {% endif %}
@@ -130,8 +184,8 @@
 
 <script>
   (function () {
-    var optionButtons = Array.prototype.slice.call(document.querySelectorAll(".plan-option-btn"));
-    if (!optionButtons.length) {
+    var planRows = Array.prototype.slice.call(document.querySelectorAll(".purchase-plan-row"));
+    if (!planRows.length) {
       return;
     }
 
@@ -150,17 +204,22 @@
     var modal = document.getElementById("payment-modal");
     var modalClose = document.getElementById("payment-modal-close");
 
-    function setSelected(btn) {
-      optionButtons.forEach(function (item) {
+    function setSelected(row) {
+      planRows.forEach(function (item) {
         item.classList.remove("active");
       });
-      btn.classList.add("active");
+      row.classList.add("active");
 
-      var planId = btn.getAttribute("data-plan-id") || "";
-      var planDisplay = btn.getAttribute("data-plan-display") || "";
-      var planMode = btn.getAttribute("data-plan-mode") || "";
-      var planValue = btn.getAttribute("data-plan-value") || "";
-      var price = btn.getAttribute("data-price") || "";
+      var radio = row.querySelector(".purchase-plan-radio");
+      if (radio) {
+        radio.checked = true;
+      }
+
+      var planId = row.getAttribute("data-plan-id") || "";
+      var planDisplay = row.getAttribute("data-plan-display") || "";
+      var planMode = row.getAttribute("data-plan-mode") || "";
+      var planValue = row.getAttribute("data-plan-value") || "";
+      var price = row.getAttribute("data-price") || "";
 
       if (selectedPlanName) {
         selectedPlanName.textContent = planDisplay;
@@ -192,10 +251,17 @@
       }
     }
 
-    optionButtons.forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        setSelected(btn);
+    planRows.forEach(function (row) {
+      row.addEventListener("click", function () {
+        setSelected(row);
       });
+      var radio = row.querySelector(".purchase-plan-radio");
+      if (radio) {
+        radio.addEventListener("click", function (event) {
+          event.stopPropagation();
+          setSelected(row);
+        });
+      }
     });
 
     function closeModal() {
@@ -227,6 +293,8 @@
         }
       });
     }
+
+    setSelected(planRows[0]);
   })();
 </script>
 {% endblock %}

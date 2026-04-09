@@ -46,4 +46,26 @@
     </div>
   </div>
 </section>
+
+<section class="card">
+  <h3>OpenVPN 使用说明（导入 .ovpn）</h3>
+  <ol class="guide-steps">
+    <li>先在“用户首页”下载 OpenVPN 全局代理配置文件。</li>
+    <li>打开 OpenVPN Connect，若看到 “Connect with Server URL or Cloud ID” 页面，点击 “Have a configuration file instead (.ovpn)?”。</li>
+    <li>点击 “Upload File”。</li>
+    <li>在文件选择窗口中进入下载目录，选中 `ovpn-用户名-global.ovpn`。</li>
+    <li>点击“打开”完成导入，再点击连接按钮即可。</li>
+  </ol>
+  <div class="guide-image-grid">
+    <figure class="guide-image-card">
+      <img src="{{ url_for('static', filename='openvpn_import_step1.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤1：点击 Have a configuration file instead 和 Upload File">
+      <figcaption>步骤1：在 OpenVPN Connect 中点击 “Have a configuration file instead (.ovpn)?”，然后点 “Upload File”。</figcaption>
+    </figure>
+    <figure class="guide-image-card">
+      <img src="{{ url_for('static', filename='openvpn_import_step2.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤2：选择 ovpn 配置并打开">
+      <figcaption>步骤2：在下载目录选中 `ovpn-用户名-global.ovpn`，点击“打开”完成导入。</figcaption>
+    </figure>
+  </div>
+  <p class="helper">如果导入后无法连接，先确认套餐已生效、系统时间正确、防火墙未拦截 VPN 连接。</p>
+</section>
 {% endblock %}

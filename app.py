@@ -2,6 +2,7 @@ import calendar
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import re
 import sqlite3
@@ -11,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from flask import (
     Flask,
@@ -20,7 +23,6 @@ from flask import (
     redirect,
     render_template,
     request,
-    send_file,
     session,
     url_for,
 )
@@ -93,6 +95,13 @@ OPENVPN_DOWNLOAD_LINKS = {
     "linux": "https://openvpn.net/client/",
     "official": "https://openvpn.net/client/",
 }
+VPN_API_URL = os.environ.get("VPN_API_URL", "").strip().rstrip("/")
+VPN_API_TOKEN = os.environ.get("VPN_API_TOKEN", "").strip()
+VPN_API_TIMEOUT_RAW = os.environ.get("VPN_API_TIMEOUT_SECONDS", "8").strip()
+try:
+    VPN_API_TIMEOUT_SECONDS = max(1, int(VPN_API_TIMEOUT_RAW))
+except ValueError:
+    VPN_API_TIMEOUT_SECONDS = 8
 
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
 USDT_NETWORK_OPTIONS = ("TRC20", "ERC20", "BEP20", "POLYGON")
@@ -118,15 +127,24 @@ PAYMENT_SETTING_KEYS = (
 PLAN_MODE_DURATION = "duration"
 PLAN_MODE_TRAFFIC = "traffic"
 PLAN_MODES = (PLAN_MODE_DURATION, PLAN_MODE_TRAFFIC)
+WG_PROFILE_SMART = "smart"
+WG_PROFILE_GLOBAL = "global"
+WG_PROFILE_MODES = (WG_PROFILE_SMART, WG_PROFILE_GLOBAL)
+PAYMENT_METHOD_USDT = "usdt"
+PAYMENT_METHOD_CHOICES = (PAYMENT_METHOD_USDT,)
 BYTES_PER_GB = 1024 * 1024 * 1024
 REGISTER_COOLDOWN_SECONDS = 5 * 60
 ADMIN_UI_TZ = timezone(timedelta(hours=8))
 ADMIN_UI_TZ_NAME = "北京时间 (UTC+8)"
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_INITIAL_PASSWORD = "admin"
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("PORTAL_SECRET_KEY", "change-this-secret")
 _CLIENT_ALLOWED_IPS_CACHE: str | None = None
+_SMART_ALLOWED_IPS_CACHE: str | None = None
 _OPENVPN_ROUTE_LINES_CACHE: list[str] | None = None
+_OPENVPN_ROUTE_LINES_PROFILE_CACHE: dict[str, list[str]] = {}
 
 
 def utcnow() -> datetime:
@@ -360,15 +378,43 @@ def get_client_allowed_ips() -> str:
     if _CLIENT_ALLOWED_IPS_CACHE is not None:
         return _CLIENT_ALLOWED_IPS_CACHE
 
-    smart_modes = {"cn_local", "cn_split", "china-bypass", "overseas-proxy"}
-    if WG_ROUTE_POLICY in smart_modes:
-        routes = load_allowed_ips_from_file(WG_NON_CN_ROUTES_FILE)
-        if routes:
-            _CLIENT_ALLOWED_IPS_CACHE = ", ".join(routes)
-            return _CLIENT_ALLOWED_IPS_CACHE
-
-    _CLIENT_ALLOWED_IPS_CACHE = WG_CLIENT_ALLOWED_IPS
+    # Force global mode to avoid huge split-route configs causing client freeze.
+    _CLIENT_ALLOWED_IPS_CACHE = "0.0.0.0/0, ::/0"
     return _CLIENT_ALLOWED_IPS_CACHE
+
+
+def normalize_wg_profile_mode(raw_mode: str | None) -> str:
+    # Smart split profile has been retired due to oversized config issues.
+    _ = (raw_mode or "").strip().lower()
+    return WG_PROFILE_GLOBAL
+
+
+def get_smart_allowed_ips() -> str:
+    global _SMART_ALLOWED_IPS_CACHE
+    if _SMART_ALLOWED_IPS_CACHE is not None:
+        return _SMART_ALLOWED_IPS_CACHE
+
+    routes = load_allowed_ips_from_file(WG_NON_CN_ROUTES_FILE)
+    if not routes:
+        _SMART_ALLOWED_IPS_CACHE = ""
+        return _SMART_ALLOWED_IPS_CACHE
+
+    _SMART_ALLOWED_IPS_CACHE = ", ".join(routes)
+    return _SMART_ALLOWED_IPS_CACHE
+
+
+def get_client_allowed_ips_for_profile(profile_mode: str) -> str:
+    _ = normalize_wg_profile_mode(profile_mode)
+    return "0.0.0.0/0, ::/0"
+
+
+def default_profile_mode_from_policy() -> str:
+    return WG_PROFILE_GLOBAL
+
+
+def wireguard_profile_filename_suffix(profile_mode: str) -> str:
+    mode = normalize_wg_profile_mode(profile_mode)
+    return "global" if mode == WG_PROFILE_GLOBAL else "global"
 
 
 def detect_client_platform(user_agent: str) -> str:
@@ -415,23 +461,20 @@ def get_openvpn_route_lines() -> list[str]:
     if _OPENVPN_ROUTE_LINES_CACHE is not None:
         return _OPENVPN_ROUTE_LINES_CACHE
 
-    smart_modes = {"cn_local", "cn_split", "china-bypass", "overseas-proxy"}
-    if WG_ROUTE_POLICY in smart_modes:
-        routes = load_allowed_ips_from_file(WG_NON_CN_ROUTES_FILE)
-        lines = ["route-nopull"]
-        for cidr in routes:
-            try:
-                network = ipaddress.ip_network(cidr, strict=False)
-            except ValueError:
-                continue
-            if network.version != 4:
-                continue
-            lines.append(f"route {network.network_address} {network.netmask}")
-        _OPENVPN_ROUTE_LINES_CACHE = lines
-        return _OPENVPN_ROUTE_LINES_CACHE
-
-    _OPENVPN_ROUTE_LINES_CACHE = ["redirect-gateway def1"]
+    _OPENVPN_ROUTE_LINES_CACHE = get_openvpn_route_lines_for_profile(
+        default_profile_mode_from_policy()
+    )
     return _OPENVPN_ROUTE_LINES_CACHE
+
+
+def get_openvpn_route_lines_for_profile(profile_mode: str) -> list[str]:
+    mode = normalize_wg_profile_mode(profile_mode)
+    if mode in _OPENVPN_ROUTE_LINES_PROFILE_CACHE:
+        return _OPENVPN_ROUTE_LINES_PROFILE_CACHE[mode]
+
+    lines = ["redirect-gateway def1"]
+    _OPENVPN_ROUTE_LINES_PROFILE_CACHE[mode] = lines
+    return lines
 
 
 def read_required_text(path: Path, label: str) -> str:
@@ -443,7 +486,11 @@ def read_required_text(path: Path, label: str) -> str:
     return content
 
 
-def build_openvpn_client_config(username: str) -> str:
+def build_openvpn_client_config(
+    username: str,
+    *,
+    profile_mode: str | None = None,
+) -> str:
     if not OPENVPN_ENABLED:
         raise RuntimeError("管理员尚未启用 OpenVPN 支持。")
 
@@ -474,7 +521,8 @@ def build_openvpn_client_config(username: str) -> str:
         lines.append("explicit-exit-notify 1")
     if OPENVPN_CLIENT_DNS:
         lines.append(f"dhcp-option DNS {OPENVPN_CLIENT_DNS}")
-    lines.extend(get_openvpn_route_lines())
+    mode = normalize_wg_profile_mode(profile_mode or default_profile_mode_from_policy())
+    lines.extend(get_openvpn_route_lines_for_profile(mode))
 
     lines.append("<ca>")
     lines.append(ca_text)
@@ -572,7 +620,7 @@ def ensure_default_payment_settings(db: sqlite3.Connection) -> None:
             upsert_app_setting(db, key, defaults.get(key, ""))
 
 
-def load_payment_settings(db: sqlite3.Connection) -> dict:
+def load_legacy_payment_settings(db: sqlite3.Connection) -> dict:
     defaults = default_payment_settings()
     rows = db.execute(
         """
@@ -591,6 +639,133 @@ def load_payment_settings(db: sqlite3.Connection) -> dict:
     address = (raw_map.get("usdt_receive_address") or defaults["usdt_receive_address"]).strip()
 
     return {
+        "usdt_receive_address": address,
+        "usdt_default_network": network,
+    }
+
+
+def normalize_payment_method(raw: str | None) -> str:
+    method = (raw or "").strip().lower()
+    if method in PAYMENT_METHOD_CHOICES:
+        return method
+    return PAYMENT_METHOD_USDT
+
+
+def payment_method_label(method_code: str | None) -> str:
+    normalized = normalize_payment_method(method_code)
+    if normalized == PAYMENT_METHOD_USDT:
+        return "USDT"
+    return normalized.upper()
+
+
+def load_payment_methods(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
+    sql = """
+        SELECT
+            id,
+            method_code,
+            method_name,
+            network,
+            receive_address,
+            is_active,
+            sort_order,
+            created_at,
+            updated_at
+        FROM payment_methods
+    """
+    if active_only:
+        sql += " WHERE is_active = 1"
+    sql += " ORDER BY sort_order ASC, id ASC"
+    rows = db.execute(sql).fetchall()
+
+    methods: list[dict] = []
+    for row in rows:
+        method_code = normalize_payment_method(row["method_code"])
+        network = (row["network"] or USDT_DEFAULT_NETWORK).strip().upper()
+        if network not in USDT_NETWORK_OPTIONS:
+            network = USDT_DEFAULT_NETWORK
+        method_name = (row["method_name"] or "").strip()
+        if not method_name:
+            method_name = f"{payment_method_label(method_code)} {network}"
+        methods.append(
+            {
+                "id": row["id"],
+                "method_code": method_code,
+                "method_label": payment_method_label(method_code),
+                "method_name": method_name,
+                "network": network,
+                "receive_address": (row["receive_address"] or "").strip(),
+                "is_active": 1 if int(row["is_active"] or 0) == 1 else 0,
+                "sort_order": to_non_negative_int(row["sort_order"]),
+                "display_name": f"{method_name} ({network})",
+            }
+        )
+    return methods
+
+
+def resolve_default_payment_method(db: sqlite3.Connection) -> dict | None:
+    active_methods = load_payment_methods(db, active_only=True)
+    if active_methods:
+        return active_methods[0]
+    total_count = db.execute("SELECT COUNT(*) AS cnt FROM payment_methods").fetchone()["cnt"]
+    if total_count > 0:
+        return None
+    return None
+
+
+def sync_legacy_payment_settings_with_default_method(db: sqlite3.Connection) -> None:
+    default_method = resolve_default_payment_method(db)
+    if not default_method:
+        return
+    upsert_app_setting(db, "usdt_receive_address", default_method["receive_address"])
+    upsert_app_setting(db, "usdt_default_network", default_method["network"])
+
+
+def ensure_default_payment_methods(db: sqlite3.Connection) -> None:
+    count = db.execute("SELECT COUNT(*) AS cnt FROM payment_methods").fetchone()["cnt"]
+    if count > 0:
+        return
+
+    legacy = load_legacy_payment_settings(db)
+    now_iso = utcnow_iso()
+    method_name = f"USDT {legacy['usdt_default_network']}"
+    db.execute(
+        """
+        INSERT INTO payment_methods (
+            method_code, method_name, network, receive_address,
+            is_active, sort_order, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, 10, ?, ?)
+        """,
+        (
+            PAYMENT_METHOD_USDT,
+            method_name,
+            legacy["usdt_default_network"],
+            legacy["usdt_receive_address"],
+            now_iso,
+            now_iso,
+        ),
+    )
+
+
+def load_payment_settings(db: sqlite3.Connection) -> dict:
+    legacy = load_legacy_payment_settings(db)
+    default_method = resolve_default_payment_method(db)
+
+    if default_method:
+        method_code = default_method["method_code"]
+        method_name = default_method["method_name"]
+        network = default_method["network"]
+        address = default_method["receive_address"]
+    else:
+        method_code = PAYMENT_METHOD_USDT
+        method_name = payment_method_label(method_code)
+        network = legacy["usdt_default_network"]
+        address = legacy["usdt_receive_address"]
+
+    return {
+        "payment_method": method_code,
+        "payment_method_name": method_name,
+        "payment_display_name": f"{payment_method_label(method_code)} ({network})",
         "usdt_receive_address": address,
         "usdt_default_network": network,
     }
@@ -731,7 +906,8 @@ def init_db() -> None:
             wg_enabled INTEGER NOT NULL DEFAULT 0,
             traffic_quota_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_used_bytes INTEGER NOT NULL DEFAULT 0,
-            traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0
+            traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0,
+            force_password_change INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -778,6 +954,21 @@ def init_db() -> None:
     )
     db.execute(
         """
+        CREATE TABLE IF NOT EXISTS payment_methods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            method_code TEXT NOT NULL DEFAULT 'usdt',
+            method_name TEXT NOT NULL,
+            network TEXT NOT NULL DEFAULT 'TRC20',
+            receive_address TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS app_settings (
             setting_key TEXT PRIMARY KEY,
             setting_value TEXT NOT NULL,
@@ -795,6 +986,8 @@ def init_db() -> None:
     )
     migrate_schema(db)
     ensure_default_payment_settings(db)
+    ensure_default_payment_methods(db)
+    sync_legacy_payment_settings_with_default_method(db)
     ensure_default_subscription_plans(db)
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_status_created ON users(status, created_at)"
@@ -820,6 +1013,9 @@ def init_db() -> None:
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_subscription_plans_active_sort ON subscription_plans(is_active, sort_order, id)"
     )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_payment_methods_active_sort ON payment_methods(is_active, sort_order, id)"
+    )
     db.commit()
 
 
@@ -839,6 +1035,10 @@ def migrate_schema(db: sqlite3.Connection) -> None:
     if "traffic_last_total_bytes" not in user_columns:
         db.execute(
             "ALTER TABLE users ADD COLUMN traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0"
+        )
+    if "force_password_change" not in user_columns:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN force_password_change INTEGER NOT NULL DEFAULT 0"
         )
 
     order_columns = {
@@ -890,24 +1090,78 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payment_methods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            method_code TEXT NOT NULL DEFAULT 'usdt',
+            method_name TEXT NOT NULL,
+            network TEXT NOT NULL DEFAULT 'TRC20',
+            receive_address TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    payment_method_columns = {
+        row["name"]: row
+        for row in db.execute("PRAGMA table_info(payment_methods)").fetchall()
+    }
+    if "method_code" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN method_code TEXT NOT NULL DEFAULT 'usdt'")
+    if "method_name" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN method_name TEXT NOT NULL DEFAULT 'USDT'")
+    if "network" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN network TEXT NOT NULL DEFAULT 'TRC20'")
+    if "receive_address" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN receive_address TEXT NOT NULL DEFAULT ''")
+    if "is_active" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    if "sort_order" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+    if "created_at" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+    if "updated_at" not in payment_method_columns:
+        db.execute("ALTER TABLE payment_methods ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
 
 
 def ensure_admin_user() -> None:
-    admin_username = os.environ.get("ADMIN_USERNAME", "admin")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin@2026!")
+    admin_username = os.environ.get("ADMIN_USERNAME", DEFAULT_ADMIN_USERNAME)
+    admin_password = os.environ.get("ADMIN_PASSWORD", DEFAULT_ADMIN_INITIAL_PASSWORD)
 
     db = get_db()
     existing = db.execute(
-        "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+        "SELECT id, password_hash, force_password_change FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
     ).fetchone()
     if existing:
+        # If admin still uses default initial password, force password reset.
+        if (
+            check_password_hash(existing["password_hash"], DEFAULT_ADMIN_INITIAL_PASSWORD)
+            and int(row_get(existing, "force_password_change", 0) or 0) != 1
+        ):
+            db.execute(
+                "UPDATE users SET force_password_change = 1 WHERE id = ?",
+                (existing["id"],),
+            )
+            db.commit()
         return
 
     try:
         db.execute(
             """
-            INSERT INTO users (username, email, password_hash, role, status, created_at, approved_at)
-            VALUES (?, ?, ?, 'admin', 'approved', ?, ?)
+            INSERT INTO users (
+                username,
+                email,
+                password_hash,
+                role,
+                status,
+                created_at,
+                approved_at,
+                force_password_change
+            )
+            VALUES (?, ?, ?, 'admin', 'approved', ?, ?, 1)
             """,
             (
                 admin_username,
@@ -927,6 +1181,12 @@ def current_user():
     if not user_id:
         return None
     return get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+def admin_must_change_password(user) -> bool:
+    if not user or row_get(user, "role") != "admin":
+        return False
+    return int(row_get(user, "force_password_change", 0) or 0) == 1
 
 
 def authenticate_user(identity: str, password: str):
@@ -993,6 +1253,31 @@ def auto_reconcile_subscriptions():
     return None
 
 
+@app.before_request
+def enforce_admin_password_change():
+    endpoint = request.endpoint or ""
+    if endpoint == "static":
+        return None
+
+    user = current_user()
+    if not admin_must_change_password(user):
+        return None
+
+    allowed_endpoints = {"logout", "admin_change_password", "static"}
+    if endpoint in allowed_endpoints:
+        return None
+
+    if request.path.startswith("/api/"):
+        return {
+            "ok": False,
+            "error": "admin_password_change_required",
+            "redirect": url_for("admin_change_password"),
+        }, 403
+
+    flash("首次登录请先修改管理员密码。", "error")
+    return redirect(url_for("admin_change_password"))
+
+
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -1030,6 +1315,88 @@ def run_command(args, input_text=None, check=True) -> str:
     return completed.stdout.strip()
 
 
+def use_vpn_api() -> bool:
+    return bool(VPN_API_URL)
+
+
+def vpn_api_request(method: str, path: str, payload: dict | None = None) -> dict:
+    if not VPN_API_URL:
+        raise RuntimeError("VPN_API_URL 未配置。")
+
+    url = f"{VPN_API_URL}{path}"
+    headers = {"Accept": "application/json"}
+    if VPN_API_TOKEN:
+        headers["X-VPN-Token"] = VPN_API_TOKEN
+
+    body_bytes = None
+    if payload is not None:
+        body_bytes = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib_request.Request(url=url, data=body_bytes, headers=headers, method=method)
+    try:
+        with urllib_request.urlopen(req, timeout=VPN_API_TIMEOUT_SECONDS) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+    except urllib_error.HTTPError as exc:
+        detail = ""
+        try:
+            detail_raw = exc.read().decode("utf-8", errors="ignore")
+            detail_obj = json.loads(detail_raw) if detail_raw else {}
+            detail = str(detail_obj.get("error") or detail_obj.get("message") or detail_raw).strip()
+        except Exception:
+            detail = ""
+        if not detail:
+            detail = f"HTTP {exc.code}"
+        raise RuntimeError(f"VPN API 请求失败：{method} {path}；{detail}")
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"VPN API 不可达：{exc.reason}")
+
+    try:
+        obj = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        raise RuntimeError(f"VPN API 返回非法 JSON：{method} {path}")
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"VPN API 返回格式错误：{method} {path}")
+    if obj.get("ok") is False:
+        raise RuntimeError(str(obj.get("error") or f"VPN API 错误：{method} {path}"))
+    return obj
+
+
+def get_wireguard_dump_text() -> str:
+    if use_vpn_api():
+        result = vpn_api_request("GET", "/wireguard/dump")
+        return str(result.get("dump") or "")
+    return run_command(["wg", "show", WG_INTERFACE, "dump"], check=False)
+
+
+def get_wireguard_server_public_key() -> str:
+    if use_vpn_api():
+        result = vpn_api_request("GET", "/wireguard/server-public-key")
+        key = (result.get("public_key") or "").strip()
+        if not key:
+            raise RuntimeError("VPN API 未返回服务端公钥。")
+        return key
+    if not WG_SERVER_PUBLIC_KEY_FILE.exists():
+        raise RuntimeError(f"未找到服务端公钥文件：{WG_SERVER_PUBLIC_KEY_FILE}")
+    return WG_SERVER_PUBLIC_KEY_FILE.read_text(encoding="utf-8").strip()
+
+
+def wireguard_generate_keys() -> tuple[str, str, str]:
+    if use_vpn_api():
+        result = vpn_api_request("POST", "/wireguard/generate-keys")
+        private_key = (result.get("private_key") or "").strip()
+        public_key = (result.get("public_key") or "").strip()
+        psk = (result.get("preshared_key") or "").strip()
+        if not private_key or not public_key or not psk:
+            raise RuntimeError("VPN API 生成密钥失败：返回数据不完整。")
+        return private_key, public_key, psk
+
+    private_key = run_command(["wg", "genkey"])
+    public_key = run_command(["wg", "pubkey"], input_text=f"{private_key}\n")
+    psk = run_command(["wg", "genpsk"])
+    return private_key, public_key, psk
+
+
 def format_bytes(num_bytes: int) -> str:
     units = ("B", "KB", "MB", "GB", "TB")
     value = float(max(0, int(num_bytes)))
@@ -1045,7 +1412,7 @@ def format_bytes(num_bytes: int) -> str:
 def get_wireguard_transfer_bytes(public_key: str | None) -> tuple[int, int]:
     if not public_key:
         return 0, 0
-    dump = run_command(["wg", "show", WG_INTERFACE, "dump"], check=False)
+    dump = get_wireguard_dump_text()
     if not dump:
         return 0, 0
 
@@ -1075,6 +1442,15 @@ def get_user_traffic_stats(user: sqlite3.Row) -> dict[str, int | str]:
     if quota_bytes > 0 and used_bytes > quota_bytes:
         used_bytes = quota_bytes
     remaining_bytes = max(0, quota_bytes - used_bytes)
+    has_time = has_active_time_subscription(user)
+    has_traffic = has_active_traffic_subscription(user)
+    remaining_is_permanent = has_time
+    if remaining_is_permanent:
+        remaining_display = "永久"
+    elif quota_bytes > 0:
+        remaining_display = format_bytes(remaining_bytes)
+    else:
+        remaining_display = "-"
     return {
         "rx_bytes": rx_bytes,
         "tx_bytes": tx_bytes,
@@ -1088,6 +1464,10 @@ def get_user_traffic_stats(user: sqlite3.Row) -> dict[str, int | str]:
         "quota_human": format_bytes(quota_bytes),
         "used_human": format_bytes(used_bytes),
         "remaining_human": format_bytes(remaining_bytes),
+        "remaining_is_permanent": remaining_is_permanent,
+        "remaining_display": remaining_display,
+        "has_active_time": has_time,
+        "has_active_traffic": has_traffic,
     }
 
 
@@ -1097,7 +1477,7 @@ def safe_name(raw: str) -> str:
 
 
 def is_dynamic_ip_assignment_mode() -> bool:
-    return WG_IP_ASSIGNMENT_MODE in {"dynamic", "lease", "pool"}
+    return WG_IP_ASSIGNMENT_MODE in {"dynamic", "lease", "pool", "dhcp"}
 
 
 def next_available_ip(
@@ -1154,10 +1534,17 @@ def next_available_ip(
 
 
 
-def build_client_config(client_private_key: str, client_psk: str, client_ip: str) -> str:
-    if not WG_SERVER_PUBLIC_KEY_FILE.exists():
-        raise RuntimeError(f"未找到服务端公钥文件：{WG_SERVER_PUBLIC_KEY_FILE}")
-    server_public_key = WG_SERVER_PUBLIC_KEY_FILE.read_text(encoding="utf-8").strip()
+def build_client_config(
+    client_private_key: str,
+    client_psk: str,
+    client_ip: str,
+    *,
+    allowed_ips: str | None = None,
+) -> str:
+    server_public_key = get_wireguard_server_public_key()
+    resolved_allowed_ips = (allowed_ips or get_client_allowed_ips()).strip()
+    if not resolved_allowed_ips:
+        raise RuntimeError("WireGuard AllowedIPs 为空，无法生成配置。")
     return "\n".join(
         [
             "[Interface]",
@@ -1168,7 +1555,7 @@ def build_client_config(client_private_key: str, client_psk: str, client_ip: str
             "[Peer]",
             f"PublicKey = {server_public_key}",
             f"PresharedKey = {client_psk}",
-            f"AllowedIPs = {get_client_allowed_ips()}",
+            f"AllowedIPs = {resolved_allowed_ips}",
             f"Endpoint = {WG_ENDPOINT}",
             f"PersistentKeepalive = {WG_CLIENT_KEEPALIVE}",
             "",
@@ -1205,7 +1592,45 @@ def write_client_artifacts(
     }
 
 
+def build_user_wireguard_config(
+    user: sqlite3.Row,
+    *,
+    profile_mode: str,
+) -> tuple[str, str]:
+    normalized_mode = normalize_wg_profile_mode(profile_mode)
+    assigned_ip = (row_get(user, "assigned_ip", "") or "").strip()
+    client_private_key = (row_get(user, "client_private_key", "") or "").strip()
+    client_psk = (row_get(user, "client_psk", "") or "").strip()
+
+    if not assigned_ip:
+        raise RuntimeError("当前用户暂无可用 VPN 地址，请稍后重试或联系管理员。")
+    if not client_private_key or not client_psk:
+        raise RuntimeError("用户密钥尚未就绪，请联系管理员。")
+
+    allowed_ips = get_client_allowed_ips_for_profile(normalized_mode)
+    config_text = build_client_config(
+        client_private_key,
+        client_psk,
+        assigned_ip,
+        allowed_ips=allowed_ips,
+    )
+    return config_text, normalized_mode
+
+
 def set_wireguard_peer(peer_public_key: str, peer_psk: str, client_ip: str) -> None:
+    if use_vpn_api():
+        vpn_api_request(
+            "POST",
+            "/wireguard/set-peer",
+            {
+                "interface": WG_INTERFACE,
+                "peer_public_key": peer_public_key,
+                "peer_psk": peer_psk,
+                "client_ip": client_ip,
+            },
+        )
+        return
+
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tmp_psk:
         tmp_psk.write(peer_psk)
         tmp_psk.flush()
@@ -1231,6 +1656,14 @@ def set_wireguard_peer(peer_public_key: str, peer_psk: str, client_ip: str) -> N
 
 
 def remove_wireguard_peer(peer_public_key: str) -> None:
+    if use_vpn_api():
+        vpn_api_request(
+            "POST",
+            "/wireguard/remove-peer",
+            {"interface": WG_INTERFACE, "peer_public_key": peer_public_key},
+        )
+        return
+
     run_command(
         ["wg", "set", WG_INTERFACE, "peer", peer_public_key, "remove"],
         check=False,
@@ -1239,9 +1672,7 @@ def remove_wireguard_peer(peer_public_key: str) -> None:
 
 
 def generate_wireguard_bundle(username: str, user_id: int, client_ip: str):
-    client_private_key = run_command(["wg", "genkey"])
-    client_public_key = run_command(["wg", "pubkey"], input_text=f"{client_private_key}\n")
-    client_psk = run_command(["wg", "genpsk"])
+    client_private_key, client_public_key, client_psk = wireguard_generate_keys()
 
     artifacts = write_client_artifacts(
         username=username,
@@ -1544,7 +1975,7 @@ def settle_order_paid(
     if plan_mode == PLAN_MODE_DURATION:
         new_expire_at = calculate_new_expiry(current_expire_iso, plan_duration_months)
     else:
-        new_expire_at = current_expire_iso
+        new_expire_at = None
 
     current_quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
     current_used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
@@ -1560,7 +1991,11 @@ def settle_order_paid(
         current_last_total_bytes = current_total_bytes
 
     added_traffic_bytes = 0
-    if plan_mode == PLAN_MODE_TRAFFIC:
+    if plan_mode == PLAN_MODE_DURATION:
+        # Time plans are unlimited-traffic mode: clear traffic quota tracking.
+        current_quota_bytes = 0
+        current_used_bytes = 0
+    else:
         added_traffic_bytes = plan_traffic_gb * BYTES_PER_GB
         current_quota_bytes += added_traffic_bytes
     if current_used_bytes > current_quota_bytes:
@@ -1620,10 +2055,10 @@ def settle_order_paid(
     )
     db.commit()
     if plan_mode == PLAN_MODE_DURATION:
-        grant_text = f"时长套餐生效，到期时间：{format_utc(new_expire_at)}"
+        grant_text = f"时长套餐生效，到期时间：{format_utc(new_expire_at)}，流量剩余：永久"
     else:
         grant_text = (
-            f"流量套餐生效，新增 {format_bytes(added_traffic_bytes)}，"
+            f"流量套餐生效（有效期永久），新增 {format_bytes(added_traffic_bytes)}，"
             f"剩余 {format_bytes(remaining_traffic_bytes)}"
         )
     return {
@@ -1777,6 +2212,9 @@ def login():
             return render_template("login.html")
 
         login_user_session(user)
+        if admin_must_change_password(user):
+            flash("首次登录请先修改管理员密码。", "error")
+            return redirect(url_for("admin_change_password"))
         flash("登录成功。", "success")
         return redirect(url_for("dashboard"))
     return render_template("login.html")
@@ -1802,11 +2240,16 @@ def api_login():
         }, 401
 
     login_user_session(user)
+    redirect_url = url_for("dashboard")
+    require_password_change = admin_must_change_password(user)
+    if require_password_change:
+        redirect_url = url_for("admin_change_password")
     return {
         "ok": True,
         "message": "登录成功",
         "user": user_api_payload(user),
-        "redirect": url_for("dashboard"),
+        "redirect": redirect_url,
+        "require_password_change": require_password_change,
     }, 200
 
 
@@ -1817,6 +2260,53 @@ def logout():
     flash("已退出登录。", "success")
     return redirect(url_for("login"))
 
+
+
+@app.route("/admin/change-password", methods=["GET", "POST"])
+@login_required
+def admin_change_password():
+    user = current_user()
+    if not user or user["role"] != "admin":
+        flash("仅管理员可访问。", "error")
+        return redirect(url_for("dashboard"))
+
+    must_change = admin_must_change_password(user)
+    if request.method == "POST":
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not current_password or not new_password or not confirm_password:
+            flash("请完整填写当前密码和新密码。", "error")
+        elif not check_password_hash(user["password_hash"], current_password):
+            flash("当前密码不正确。", "error")
+        elif len(new_password) < 8:
+            flash("新密码长度至少需要 8 位。", "error")
+        elif new_password != confirm_password:
+            flash("两次输入的新密码不一致。", "error")
+        elif check_password_hash(user["password_hash"], new_password):
+            flash("新密码不能与当前密码相同。", "error")
+        else:
+            db = get_db()
+            db.execute(
+                """
+                UPDATE users
+                SET password_hash = ?,
+                    force_password_change = 0
+                WHERE id = ?
+                """,
+                (generate_password_hash(new_password), user["id"]),
+            )
+            db.commit()
+            session.clear()
+            flash("密码修改成功，请使用新密码重新登录。", "success")
+            return redirect(url_for("login"))
+
+    return render_template(
+        "admin_change_password.html",
+        must_change=must_change,
+        admin_page="change_password",
+    )
 
 
 @app.route("/dashboard")
@@ -1839,14 +2329,25 @@ def dashboard_home():
     reconcile_expired_subscriptions(db)
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
     user = sync_user_traffic_usage(db, user)
-    user = sync_user_traffic_usage(db, user)
     traffic_stats = get_user_traffic_stats(user)
+    has_time = has_active_time_subscription(user)
+    has_traffic = has_active_traffic_subscription(user)
+    if has_traffic and not has_time:
+        subscription_expiry_display = "永久"
+    else:
+        subscription_expiry_display = format_utc(user["subscription_expires_at"])
+    if is_dynamic_ip_assignment_mode():
+        assigned_ip_display = "DHCP 动态分配"
+    else:
+        assigned_ip_display = user["assigned_ip"] or "暂未分配"
 
     return render_template(
         "dashboard_home.html",
         user=user,
         active=is_subscription_active(user),
         traffic_stats=traffic_stats,
+        subscription_expiry_display=subscription_expiry_display,
+        assigned_ip_display=assigned_ip_display,
         dashboard_page="home",
     )
 
@@ -1873,7 +2374,6 @@ def dashboard_orders():
     db = get_db()
     reconcile_expired_subscriptions(db)
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
-    user = sync_user_traffic_usage(db, user)
     user = sync_user_traffic_usage(db, user)
     available_plans = load_subscription_plans(db, active_only=True)
 
@@ -1929,8 +2429,12 @@ def create_subscription_order():
 
     db = get_db()
     payment_settings = load_payment_settings(db)
+    payment_method_code = normalize_payment_method(payment_settings.get("payment_method"))
     network = payment_settings["usdt_default_network"]
     receive_address = payment_settings["usdt_receive_address"]
+    if payment_method_code != PAYMENT_METHOD_USDT:
+        flash("当前付款方式暂不支持自动下单。", "error")
+        return redirect(url_for("dashboard_orders"))
     if not receive_address:
         flash("管理员尚未配置 USDT 收款地址。", "error")
         return redirect(url_for("dashboard_orders"))
@@ -1980,7 +2484,7 @@ def create_subscription_order():
             user_id, plan_months, plan_id, plan_name, plan_mode, plan_duration_months, plan_traffic_gb,
             payment_method, usdt_network, usdt_amount, pay_to_address, status, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'usdt', ?, ?, ?, 'pending', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """,
         (
             user["id"],
@@ -1990,6 +2494,7 @@ def create_subscription_order():
             plan_mode,
             duration_months if plan_mode == PLAN_MODE_DURATION else None,
             traffic_gb if plan_mode == PLAN_MODE_TRAFFIC else None,
+            payment_method_code,
             network,
             format_usdt(usdt_amount),
             receive_address,
@@ -2208,13 +2713,24 @@ def admin_home():
 @admin_required
 def admin_payment_settings():
     db = get_db()
-    payment_settings = load_payment_settings(db)
     plans = load_subscription_plans(db, active_only=False)
     return render_template(
         "admin_payment.html",
-        payment_settings=payment_settings,
         plans=plans,
         admin_page="payment",
+    )
+
+
+@app.route("/admin/payment-methods")
+@login_required
+@admin_required
+def admin_payment_methods():
+    db = get_db()
+    payment_methods = load_payment_methods(db, active_only=False)
+    return render_template(
+        "admin_payment_methods.html",
+        payment_methods=payment_methods,
+        admin_page="payment_methods",
     )
 
 
@@ -2290,7 +2806,99 @@ def admin_update_payment_settings():
     upsert_app_setting(db, "usdt_default_network", network)
     db.commit()
     flash("基础支付设置已更新。", "success")
-    return redirect(url_for("admin_payment_settings"))
+    return redirect(url_for("admin_payment_methods"))
+
+
+@app.route("/admin/payment-methods/create", methods=["POST"])
+@login_required
+@admin_required
+def admin_create_payment_method():
+    db = get_db()
+    method_code = normalize_payment_method(request.form.get("method_code", PAYMENT_METHOD_USDT))
+    method_name = request.form.get("method_name", "").strip()
+    network = request.form.get("network", "TRC20").strip().upper()
+    receive_address = request.form.get("receive_address", "").strip()
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if method_code != PAYMENT_METHOD_USDT:
+        flash("当前仅支持 USDT 付款方式。", "error")
+        return redirect(url_for("admin_payment_methods"))
+    if network not in USDT_NETWORK_OPTIONS:
+        flash("付款网络无效。", "error")
+        return redirect(url_for("admin_payment_methods"))
+    if not receive_address:
+        flash("收款地址不能为空。", "error")
+        return redirect(url_for("admin_payment_methods"))
+
+    if not method_name:
+        method_name = f"{payment_method_label(method_code)} {network}"
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        INSERT INTO payment_methods (
+            method_code, method_name, network, receive_address,
+            is_active, sort_order, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+        """,
+        (
+            method_code,
+            method_name,
+            network,
+            receive_address,
+            sort_order,
+            now_iso,
+            now_iso,
+        ),
+    )
+    sync_legacy_payment_settings_with_default_method(db)
+    db.commit()
+    flash("付款方式已添加。", "success")
+    return redirect(url_for("admin_payment_methods"))
+
+
+@app.route("/admin/payment-methods/<int:method_id>/toggle", methods=["POST"])
+@login_required
+@admin_required
+def admin_toggle_payment_method(method_id: int):
+    db = get_db()
+    method = db.execute(
+        """
+        SELECT id, method_name, is_active
+        FROM payment_methods
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (method_id,),
+    ).fetchone()
+    if not method:
+        flash("付款方式不存在。", "error")
+        return redirect(url_for("admin_payment_methods"))
+
+    next_active = 0 if int(method["is_active"] or 0) == 1 else 1
+    db.execute(
+        """
+        UPDATE payment_methods
+        SET is_active = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (next_active, utcnow_iso(), method_id),
+    )
+    sync_legacy_payment_settings_with_default_method(db)
+    db.commit()
+    if next_active == 1:
+        flash(f"付款方式 {method['method_name']} 已启用。", "success")
+    else:
+        flash(f"付款方式 {method['method_name']} 已停用。", "success")
+    return redirect(url_for("admin_payment_methods"))
 
 
 @app.route("/admin/plans/create", methods=["POST"])
@@ -2362,6 +2970,91 @@ def admin_create_plan():
     return redirect(url_for("admin_payment_settings"))
 
 
+@app.route("/admin/plans/<int:plan_id>/update", methods=["POST"])
+@login_required
+@admin_required
+def admin_update_plan(plan_id: int):
+    db = get_db()
+    existing_plan = db.execute(
+        """
+        SELECT id, plan_name
+        FROM subscription_plans
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (plan_id,),
+    ).fetchone()
+    if not existing_plan:
+        flash("套餐不存在。", "error")
+        return redirect(url_for("admin_payment_settings"))
+
+    plan_name = request.form.get("plan_name", "").strip()
+    billing_mode = normalize_plan_mode(request.form.get("billing_mode", "duration"))
+    duration_months_raw = request.form.get("duration_months", "").strip()
+    traffic_gb_raw = request.form.get("traffic_gb", "").strip()
+    price_raw = request.form.get("price_usdt", "").strip()
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if not plan_name:
+        flash("套餐名称不能为空。", "error")
+        return redirect(url_for("admin_payment_settings"))
+
+    try:
+        price_usdt = parse_usdt_amount_strict(price_raw)
+    except Exception:
+        flash("价格格式无效，请输入大于 0 的数字。", "error")
+        return redirect(url_for("admin_payment_settings"))
+
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    duration_months = None
+    traffic_gb = None
+    if billing_mode == PLAN_MODE_DURATION:
+        try:
+            duration_months = parse_positive_int(duration_months_raw)
+        except Exception:
+            flash("时长套餐必须填写大于 0 的时长（月）。", "error")
+            return redirect(url_for("admin_payment_settings"))
+    else:
+        try:
+            traffic_gb = parse_positive_int(traffic_gb_raw)
+        except Exception:
+            flash("流量套餐必须填写大于 0 的流量（GB）。", "error")
+            return redirect(url_for("admin_payment_settings"))
+
+    db.execute(
+        """
+        UPDATE subscription_plans
+        SET plan_name = ?,
+            billing_mode = ?,
+            duration_months = ?,
+            traffic_gb = ?,
+            price_usdt = ?,
+            sort_order = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            plan_name,
+            billing_mode,
+            duration_months,
+            traffic_gb,
+            format_usdt(price_usdt),
+            sort_order,
+            utcnow_iso(),
+            plan_id,
+        ),
+    )
+    db.commit()
+    flash(f"套餐 {existing_plan['plan_name']} 已更新。", "success")
+    return redirect(url_for("admin_payment_settings"))
+
+
 @app.route("/admin/plans/<int:plan_id>/toggle", methods=["POST"])
 @login_required
 @admin_required
@@ -2390,6 +3083,30 @@ def admin_toggle_plan(plan_id: int):
         flash(f"套餐 {plan['plan_name']} 已启用。", "success")
     else:
         flash(f"套餐 {plan['plan_name']} 已停用。", "success")
+    return redirect(url_for("admin_payment_settings"))
+
+
+@app.route("/admin/plans/<int:plan_id>/delete", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_plan(plan_id: int):
+    db = get_db()
+    plan = db.execute(
+        """
+        SELECT id, plan_name
+        FROM subscription_plans
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (plan_id,),
+    ).fetchone()
+    if not plan:
+        flash("套餐不存在。", "error")
+        return redirect(url_for("admin_payment_settings"))
+
+    db.execute("DELETE FROM subscription_plans WHERE id = ?", (plan_id,))
+    db.commit()
+    flash(f"套餐 {plan['plan_name']} 已删除。", "success")
     return redirect(url_for("admin_payment_settings"))
 
 
@@ -2752,21 +3469,19 @@ def download_config():
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
-    if not user["config_path"]:
-        flash("配置文件尚未生成，请联系管理员。", "error")
-        return redirect(url_for("dashboard"))
+    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
+    try:
+        config_text, normalized_mode = build_user_wireguard_config(
+            user,
+            profile_mode=requested_mode,
+        )
+    except Exception as exc:
+        flash(f"WireGuard 配置生成失败：{exc}", "error")
+        return redirect(url_for("dashboard_home"))
 
-    path = Path(user["config_path"])
-    if not path.exists():
-        flash("配置文件不存在，请联系管理员。", "error")
-        return redirect(url_for("dashboard"))
-
-    return send_file(
-        path,
-        as_attachment=True,
-        download_name=f"wg-{user['username']}.conf",
-        mimetype="text/plain",
-    )
+    filename = f"wg-{safe_name(user['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.conf"
+    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    return Response(config_text, headers=headers, mimetype="text/plain")
 
 
 @app.route("/download/openvpn")
@@ -2785,13 +3500,18 @@ def download_openvpn_config():
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
+    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
+    normalized_mode = normalize_wg_profile_mode(requested_mode)
     try:
-        config_text = build_openvpn_client_config(user["username"])
+        config_text = build_openvpn_client_config(
+            user["username"],
+            profile_mode=normalized_mode,
+        )
     except Exception as exc:
         flash(f"OpenVPN 配置生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"ovpn-{safe_name(user['username'])}.ovpn"
+    filename = f"ovpn-{safe_name(user['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.ovpn"
     headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
     return Response(config_text, headers=headers, mimetype="text/plain")
 
@@ -2800,8 +3520,43 @@ def download_openvpn_config():
 @app.route("/download/qr")
 @login_required
 def download_qr():
-    flash("配置二维码下载已关闭，请下载 .conf 配置文件导入 WireGuard 客户端。", "error")
-    return redirect(url_for("dashboard_home"))
+    user = current_user()
+    if user["role"] != "user":
+        flash("管理员无需下载客户端配置。", "error")
+        return redirect(url_for("dashboard"))
+
+    requested_mode = normalize_wg_profile_mode(request.args.get("mode", WG_PROFILE_GLOBAL))
+
+    db = get_db()
+    reconcile_expired_subscriptions(db)
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if not is_subscription_active(user):
+        flash("订阅未生效或已过期，请先续费。", "error")
+        return redirect(url_for("dashboard"))
+
+    try:
+        config_text, _ = build_user_wireguard_config(
+            user,
+            profile_mode=requested_mode,
+        )
+    except Exception as exc:
+        flash(f"二维码生成失败：{exc}", "error")
+        return redirect(url_for("dashboard_home"))
+
+    qr = subprocess.run(
+        ["qrencode", "-o", "-", "-t", "PNG"],
+        input=config_text.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    if qr.returncode != 0:
+        msg = (qr.stderr or b"").decode("utf-8", errors="ignore").strip() or "未知错误"
+        flash(f"二维码生成失败：{msg}", "error")
+        return redirect(url_for("dashboard_home"))
+
+    filename = f"wg-{safe_name(user['username'])}-global.png"
+    headers = {"Content-Disposition": f'inline; filename=\"{filename}\"'}
+    return Response(qr.stdout, headers=headers, mimetype="image/png")
 
 
 @app.route("/subscription/payment-qr")

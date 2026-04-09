@@ -1,4 +1,4 @@
-#!/opt/vpn-portal/.venv/bin/python
+#!/usr/bin/env python3
 import os
 import sqlite3
 import sys

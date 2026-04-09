@@ -1,0 +1,38 @@
+port 1194
+proto udp
+dev tun
+topology subnet
+server 10.8.0.0 255.255.255.0
+ifconfig-pool-persist /etc/openvpn/server/ipp.txt
+
+ca /etc/openvpn/server/ca.crt
+cert /etc/openvpn/server/server.crt
+key /etc/openvpn/server/server.key
+dh none
+ecdh-curve prime256v1
+tls-crypt /etc/openvpn/server/tls-crypt.key
+
+cipher AES-256-GCM
+ncp-ciphers AES-256-GCM:AES-128-GCM
+auth SHA256
+keepalive 10 120
+persist-key
+persist-tun
+explicit-exit-notify 1
+
+user nobody
+group nogroup
+
+script-security 3
+auth-user-pass-verify "/usr/local/bin/python /opt/vpn-service/openvpn_auth.py" via-file
+username-as-common-name
+verify-client-cert none
+
+push "redirect-gateway def1"
+push "dhcp-option DNS 10.8.0.1"
+
+up "/sbin/iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE"
+down "/sbin/iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE"
+
+status /tmp/openvpn-status.log
+verb 3
