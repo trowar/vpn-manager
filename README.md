@@ -104,14 +104,14 @@ OPENVPN_ENABLED=0
 4. 启动服务
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build web
 ```
 
 5. 查看状态
 
 ```bash
 docker compose ps
-docker compose logs -f vpn
+docker compose --profile vpn-server logs -f vpnmanager-server
 docker compose logs -f web
 ```
 
@@ -157,7 +157,7 @@ OpenVPN 使用 `scripts/openvpn_auth.py` 校验账号密码，读取 `portal.db`
 
 ```bash
 docker compose restart web
-docker compose restart vpn
+docker compose --profile vpn-server restart vpnmanager-server
 docker compose logs -f --tail=200 web
-docker compose logs -f --tail=200 vpn
+docker compose --profile vpn-server logs -f --tail=200 vpnmanager-server
 ```
