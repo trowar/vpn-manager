@@ -1285,29 +1285,132 @@ def build_vpn_node_deploy_script(
 
         log() {{ echo "[deploy] $1"; }}
 
-        if ! command -v git >/dev/null 2>&1; then
-          apt-get update -qq
-          apt-get install -y -qq git ca-certificates curl >/dev/null
+        PM=""
+        if command -v apt-get >/dev/null 2>&1; then
+          PM="apt"
+        elif command -v dnf >/dev/null 2>&1; then
+          PM="dnf"
+        elif command -v yum >/dev/null 2>&1; then
+          PM="yum"
+        else
+          log "未找到可用包管理器（apt/dnf/yum）"
+          exit 1
+        fi
+
+        PKG_CACHE_READY=0
+        pkg_update() {{
+          if [ "$PKG_CACHE_READY" -eq 1 ]; then
+            return 0
+          fi
+          if [ "$PM" = "apt" ]; then
+            apt-get update -y -qq >/dev/null
+          elif [ "$PM" = "dnf" ]; then
+            dnf -y -q makecache >/dev/null || true
+          else
+            yum -y -q makecache >/dev/null || true
+          fi
+          PKG_CACHE_READY=1
+        }}
+
+        pkg_upgrade() {{
+          log "升级系统组件（$PM）"
+          if [ "$PM" = "apt" ]; then
+            pkg_update
+            apt-get upgrade -y -qq >/dev/null || apt-get dist-upgrade -y -qq >/dev/null
+          elif [ "$PM" = "dnf" ]; then
+            dnf -y -q upgrade --refresh >/dev/null || dnf -y -q update >/dev/null
+          else
+            yum -y -q update >/dev/null
+          fi
+        }}
+
+        pkg_install() {{
+          if [ "$#" -eq 0 ]; then
+            return 0
+          fi
+          pkg_update
+          if [ "$PM" = "apt" ]; then
+            apt-get install -y -qq --no-install-recommends "$@" >/dev/null
+          elif [ "$PM" = "dnf" ]; then
+            dnf -y -q install "$@" >/dev/null
+          else
+            yum -y -q install "$@" >/dev/null
+          fi
+        }}
+
+        pkg_upgrade
+        pkg_install ca-certificates curl git
+
+        if ! command -v ip >/dev/null 2>&1; then
+          pkg_install iproute2 || pkg_install iproute || true
+        fi
+        if ! command -v iptables >/dev/null 2>&1; then
+          pkg_install iptables || true
+        fi
+        if ! command -v ss >/dev/null 2>&1; then
+          pkg_install iproute2 || pkg_install iproute || true
         fi
 
         if ! command -v docker >/dev/null 2>&1; then
-          apt-get update -qq
-          apt-get install -y -qq docker.io >/dev/null
+          if [ "$PM" = "apt" ]; then
+            pkg_install docker.io || true
+          else
+            pkg_install docker docker-ce docker-ce-cli containerd.io || pkg_install docker || true
+          fi
+        fi
+        if ! command -v docker >/dev/null 2>&1; then
+          curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || true
+        fi
+        if ! command -v docker >/dev/null 2>&1; then
+          log "Docker 安装失败"
+          exit 1
+        fi
+
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl enable --now docker >/dev/null 2>&1 || true
+        else
+          service docker start >/dev/null 2>&1 || true
         fi
 
         if ! docker compose version >/dev/null 2>&1; then
-          apt-get update -qq
-          apt-get install -y -qq docker-compose-plugin >/dev/null || \
-          apt-get install -y -qq docker-compose-v2 >/dev/null || \
-          apt-get install -y -qq docker-compose >/dev/null
+          if [ "$PM" = "apt" ]; then
+            pkg_install docker-compose-plugin || pkg_install docker-compose-v2 || pkg_install docker-compose || true
+          else
+            pkg_install docker-compose-plugin || pkg_install docker-compose || true
+          fi
         fi
+
+        HAS_DOCKER_COMPOSE_V2=0
+        if docker compose version >/dev/null 2>&1; then
+          HAS_DOCKER_COMPOSE_V2=1
+        elif command -v docker-compose >/dev/null 2>&1; then
+          HAS_DOCKER_COMPOSE_V2=0
+        else
+          log "docker compose 不可用"
+          exit 1
+        fi
+
+        compose() {{
+          if [ "$HAS_DOCKER_COMPOSE_V2" -eq 1 ]; then
+            docker compose "$@"
+          else
+            docker-compose "$@"
+          fi
+        }}
 
         if ! command -v wg >/dev/null 2>&1; then
-          apt-get update -qq
-          apt-get install -y -qq wireguard-tools >/dev/null
+          pkg_install wireguard-tools || true
         fi
-
-        systemctl enable --now docker >/dev/null 2>&1 || true
+        if ! command -v wg >/dev/null 2>&1; then
+          if [ "$PM" = "dnf" ] || [ "$PM" = "yum" ]; then
+            pkg_install epel-release || true
+            pkg_install wireguard-tools || true
+          fi
+        fi
+        if ! command -v wg >/dev/null 2>&1; then
+          log "wireguard-tools 安装失败"
+          exit 1
+        fi
 
         if [ ! -d /opt/vpn-node/.git ]; then
           rm -rf /opt/vpn-node
@@ -1386,8 +1489,8 @@ VPN_ENABLE_DNSMASQ=1
 VPN_ENABLE_OPENVPN=0
 EOF
 
-        docker compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpnmanager-server >/dev/null
-        docker compose -f docker-compose.vpn-node.yml --env-file .env ps
+        compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpnmanager-server >/dev/null
+        compose -f docker-compose.vpn-node.yml --env-file .env ps
         log "completed"
         """
     ).strip() + "\n"
