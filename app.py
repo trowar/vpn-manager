@@ -1648,6 +1648,39 @@ def resolve_ipv4_for_dns_record(host: str) -> str:
     return str(parsed)
 
 
+def ensure_auto_domain_for_server(
+    db: sqlite3.Connection,
+    server_id: int,
+) -> tuple[str, str]:
+    account_row = db.execute(
+        """
+        SELECT id, account_name, zone_name
+        FROM cloudflare_accounts
+        WHERE is_active = 1
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not account_row:
+        return "", "没有可用的 Cloudflare 账号，请先在“付款方式/Cloudflare 账号”中启用账号。"
+
+    zone_name = normalize_fqdn(account_row["zone_name"])
+    if not zone_name:
+        return "", f"Cloudflare 账号 {account_row['account_name']} 缺少 Zone 域名，无法自动分配。"
+
+    auto_domain = normalize_fqdn(f"srv{int(server_id)}.{zone_name}")
+    if not auto_domain:
+        return "", "自动生成域名失败，请检查 Cloudflare Zone 配置。"
+
+    ensure_managed_domain_entry(
+        db,
+        auto_domain,
+        cloudflare_account_id=int(account_row["id"]),
+        sort_order=100000 + max(0, int(server_id)),
+    )
+    return auto_domain, f"已自动创建域名 {auto_domain}，准备分配到该服务器。"
+
+
 def assign_managed_domain_to_server(
     db: sqlite3.Connection,
     server_id: int,
@@ -1674,27 +1707,41 @@ def assign_managed_domain_to_server(
         where_domain = " AND lower(d.domain_name) = lower(?)"
         query_params.append(normalized_preferred)
 
-    domain_row = db.execute(
-        f"""
-        SELECT
-            d.id,
-            d.domain_name,
-            d.cloudflare_account_id,
-            a.account_name,
-            a.api_token,
-            a.zone_name,
-            a.zone_id
-        FROM managed_domains d
-        JOIN cloudflare_accounts a ON a.id = d.cloudflare_account_id
-        WHERE d.is_active = 1
-          AND a.is_active = 1
-          AND (d.assigned_server_id IS NULL OR d.assigned_server_id = ?)
-          {where_domain}
-        ORDER BY CASE WHEN d.assigned_server_id = ? THEN 0 ELSE 1 END, d.sort_order ASC, d.id ASC
-        LIMIT 1
-        """,
-        tuple(query_params + [server_id]),
-    ).fetchone()
+    def pick_domain_row() -> sqlite3.Row | None:
+        return db.execute(
+            f"""
+            SELECT
+                d.id,
+                d.domain_name,
+                d.cloudflare_account_id,
+                a.account_name,
+                a.api_token,
+                a.zone_name,
+                a.zone_id
+            FROM managed_domains d
+            JOIN cloudflare_accounts a ON a.id = d.cloudflare_account_id
+            WHERE d.is_active = 1
+              AND a.is_active = 1
+              AND (d.assigned_server_id IS NULL OR d.assigned_server_id = ?)
+              {where_domain}
+            ORDER BY CASE WHEN d.assigned_server_id = ? THEN 0 ELSE 1 END, d.sort_order ASC, d.id ASC
+            LIMIT 1
+            """,
+            tuple(query_params + [server_id]),
+        ).fetchone()
+
+    domain_row = pick_domain_row()
+    auto_domain_notice = ""
+    if not domain_row and not normalized_preferred:
+        auto_domain, auto_notice = ensure_auto_domain_for_server(db, server_id)
+        if not auto_domain:
+            return False, auto_notice
+        auto_domain_notice = auto_notice
+        normalized_preferred = auto_domain
+        where_domain = " AND lower(d.domain_name) = lower(?)"
+        query_params = [server_id, normalized_preferred]
+        domain_row = pick_domain_row()
+
     if not domain_row:
         if normalized_preferred:
             return False, f"域名 {normalized_preferred} 不可用或未在域名管理中启用。"
@@ -1720,6 +1767,8 @@ def assign_managed_domain_to_server(
     )
     now_iso = utcnow_iso()
     success_message = f"已分配域名 {domain_name} -> {server_ip}"
+    if auto_domain_notice:
+        success_message = f"{auto_domain_notice}\n{success_message}"
 
     db.execute(
         """
