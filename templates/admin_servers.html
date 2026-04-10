@@ -65,6 +65,31 @@
                 <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
                   <button type="submit">部署</button>
                 </form>
+                <button
+                  type="button"
+                  class="btn secondary open-server-log-modal"
+                  data-log-url="{{ url_for('admin_server_deploy_log', server_id=s['id']) }}"
+                  data-server-name="{{ s['server_name'] }}"
+                >部署日志</button>
+                <button
+                  type="button"
+                  class="btn secondary open-server-edit-modal"
+                  data-update-url="{{ url_for('admin_update_saved_server', server_id=s['id']) }}"
+                  data-server-name="{{ s['server_name'] }}"
+                  data-host="{{ s['host'] }}"
+                  data-port="{{ s['port'] }}"
+                  data-username="{{ s['username'] }}"
+                  data-wg-port="{{ s['wg_port'] }}"
+                  data-openvpn-port="{{ s['openvpn_port'] }}"
+                  data-dns-port="{{ s['dns_port'] }}"
+                  data-domain="{{ s['domain'] }}"
+                >修改</button>
+                <button
+                  type="button"
+                  class="danger open-server-delete-modal"
+                  data-delete-url="{{ url_for('admin_delete_saved_server', server_id=s['id']) }}"
+                  data-server-name="{{ s['server_name'] }}"
+                >删除</button>
               </div>
             </td>
           </tr>
@@ -127,36 +152,134 @@
   </div>
 </div>
 
+<div class="payment-modal" id="server-edit-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>修改服务器</h4>
+      <button type="button" class="btn secondary modal-close-x" id="close-server-edit-modal">×</button>
+    </div>
+
+    <form method="post" id="server-edit-form" class="form">
+      <label>服务器名称
+        <input type="text" name="server_name" id="server-edit-name" required>
+      </label>
+      <label>服务器 IP/域名
+        <input type="text" name="host" id="server-edit-host" required>
+      </label>
+      <label>SSH 端口
+        <input type="number" name="port" id="server-edit-port" min="1" max="65535" required>
+      </label>
+      <label>登录账号
+        <input type="text" name="username" id="server-edit-username" required>
+      </label>
+      <label>登录密码（留空则保持不变）
+        <input type="password" name="password" id="server-edit-password" placeholder="不修改可留空">
+      </label>
+      <label>绑定域名（可选，留空将清空绑定）
+        <input type="text" name="domain" id="server-edit-domain" placeholder="例如：hk1.network000.com">
+      </label>
+      <label>WireGuard 端口
+        <input type="number" name="wg_port" id="server-edit-wg-port" min="1" max="65535" required>
+      </label>
+      <label>OpenVPN 端口
+        <input type="number" name="openvpn_port" id="server-edit-openvpn-port" min="1" max="65535" required>
+      </label>
+      <label>DNS 端口
+        <input type="number" name="dns_port" id="server-edit-dns-port" min="1" max="65535" required>
+      </label>
+      <div class="actions">
+        <button type="submit">保存修改</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="server-delete-modal" hidden>
+  <div class="payment-modal-card" style="max-width:460px;">
+    <div class="section-title-row">
+      <h4>确认删除</h4>
+      <button type="button" class="btn secondary modal-close-x" id="close-server-delete-modal">×</button>
+    </div>
+    <p id="server-delete-message">确认删除该服务器吗？</p>
+    <form method="post" id="server-delete-form" class="actions">
+      <button type="submit" class="danger">确认删除</button>
+      <button type="button" class="btn secondary" id="cancel-server-delete-modal">取消</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="server-log-modal" hidden>
+  <div class="payment-modal-card" style="max-width:960px;">
+    <div class="section-title-row">
+      <h4 id="server-log-title">部署日志</h4>
+      <button type="button" class="btn secondary modal-close-x" id="close-server-log-modal">×</button>
+    </div>
+    <p class="helper" id="server-log-meta">加载中...</p>
+    <pre id="server-log-content" style="max-height:460px; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#0f172a; color:#e5e7eb; padding:12px; border-radius:8px;">加载中...</pre>
+  </div>
+</div>
+
 <script>
   (function () {
-    var openBtn = document.getElementById("open-server-modal");
-    var closeBtn = document.getElementById("close-server-modal");
-    var modal = document.getElementById("server-modal");
-    var testBtn = document.getElementById("server-test-btn");
-    var resultNode = document.getElementById("server-test-result");
+    var createOpenBtn = document.getElementById("open-server-modal");
+    var createCloseBtn = document.getElementById("close-server-modal");
+    var createModal = document.getElementById("server-modal");
+    var createTestBtn = document.getElementById("server-test-btn");
+    var createResultNode = document.getElementById("server-test-result");
 
-    function openModal() {
+    var editModal = document.getElementById("server-edit-modal");
+    var editCloseBtn = document.getElementById("close-server-edit-modal");
+    var editButtons = document.querySelectorAll(".open-server-edit-modal");
+    var editForm = document.getElementById("server-edit-form");
+    var editName = document.getElementById("server-edit-name");
+    var editHost = document.getElementById("server-edit-host");
+    var editPort = document.getElementById("server-edit-port");
+    var editUser = document.getElementById("server-edit-username");
+    var editPass = document.getElementById("server-edit-password");
+    var editDomain = document.getElementById("server-edit-domain");
+    var editWgPort = document.getElementById("server-edit-wg-port");
+    var editOpenvpnPort = document.getElementById("server-edit-openvpn-port");
+    var editDnsPort = document.getElementById("server-edit-dns-port");
+
+    var deleteModal = document.getElementById("server-delete-modal");
+    var deleteCloseBtn = document.getElementById("close-server-delete-modal");
+    var deleteCancelBtn = document.getElementById("cancel-server-delete-modal");
+    var deleteButtons = document.querySelectorAll(".open-server-delete-modal");
+    var deleteForm = document.getElementById("server-delete-form");
+    var deleteMessage = document.getElementById("server-delete-message");
+
+    var logModal = document.getElementById("server-log-modal");
+    var logCloseBtn = document.getElementById("close-server-log-modal");
+    var logButtons = document.querySelectorAll(".open-server-log-modal");
+    var logTitle = document.getElementById("server-log-title");
+    var logMeta = document.getElementById("server-log-meta");
+    var logContent = document.getElementById("server-log-content");
+
+    function openModal(modal) {
       if (!modal) return;
       modal.hidden = false;
       document.body.classList.add("modal-open");
     }
 
-    function closeModal() {
+    function closeModal(modal) {
       if (!modal) return;
       modal.hidden = true;
       document.body.classList.remove("modal-open");
     }
 
-    if (openBtn) openBtn.addEventListener("click", openModal);
-    if (closeBtn) closeBtn.addEventListener("click", closeModal);
-    if (modal) {
+    function bindOverlayClose(modal) {
+      if (!modal) return;
       modal.addEventListener("click", function (event) {
-        if (event.target === modal) closeModal();
+        if (event.target === modal) closeModal(modal);
       });
     }
 
+    if (createOpenBtn) createOpenBtn.addEventListener("click", function () { openModal(createModal); });
+    if (createCloseBtn) createCloseBtn.addEventListener("click", function () { closeModal(createModal); });
+    bindOverlayClose(createModal);
+
     async function testServerConnection() {
-      if (!testBtn) return;
+      if (!createTestBtn) return;
       var host = document.getElementById("server-host-input");
       var port = document.getElementById("server-port-input");
       var username = document.getElementById("server-user-input");
@@ -164,18 +287,18 @@
       if (!host || !port || !username || !password) return;
 
       if (!host.value.trim() || !username.value.trim() || !password.value) {
-        if (resultNode) {
-          resultNode.textContent = "请先填写服务器地址、账号和密码。";
-          resultNode.style.color = "#b91c1c";
+        if (createResultNode) {
+          createResultNode.textContent = "请先填写服务器地址、账号和密码。";
+          createResultNode.style.color = "#b91c1c";
         }
         return;
       }
 
-      testBtn.disabled = true;
-      testBtn.textContent = "测试中...";
-      if (resultNode) {
-        resultNode.textContent = "正在测试连接，请稍候...";
-        resultNode.style.color = "#5f6b7a";
+      createTestBtn.disabled = true;
+      createTestBtn.textContent = "测试中...";
+      if (createResultNode) {
+        createResultNode.textContent = "正在测试连接，请稍候...";
+        createResultNode.style.color = "#5f6b7a";
       }
       try {
         var response = await fetch("{{ url_for('admin_test_server_connection') }}", {
@@ -189,22 +312,91 @@
           })
         });
         var data = await response.json();
-        if (resultNode) {
-          resultNode.textContent = data.message || (response.ok ? "连接成功" : "连接失败");
-          resultNode.style.color = response.ok ? "#065f46" : "#b91c1c";
+        if (createResultNode) {
+          createResultNode.textContent = data.message || (response.ok ? "连接成功" : "连接失败");
+          createResultNode.style.color = response.ok ? "#065f46" : "#b91c1c";
         }
       } catch (err) {
-        if (resultNode) {
-          resultNode.textContent = "请求失败：" + err;
-          resultNode.style.color = "#b91c1c";
+        if (createResultNode) {
+          createResultNode.textContent = "请求失败：" + err;
+          createResultNode.style.color = "#b91c1c";
         }
       } finally {
-        testBtn.disabled = false;
-        testBtn.textContent = "测试连通";
+        createTestBtn.disabled = false;
+        createTestBtn.textContent = "测试连通";
       }
     }
+    if (createTestBtn) createTestBtn.addEventListener("click", testServerConnection);
 
-    if (testBtn) testBtn.addEventListener("click", testServerConnection);
+    if (editCloseBtn) editCloseBtn.addEventListener("click", function () { closeModal(editModal); });
+    bindOverlayClose(editModal);
+    editButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!editForm) return;
+        editForm.action = btn.dataset.updateUrl || "";
+        if (editName) editName.value = btn.dataset.serverName || "";
+        if (editHost) editHost.value = btn.dataset.host || "";
+        if (editPort) editPort.value = btn.dataset.port || "22";
+        if (editUser) editUser.value = btn.dataset.username || "root";
+        if (editPass) editPass.value = "";
+        if (editDomain) editDomain.value = btn.dataset.domain || "";
+        if (editWgPort) editWgPort.value = btn.dataset.wgPort || "51820";
+        if (editOpenvpnPort) editOpenvpnPort.value = btn.dataset.openvpnPort || "1194";
+        if (editDnsPort) editDnsPort.value = btn.dataset.dnsPort || "53";
+        openModal(editModal);
+      });
+    });
+
+    if (deleteCloseBtn) deleteCloseBtn.addEventListener("click", function () { closeModal(deleteModal); });
+    if (deleteCancelBtn) deleteCancelBtn.addEventListener("click", function () { closeModal(deleteModal); });
+    bindOverlayClose(deleteModal);
+    deleteButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (deleteForm) deleteForm.action = btn.dataset.deleteUrl || "";
+        if (deleteMessage) {
+          deleteMessage.textContent = "确定删除服务器“" + (btn.dataset.serverName || "该服务器") + "”吗？";
+        }
+        openModal(deleteModal);
+      });
+    });
+
+    if (logCloseBtn) logCloseBtn.addEventListener("click", function () { closeModal(logModal); });
+    bindOverlayClose(logModal);
+    logButtons.forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        var logUrl = btn.dataset.logUrl || "";
+        var serverName = btn.dataset.serverName || "服务器";
+        if (logTitle) logTitle.textContent = "部署日志 - " + serverName;
+        if (logMeta) logMeta.textContent = "加载中...";
+        if (logContent) logContent.textContent = "加载中...";
+        openModal(logModal);
+        if (!logUrl) {
+          if (logMeta) logMeta.textContent = "日志地址无效。";
+          if (logContent) logContent.textContent = "无法获取部署日志。";
+          return;
+        }
+        try {
+          var response = await fetch(logUrl, { method: "GET" });
+          var data = await response.json();
+          if (!response.ok || !data.ok) {
+            if (logMeta) logMeta.textContent = "加载失败";
+            if (logContent) logContent.textContent = (data && (data.error || data.message)) || "获取部署日志失败。";
+            return;
+          }
+          if (logMeta) {
+            var ts = data.last_deploy_at || "-";
+            logMeta.textContent = "最近部署时间： " + ts;
+          }
+          if (logContent) {
+            logContent.textContent = data.deploy_log || "暂无部署日志。";
+            logContent.scrollTop = logContent.scrollHeight;
+          }
+        } catch (err) {
+          if (logMeta) logMeta.textContent = "加载失败";
+          if (logContent) logContent.textContent = "请求失败：" + err;
+        }
+      });
+    });
   })();
 </script>
 {% endblock %}

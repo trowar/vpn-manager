@@ -1193,6 +1193,13 @@ def summarize_text(raw: str, limit: int = 600) -> str:
     return "..." + text[-limit:]
 
 
+def clip_text(raw: str, limit: int = 200000) -> str:
+    text = (raw or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
 def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
     rows = db.execute(
         """
@@ -1215,6 +1222,7 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
             last_deploy_at,
             last_deploy_ok,
             last_deploy_message,
+            last_deploy_log,
             created_at,
             updated_at
         FROM vpn_servers
@@ -1247,6 +1255,7 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
                 "last_deploy_at": row["last_deploy_at"],
                 "last_deploy_ok": int(row["last_deploy_ok"] or 0) == 1,
                 "last_deploy_message": summarize_text(row["last_deploy_message"] or "", 280),
+                "has_deploy_log": bool((row["last_deploy_log"] or "").strip()),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
@@ -1760,6 +1769,35 @@ def assign_managed_domain_to_server(
         (domain_name, now_iso, server_id),
     )
     return True, success_message
+
+
+def release_server_domain_bindings(db: sqlite3.Connection, server_id: int) -> None:
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        UPDATE managed_domains
+        SET assigned_server_id = NULL,
+            last_sync_at = ?,
+            last_sync_message = ?,
+            updated_at = ?
+        WHERE assigned_server_id = ?
+        """,
+        (
+            now_iso,
+            "服务器解绑，域名已释放。",
+            now_iso,
+            server_id,
+        ),
+    )
+    db.execute(
+        """
+        UPDATE vpn_servers
+        SET domain = '',
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (now_iso, server_id),
+    )
 
 
 def upsert_primary_cloudflare_account_from_onboarding(
@@ -2309,6 +2347,7 @@ def init_db() -> None:
             last_deploy_at TEXT,
             last_deploy_ok INTEGER NOT NULL DEFAULT 0,
             last_deploy_message TEXT,
+            last_deploy_log TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -2563,6 +2602,7 @@ def migrate_schema(db: sqlite3.Connection) -> None:
             last_deploy_at TEXT,
             last_deploy_ok INTEGER NOT NULL DEFAULT 0,
             last_deploy_message TEXT,
+            last_deploy_log TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -2606,6 +2646,8 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_ok INTEGER NOT NULL DEFAULT 0")
     if "last_deploy_message" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_message TEXT")
+    if "last_deploy_log" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_log TEXT")
     if "created_at" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
     if "updated_at" not in vpn_server_columns:
@@ -4640,12 +4682,15 @@ def update_server_deploy_result(
     message: str,
     status: str,
     vpn_api_token: str | None = None,
+    deploy_log: str | None = None,
 ) -> None:
+    normalized_deploy_log = clip_text(deploy_log or "")
     params: list[object] = [
         status,
         utcnow_iso(),
         1 if ok else 0,
         summarize_text(message, 1200),
+        normalized_deploy_log,
         utcnow_iso(),
         server_id,
     ]
@@ -4655,6 +4700,7 @@ def update_server_deploy_result(
             last_deploy_at = ?,
             last_deploy_ok = ?,
             last_deploy_message = ?,
+            last_deploy_log = ?,
             updated_at = ?
     """
     if vpn_api_token:
@@ -4958,6 +5004,7 @@ def admin_onboarding_step_server():
         message=deploy_message,
         status="online" if deploy_ok else "deploy_failed",
         vpn_api_token=final_token,
+        deploy_log=deploy_log,
     )
     domain_ok = False
     domain_message = ""
@@ -5232,7 +5279,7 @@ def admin_onboarding():
             message=test_message,
         )
 
-        deploy_ok, deploy_message, final_token, _deploy_log = deploy_vpn_node_server(
+        deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
             host=server_host,
             port=server_port,
             username=server_username,
@@ -5249,6 +5296,7 @@ def admin_onboarding():
             message=deploy_message,
             status="online" if deploy_ok else "deploy_failed",
             vpn_api_token=final_token,
+            deploy_log=deploy_log,
         )
         if deploy_ok:
             upsert_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED, "1")
@@ -5361,7 +5409,7 @@ def admin_create_server():
     )
     update_server_test_result(db, server_id, ok=True, message=test_message)
 
-    deploy_ok, deploy_message, final_token, _deploy_log = deploy_vpn_node_server(
+    deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
         host=host,
         port=port,
         username=username,
@@ -5378,6 +5426,7 @@ def admin_create_server():
         message=deploy_message,
         status="online" if deploy_ok else "deploy_failed",
         vpn_api_token=final_token,
+        deploy_log=deploy_log,
     )
     domain_ok = False
     domain_message = ""
@@ -5422,6 +5471,154 @@ def admin_test_saved_server(server_id: int):
     return redirect(url_for("admin_servers"))
 
 
+@app.route("/admin/servers/<int:server_id>/deploy-log")
+@login_required
+@admin_required
+def admin_server_deploy_log(server_id: int):
+    db = get_db()
+    row = db.execute(
+        """
+        SELECT id, server_name, last_deploy_at, last_deploy_message, last_deploy_log
+        FROM vpn_servers
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (server_id,),
+    ).fetchone()
+    if not row:
+        return {"ok": False, "error": "服务器不存在。"}, 404
+
+    deploy_log = (row_get(row, "last_deploy_log", "") or "").strip()
+    if not deploy_log:
+        deploy_log = (row_get(row, "last_deploy_message", "") or "").strip()
+    if not deploy_log:
+        deploy_log = "暂无部署日志。"
+    return {
+        "ok": True,
+        "server_id": int(row["id"]),
+        "server_name": (row["server_name"] or "").strip(),
+        "last_deploy_at": row["last_deploy_at"] or "",
+        "deploy_log": deploy_log,
+    }, 200
+
+
+@app.route("/admin/servers/<int:server_id>/update", methods=["POST"])
+@login_required
+@admin_required
+def admin_update_saved_server(server_id: int):
+    db = get_db()
+    row = db.execute("SELECT * FROM vpn_servers WHERE id = ?", (server_id,)).fetchone()
+    if not row:
+        flash("服务器不存在。", "error")
+        return redirect(url_for("admin_servers"))
+
+    server_name = request.form.get("server_name", "").strip()
+    host = normalize_remote_host(request.form.get("host", ""))
+    port = normalize_server_port(request.form.get("port", "22"), 22)
+    username = (request.form.get("username", "") or "").strip()
+    password_raw = request.form.get("password", "") or ""
+    wg_port = normalize_server_port(
+        request.form.get("wg_port", str(row_get(row, "wg_port", SERVER_DEPLOY_DEFAULT_WG_PORT))),
+        SERVER_DEPLOY_DEFAULT_WG_PORT,
+    )
+    openvpn_port = normalize_server_port(
+        request.form.get(
+            "openvpn_port",
+            str(row_get(row, "openvpn_port", SERVER_DEPLOY_DEFAULT_OPENVPN_PORT)),
+        ),
+        SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+    )
+    dns_port = normalize_server_port(
+        request.form.get("dns_port", str(row_get(row, "dns_port", SERVER_DEPLOY_DEFAULT_DNS_PORT))),
+        SERVER_DEPLOY_DEFAULT_DNS_PORT,
+    )
+    preferred_domain = normalize_fqdn(request.form.get("domain", ""))
+
+    if not host or not username:
+        flash("服务器地址和账号不能为空。", "error")
+        return redirect(url_for("admin_servers"))
+    if not server_name:
+        server_name = host
+
+    old_host = normalize_remote_host(row_get(row, "host", ""))
+    old_domain = normalize_fqdn(row_get(row, "domain", ""))
+    host_changed = host != old_host
+    password_to_save = password_raw if password_raw else (row_get(row, "password", "") or "")
+
+    db.execute(
+        """
+        UPDATE vpn_servers
+        SET server_name = ?,
+            host = ?,
+            port = ?,
+            username = ?,
+            password = ?,
+            wg_port = ?,
+            openvpn_port = ?,
+            dns_port = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            server_name,
+            host,
+            port,
+            username,
+            password_to_save,
+            wg_port,
+            openvpn_port,
+            dns_port,
+            utcnow_iso(),
+            server_id,
+        ),
+    )
+
+    domain_message = ""
+    domain_ok = False
+    if not preferred_domain:
+        if old_domain:
+            release_server_domain_bindings(db, server_id)
+            domain_message = "已清空该服务器域名绑定。"
+            domain_ok = True
+    elif preferred_domain != old_domain or host_changed:
+        try:
+            domain_ok, domain_message = assign_managed_domain_to_server(
+                db,
+                server_id,
+                preferred_domain=preferred_domain,
+            )
+        except Exception as exc:
+            domain_message = str(exc)
+
+    db.commit()
+    flash("服务器信息已更新。", "success")
+    if domain_message:
+        flash(domain_message, "success" if domain_ok else "error")
+    return redirect(url_for("admin_servers"))
+
+
+@app.route("/admin/servers/<int:server_id>/delete", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_saved_server(server_id: int):
+    db = get_db()
+    row = db.execute(
+        "SELECT id, server_name FROM vpn_servers WHERE id = ? LIMIT 1",
+        (server_id,),
+    ).fetchone()
+    if not row:
+        flash("服务器不存在。", "error")
+        return redirect(url_for("admin_servers"))
+
+    release_server_domain_bindings(db, server_id)
+    db.execute("DELETE FROM vpn_servers WHERE id = ?", (server_id,))
+    if (get_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, "") or "").strip() == str(server_id):
+        upsert_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, "")
+    db.commit()
+    flash(f"服务器 {row['server_name']} 已删除。", "success")
+    return redirect(url_for("admin_servers"))
+
+
 @app.route("/admin/servers/<int:server_id>/deploy", methods=["POST"])
 @login_required
 @admin_required
@@ -5432,7 +5629,7 @@ def admin_deploy_saved_server(server_id: int):
         flash("服务器不存在。", "error")
         return redirect(url_for("admin_servers"))
 
-    deploy_ok, deploy_message, final_token, _deploy_log = deploy_vpn_node_server(
+    deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
         host=row["host"],
         port=normalize_server_port(row["port"], 22),
         username=row["username"],
@@ -5451,6 +5648,7 @@ def admin_deploy_saved_server(server_id: int):
         message=deploy_message,
         status="online" if deploy_ok else "deploy_failed",
         vpn_api_token=final_token,
+        deploy_log=deploy_log,
     )
     domain_ok = False
     domain_message = ""
