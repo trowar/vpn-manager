@@ -59,7 +59,7 @@ def authenticate(username: str, password: str) -> bool:
                 traffic_quota_bytes,
                 traffic_used_bytes
             FROM users
-            WHERE (email = ? OR username = ?) AND role = 'user'
+            WHERE (email = ? OR username = ?) AND role IN ('user', 'admin')
             LIMIT 1
             """,
             (username.lower(), username),
@@ -68,6 +68,8 @@ def authenticate(username: str, password: str) -> bool:
             return False
         if not check_password_hash(row["password_hash"], password):
             return False
+        if (row["role"] or "").strip().lower() == "admin":
+            return True
         return is_active_subscription(row)
     finally:
         conn.close()

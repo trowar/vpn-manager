@@ -2639,6 +2639,44 @@ def ensure_user_vpn_ready(db: sqlite3.Connection, user: sqlite3.Row) -> dict[str
     }
 
 
+def ensure_admin_self_vpn_ready(
+    db: sqlite3.Connection,
+    admin_user: sqlite3.Row,
+) -> sqlite3.Row:
+    if row_get(admin_user, "role") != "admin":
+        raise ValueError("仅管理员可使用自用 VPN 配置。")
+
+    vpn_data = ensure_user_vpn_ready(db, admin_user)
+    db.execute(
+        """
+        UPDATE users
+        SET assigned_ip = ?,
+            client_private_key = ?,
+            client_public_key = ?,
+            client_psk = ?,
+            config_path = ?,
+            qr_path = ?,
+            wg_enabled = 1,
+            subscription_expires_at = NULL,
+            traffic_quota_bytes = 0,
+            traffic_used_bytes = 0,
+            traffic_last_total_bytes = 0
+        WHERE id = ? AND role = 'admin'
+        """,
+        (
+            vpn_data["assigned_ip"],
+            vpn_data["client_private_key"],
+            vpn_data["client_public_key"],
+            vpn_data["client_psk"],
+            vpn_data["config_path"],
+            vpn_data["qr_path"],
+            admin_user["id"],
+        ),
+    )
+    db.commit()
+    return db.execute("SELECT * FROM users WHERE id = ?", (admin_user["id"],)).fetchone()
+
+
 def calculate_new_expiry(current_expire_iso: str | None, months: int) -> str:
     now = utcnow()
     current_expire = parse_iso(current_expire_iso)
@@ -4570,6 +4608,25 @@ def admin_deploy_saved_server(server_id: int):
 def admin_home():
     db = get_db()
     reconcile_expired_subscriptions(db)
+    admin_session_user = current_user()
+    admin_user = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (admin_session_user["id"],),
+    ).fetchone()
+    admin_traffic_stats = (
+        get_user_traffic_stats(admin_user) if admin_user is not None else get_user_traffic_stats(admin_session_user)
+    )
+    admin_self_ready = bool(
+        admin_user
+        and int(row_get(admin_user, "wg_enabled", 0) or 0) == 1
+        and (row_get(admin_user, "client_public_key", "") or "").strip()
+    )
+    if is_dynamic_ip_assignment_mode():
+        admin_assigned_ip_display = "DHCP 动态分配（按连接分配）"
+    else:
+        admin_assigned_ip_display = (
+            (row_get(admin_user, "assigned_ip", "") or "").strip() or "尚未生成配置"
+        )
 
     onboarding_settings = load_onboarding_settings(db)
     onboarding_step_status, onboarding_default_step = get_admin_onboarding_step_status(db)
@@ -4616,6 +4673,9 @@ def admin_home():
         first_plan=first_plan,
         payment_settings=payment_settings,
         onboarding_server_draft=onboarding_server_draft,
+        admin_self_ready=admin_self_ready,
+        admin_assigned_ip_display=admin_assigned_ip_display,
+        admin_traffic_stats=admin_traffic_stats,
         admin_page="home",
     )
 
@@ -5404,6 +5464,35 @@ def download_config():
     return Response(config_text, headers=headers, mimetype="text/plain")
 
 
+@app.route("/admin/download/config")
+@login_required
+@admin_required
+def admin_download_config():
+    db = get_db()
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    if not admin:
+        flash("管理员账号不存在。", "error")
+        return redirect(url_for("admin_home"))
+
+    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
+    try:
+        admin = ensure_admin_self_vpn_ready(db, admin)
+        config_text, normalized_mode = build_user_wireguard_config(
+            admin,
+            profile_mode=requested_mode,
+        )
+    except Exception as exc:
+        flash(f"管理员 WireGuard 配置生成失败：{exc}", "error")
+        return redirect(url_for("admin_home"))
+
+    filename = f"wg-admin-{safe_name(admin['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.conf"
+    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    return Response(config_text, headers=headers, mimetype="text/plain")
+
+
 @app.route("/download/openvpn")
 @login_required
 def download_openvpn_config():
@@ -5432,6 +5521,40 @@ def download_openvpn_config():
         return redirect(url_for("dashboard_home"))
 
     filename = f"ovpn-{safe_name(user['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.ovpn"
+    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    return Response(config_text, headers=headers, mimetype="text/plain")
+
+
+@app.route("/admin/download/openvpn")
+@login_required
+@admin_required
+def admin_download_openvpn_config():
+    if not OPENVPN_ENABLED:
+        flash("管理员尚未启用 OpenVPN 支持。", "error")
+        return redirect(url_for("admin_home"))
+
+    db = get_db()
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    if not admin:
+        flash("管理员账号不存在。", "error")
+        return redirect(url_for("admin_home"))
+
+    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
+    normalized_mode = normalize_wg_profile_mode(requested_mode)
+    try:
+        admin = ensure_admin_self_vpn_ready(db, admin)
+        config_text = build_openvpn_client_config(
+            admin["username"],
+            profile_mode=normalized_mode,
+        )
+    except Exception as exc:
+        flash(f"管理员 OpenVPN 配置生成失败：{exc}", "error")
+        return redirect(url_for("admin_home"))
+
+    filename = f"ovpn-admin-{safe_name(admin['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.ovpn"
     headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
     return Response(config_text, headers=headers, mimetype="text/plain")
 

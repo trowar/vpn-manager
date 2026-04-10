@@ -27,22 +27,28 @@
 </section>
 
 <section class="card">
-  <h3>运营概览</h3>
-  <div class="stats-grid">
-    <a href="{{ url_for('admin_pending_orders') }}" class="stat-item" style="text-decoration:none;color:inherit;">
-      <span class="stat-label">待处理订单</span>
-      <strong class="stat-value">{{ pending_count }}</strong>
-    </a>
-    <a href="{{ url_for('admin_paid_orders') }}" class="stat-item" style="text-decoration:none;color:inherit;">
-      <span class="stat-label">已支付订单</span>
-      <strong class="stat-value">{{ paid_count }}</strong>
-    </a>
-    <a href="{{ url_for('admin_subscriptions') }}" class="stat-item" style="text-decoration:none;color:inherit;">
-      <span class="stat-label">在线订阅</span>
-      <strong class="stat-value">{{ active_subscriptions }}</strong>
-    </a>
+  <h3>管理员自用 VPN 配置</h3>
+  <p class="helper">管理员默认无限有效期、无限流量，可直接下载配置自用连接。</p>
+  <p>
+    <strong>当前状态：</strong>
+    {% if admin_self_ready %}
+      <span class="tag tag-ok">已就绪</span>
+    {% else %}
+      <span class="tag tag-warn">未生成</span>
+    {% endif %}
+    ? <strong>分配 IP：</strong>{{ admin_assigned_ip_display }}
+  </p>
+  <p><strong>有效期：</strong>永久 ? <strong>流量剩余：</strong>永久 ? <strong>已用流量：</strong>{{ admin_traffic_stats["total_human"] }}</p>
+  <div class="actions">
+    <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载 WireGuard 配置</a>
+    {% if openvpn_enabled %}
+      <a class="btn secondary" href="{{ url_for('admin_download_openvpn_config', mode='global') }}">下载 OpenVPN 配置</a>
+    {% endif %}
+    <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">下载 WireGuard 客户端</a>
+    {% if openvpn_enabled %}
+      <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">下载 OpenVPN 客户端</a>
+    {% endif %}
   </div>
-  <p class="helper">用户总数：{{ total_users }}</p>
 </section>
 
 {% if not admin_setup_completed %}
