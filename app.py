@@ -1354,12 +1354,32 @@ EOF
           cp docker/vpn/openvpn/server.conf.example docker/vpn/openvpn/server.conf
         fi
 
+        PORT_IN_USE=0
+        ACTUAL_DNS_PORT={dns_port}
+        if command -v ss >/dev/null 2>&1; then
+          if ss -H -lnut "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null | grep -q .; then
+            PORT_IN_USE=1
+          fi
+        fi
+        if [ "$PORT_IN_USE" -eq 1 ]; then
+          for candidate in 5353 1053 2053 3053; do
+            if command -v ss >/dev/null 2>&1; then
+              if ss -H -lnut "( sport = :$candidate )" 2>/dev/null | grep -q .; then
+                continue
+              fi
+            fi
+            ACTUAL_DNS_PORT="$candidate"
+            break
+          done
+          log "DNS 端口 {dns_port} 已占用，回退到 $ACTUAL_DNS_PORT"
+        fi
+
         cat > .env <<EOF
 VPN_API_TOKEN={vpn_api_token}
 WG_INTERFACE=wg0
 WG_PUBLIC_PORT={wg_port}
 OPENVPN_PUBLIC_PORT={openvpn_port}
-DNS_PUBLIC_PORT={dns_port}
+DNS_PUBLIC_PORT=$ACTUAL_DNS_PORT
 VPN_API_PUBLIC_PORT={SERVER_DEPLOY_DEFAULT_VPN_API_PORT}
 VPN_ENABLE_WIREGUARD=1
 VPN_ENABLE_DNSMASQ=1
