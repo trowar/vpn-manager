@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>初始化向导</h2>
-  <p class="helper">首次登录请完成基础配置：首个套餐、收款码、域名、Cloudflare 账号以及第一台 VPN 服务器部署。</p>
+  <p class="helper">首次登录请完成基础配置：首个套餐、收款码、域名、Cloudflare 邮箱与 Global API Key 以及第一台 VPN 服务器部署。</p>
 
   <form method="post" class="form">
     <div class="section-title-row">
@@ -52,10 +52,10 @@
     <div class="section-title-row">
       <h3>3. Cloudflare</h3>
     </div>
-    <label>Cloudflare 账号
-      <input type="text" name="cloudflare_account" value="{{ request.form.get('cloudflare_account', settings['cloudflare_account']) }}" required>
+    <label>Cloudflare 邮箱
+      <input type="email" name="cloudflare_account" value="{{ request.form.get('cloudflare_account', settings['cloudflare_account']) }}" required>
     </label>
-    <label>Cloudflare 密码
+    <label>Global API Key
       <input type="password" name="cloudflare_password" value="{{ request.form.get('cloudflare_password', settings['cloudflare_password']) }}" required>
     </label>
 

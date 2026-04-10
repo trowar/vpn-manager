@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>Cloudflare 账号</h2>
-  <p class="helper">管理用于自动分配域名的 Cloudflare 账号。填写 API Token 后，系统会自动读取可管理域名并回填 Zone ID。</p>
+  <p class="helper">管理用于自动分配域名的 Cloudflare 账号。请填写 Cloudflare 邮箱与 Global API Key，系统会自动读取可管理域名并回填 Zone ID。</p>
 
   <div class="section-title-row">
     <h3>账号列表</h3>
@@ -14,10 +14,10 @@
       <thead>
         <tr>
           <th>ID</th>
-          <th>账号名称</th>
+          <th>邮箱</th>
           <th>Zone 域名</th>
           <th>Zone ID</th>
-          <th>Token</th>
+          <th>Global API Key</th>
           <th>状态</th>
           <th>排序</th>
           <th>操作</th>
@@ -83,14 +83,14 @@
       <button type="button" class="btn secondary" id="close-cf-create-modal">关闭</button>
     </div>
     <form method="post" action="{{ url_for('admin_create_cloudflare_account') }}" class="form">
-      <label>账号名称
-        <input type="text" name="account_name" placeholder="例如：主账号" required>
+      <label>Cloudflare 邮箱
+        <input type="email" name="account_name" placeholder="例如：trowar.lee@gmail.com" required>
       </label>
-      <label>API Token
-        <input type="password" name="api_token" placeholder="请输入 Cloudflare API Token" required>
+      <label>Global API Key
+        <input type="password" name="api_token" placeholder="请输入 Cloudflare Global API Key" required>
       </label>
       <label>优先 Zone（可选）
-        <input type="text" name="zone_name" placeholder="不填则自动使用 Token 可管理的第一个域名">
+        <input type="text" name="zone_name" placeholder="不填则自动使用该邮箱可管理的第一个域名">
       </label>
       <label>排序（数字越小越靠前）
         <input type="number" name="sort_order" min="0" step="1" value="100">
@@ -107,10 +107,10 @@
       <button type="button" class="btn secondary" id="close-cf-edit-modal">关闭</button>
     </div>
     <form method="post" id="cf-edit-form" class="form">
-      <label>账号名称
-        <input type="text" name="account_name" id="cf-edit-account-name" required>
+      <label>Cloudflare 邮箱
+        <input type="email" name="account_name" id="cf-edit-account-name" required>
       </label>
-      <label>API Token（留空则保持不变）
+      <label>Global API Key（留空则保持不变）
         <input type="password" name="api_token" id="cf-edit-api-token" placeholder="如需更换再填写">
       </label>
       <label>优先 Zone（可选）

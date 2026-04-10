@@ -127,14 +127,14 @@
       <section class="onboarding-step-panel" data-panel-step="3" hidden>
         <h5>步骤 3：Cloudflare 信息</h5>
         <form method="post" action="{{ url_for('admin_onboarding_step_cloudflare') }}" class="form">
-          <label>账号名称
-            <input type="text" name="cloudflare_account" value="{{ onboarding_cloudflare_default['account_name'] }}" required>
+          <label>Cloudflare 邮箱
+            <input type="email" name="cloudflare_account" value="{{ onboarding_cloudflare_default['account_name'] }}" required>
           </label>
-          <label>API Token
+          <label>Global API Key
             <input type="password" name="cloudflare_password" value="{{ onboarding_settings['cloudflare_password'] }}" required>
           </label>
           <label>优先 Zone（可选）
-            <input type="text" name="cloudflare_zone_name" placeholder="不填则自动读取 Token 可管理域名" value="{{ onboarding_cloudflare_default['zone_name'] }}">
+            <input type="text" name="cloudflare_zone_name" placeholder="不填则自动读取该邮箱可管理域名" value="{{ onboarding_cloudflare_default['zone_name'] }}">
           </label>
           <div class="actions">
             <button type="submit">保存并下一步</button>

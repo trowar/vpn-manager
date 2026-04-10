@@ -850,6 +850,11 @@ def normalize_fqdn(raw_domain: str | None) -> str:
     return normalize_domain_host(raw_domain).strip().strip(".").lower()
 
 
+def looks_like_email(raw_email: str | None) -> bool:
+    value = (raw_email or "").strip()
+    return "@" in value and "." in value.rsplit("@", 1)[-1]
+
+
 def domain_belongs_to_zone(domain_name: str, zone_name: str) -> bool:
     domain = normalize_fqdn(domain_name)
     zone = normalize_fqdn(zone_name)
@@ -1492,16 +1497,18 @@ def cloudflare_extract_error_message(payload: dict | None) -> str:
 
 
 def cloudflare_api_request(
-    api_token: str,
+    api_key_or_token: str,
     method: str,
     path: str,
     *,
+    auth_email: str = "",
     query: dict[str, str | int | None] | None = None,
     payload: dict | None = None,
 ) -> dict:
-    token = (api_token or "").strip()
-    if not token:
-        raise RuntimeError("Cloudflare API Token 为空。")
+    credential = (api_key_or_token or "").strip()
+    email = (auth_email or "").strip()
+    if not credential:
+        raise RuntimeError("Cloudflare Global API Key 为空。")
 
     request_path = (path or "").strip()
     if not request_path.startswith("/"):
@@ -1521,7 +1528,13 @@ def cloudflare_api_request(
         body = json.dumps(payload).encode("utf-8")
 
     req = urllib_request.Request(url=url, data=body, method=(method or "GET").upper())
-    req.add_header("Authorization", f"Bearer {token}")
+    if looks_like_email(email):
+        # Preferred mode: Global API Key + email.
+        req.add_header("X-Auth-Email", email)
+        req.add_header("X-Auth-Key", credential)
+    else:
+        # Backward compatibility for existing API Token data.
+        req.add_header("Authorization", f"Bearer {credential}")
     req.add_header("Content-Type", "application/json")
 
     try:
@@ -1552,14 +1565,15 @@ def cloudflare_api_request(
     return parsed
 
 
-def cloudflare_get_zone_id(api_token: str, zone_name: str) -> str:
+def cloudflare_get_zone_id(api_key_or_token: str, zone_name: str, *, auth_email: str = "") -> str:
     normalized_zone = normalize_fqdn(zone_name)
     if not normalized_zone:
         raise RuntimeError("Zone 域名不能为空。")
     response = cloudflare_api_request(
-        api_token,
+        api_key_or_token,
         "GET",
         "/zones",
+        auth_email=auth_email,
         query={"name": normalized_zone, "status": "active", "per_page": 1},
     )
     result = response.get("result") or []
@@ -1571,15 +1585,16 @@ def cloudflare_get_zone_id(api_token: str, zone_name: str) -> str:
     return zone_id
 
 
-def cloudflare_list_zones(api_token: str) -> list[dict[str, str]]:
+def cloudflare_list_zones(api_key_or_token: str, *, auth_email: str = "") -> list[dict[str, str]]:
     zones: list[dict[str, str]] = []
     page = 1
     max_pages = 20
     while page <= max_pages:
         response = cloudflare_api_request(
-            api_token,
+            api_key_or_token,
             "GET",
             "/zones",
+            auth_email=auth_email,
             query={"per_page": 50, "page": page},
         )
         result = response.get("result") or []
@@ -1616,13 +1631,14 @@ def cloudflare_list_zones(api_token: str) -> list[dict[str, str]]:
 
 
 def resolve_cloudflare_zone_from_token(
-    api_token: str,
+    api_key_or_token: str,
     *,
+    auth_email: str = "",
     preferred_zone_name: str = "",
 ) -> tuple[str, str, list[str]]:
-    zones = cloudflare_list_zones(api_token)
+    zones = cloudflare_list_zones(api_key_or_token, auth_email=auth_email)
     if not zones:
-        raise RuntimeError("该 API Token 未查询到可管理域名（Zone）。")
+        raise RuntimeError("该邮箱与 Global API Key 未查询到可管理域名（Zone）。")
 
     normalized_preferred = normalize_fqdn(preferred_zone_name)
     selected_zone: dict[str, str] | None = None
@@ -1632,7 +1648,7 @@ def resolve_cloudflare_zone_from_token(
                 selected_zone = item
                 break
         if selected_zone is None:
-            raise RuntimeError(f"Token 无权管理 Zone：{normalized_preferred}")
+            raise RuntimeError(f"当前凭据无权管理 Zone：{normalized_preferred}")
     if selected_zone is None:
         selected_zone = zones[0]
 
@@ -1671,13 +1687,17 @@ def sync_domains_from_cloudflare_account(
     if int(account["is_active"] or 0) != 1:
         raise RuntimeError("Cloudflare 账号已停用，请先启用后再刷新。")
 
-    api_token = (account["api_token"] or "").strip()
-    if not api_token:
-        raise RuntimeError("Cloudflare API Token 为空。")
+    account_email = (account["account_name"] or "").strip()
+    if not looks_like_email(account_email):
+        raise RuntimeError("Cloudflare 邮箱格式无效。")
 
-    zones = cloudflare_list_zones(api_token)
+    api_key = (account["api_token"] or "").strip()
+    if not api_key:
+        raise RuntimeError("Cloudflare Global API Key 为空。")
+
+    zones = cloudflare_list_zones(api_key, auth_email=account_email)
     if not zones:
-        raise RuntimeError("该 API Token 未查询到可管理域名（Zone）。")
+        raise RuntimeError("该邮箱与 Global API Key 未查询到可管理域名（Zone）。")
 
     preferred_zone = normalize_fqdn(account["zone_name"] or "")
     selected_zone = zones[0]
@@ -1817,10 +1837,12 @@ def sync_domains_from_cloudflare_account(
 
 
 def cloudflare_upsert_a_record(
-    api_token: str,
+    api_key_or_token: str,
     zone_id: str,
     domain_name: str,
     ip_v4: str,
+    *,
+    auth_email: str = "",
 ) -> str:
     normalized_domain = normalize_fqdn(domain_name)
     if not normalized_domain:
@@ -1837,9 +1859,10 @@ def cloudflare_upsert_a_record(
         "proxied": False,
     }
     existing = cloudflare_api_request(
-        api_token,
+        api_key_or_token,
         "GET",
         f"/zones/{normalized_zone_id}/dns_records",
+        auth_email=auth_email,
         query={"type": "A", "name": normalized_domain, "per_page": 1},
     )
     records = existing.get("result") or []
@@ -1848,17 +1871,19 @@ def cloudflare_upsert_a_record(
         if not record_id:
             raise RuntimeError("查询到现有 DNS 记录但记录 ID 为空。")
         cloudflare_api_request(
-            api_token,
+            api_key_or_token,
             "PUT",
             f"/zones/{normalized_zone_id}/dns_records/{record_id}",
+            auth_email=auth_email,
             payload=payload,
         )
         return record_id
 
     created = cloudflare_api_request(
-        api_token,
+        api_key_or_token,
         "POST",
         f"/zones/{normalized_zone_id}/dns_records",
+        auth_email=auth_email,
         payload=payload,
     )
     created_result = created.get("result") or {}
@@ -1994,21 +2019,25 @@ def assign_managed_domain_to_server(
 
     domain_name = normalize_fqdn(domain_row["domain_name"])
     zone_name = normalize_fqdn(domain_row["zone_name"])
-    api_token = (domain_row["api_token"] or "").strip()
-    if not api_token:
-        return False, f"Cloudflare 账号 {domain_row['account_name']} 缺少 API Token。"
+    account_email = (domain_row["account_name"] or "").strip()
+    if not looks_like_email(account_email):
+        return False, "Cloudflare 邮箱格式无效，请在 Cloudflare 账号中填写正确邮箱。"
+    api_key = (domain_row["api_token"] or "").strip()
+    if not api_key:
+        return False, f"Cloudflare 账号 {account_email} 缺少 Global API Key。"
     if not domain_belongs_to_zone(domain_name, zone_name):
         return False, f"域名 {domain_name} 不属于 Zone {zone_name}。"
 
     zone_id = (domain_row["zone_id"] or "").strip()
     if not zone_id:
-        zone_id = cloudflare_get_zone_id(api_token, zone_name)
+        zone_id = cloudflare_get_zone_id(api_key, zone_name, auth_email=account_email)
 
     dns_record_id = cloudflare_upsert_a_record(
-        api_token=api_token,
+        api_key_or_token=api_key,
         zone_id=zone_id,
         domain_name=domain_name,
         ip_v4=server_ip,
+        auth_email=account_email,
     )
     now_iso = utcnow_iso()
     success_message = f"已分配域名 {domain_name} -> {server_ip}"
@@ -2102,14 +2131,17 @@ def upsert_primary_cloudflare_account_from_onboarding(
     zone_name: str = "",
 ) -> int:
     normalized_account_name = (account_name or "").strip()
-    token = (api_token or "").strip()
+    api_key = (api_token or "").strip()
     if not normalized_account_name:
-        raise RuntimeError("Cloudflare 账号名称不能为空。")
-    if not token:
-        raise RuntimeError("Cloudflare API Token 不能为空。")
+        raise RuntimeError("Cloudflare 邮箱不能为空。")
+    if not looks_like_email(normalized_account_name):
+        raise RuntimeError("Cloudflare 邮箱格式无效。")
+    if not api_key:
+        raise RuntimeError("Cloudflare Global API Key 不能为空。")
 
     selected_zone_name, selected_zone_id, _ = resolve_cloudflare_zone_from_token(
-        token,
+        api_key,
+        auth_email=normalized_account_name,
         preferred_zone_name=zone_name,
     )
 
@@ -2137,7 +2169,7 @@ def upsert_primary_cloudflare_account_from_onboarding(
             """,
             (
                 normalized_account_name,
-                token,
+                api_key,
                 selected_zone_name,
                 selected_zone_id,
                 now_iso,
@@ -2162,7 +2194,7 @@ def upsert_primary_cloudflare_account_from_onboarding(
         """,
         (
             normalized_account_name,
-            token,
+            api_key,
             selected_zone_name,
             selected_zone_id,
             now_iso,
@@ -5140,7 +5172,10 @@ def admin_onboarding_step_cloudflare():
     cloudflare_zone_name = normalize_fqdn(request.form.get("cloudflare_zone_name", ""))
 
     if not cloudflare_account or not cloudflare_password:
-        flash("请填写 Cloudflare 账号名称和 API Token。", "error")
+        flash("请填写 Cloudflare 邮箱和 Global API Key。", "error")
+        return redirect_admin_onboarding_modal(3)
+    if not looks_like_email(cloudflare_account):
+        flash("Cloudflare 邮箱格式无效。", "error")
         return redirect_admin_onboarding_modal(3)
 
     try:
@@ -5495,7 +5530,7 @@ def admin_onboarding():
                 admin_page="onboarding",
             )
         if not cloudflare_account or not cloudflare_password:
-            flash("请填写 Cloudflare 账号和密码。", "error")
+            flash("请填写 Cloudflare 邮箱和 Global API Key。", "error")
             return render_template(
                 "admin_onboarding.html",
                 settings=settings,
@@ -6130,10 +6165,13 @@ def admin_create_cloudflare_account():
     sort_order_raw = request.form.get("sort_order", "").strip()
 
     if not account_name:
-        flash("账号名称不能为空。", "error")
+        flash("Cloudflare 邮箱不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    if not looks_like_email(account_name):
+        flash("Cloudflare 邮箱格式无效。", "error")
         return redirect(url_for("admin_cloudflare_accounts"))
     if not api_token:
-        flash("API Token 不能为空。", "error")
+        flash("Global API Key 不能为空。", "error")
         return redirect(url_for("admin_cloudflare_accounts"))
     try:
         sort_order = int(sort_order_raw) if sort_order_raw else 100
@@ -6145,6 +6183,7 @@ def admin_create_cloudflare_account():
     try:
         selected_zone_name, selected_zone_id, zone_names = resolve_cloudflare_zone_from_token(
             api_token,
+            auth_email=account_name,
             preferred_zone_name=zone_name,
         )
     except Exception as exc:
@@ -6178,7 +6217,7 @@ def admin_create_cloudflare_account():
     )
     db.commit()
     flash(
-        f"Cloudflare 账号已添加。已自动识别可管理域名：{summarize_zone_names(zone_names)}；当前使用 {selected_zone_name}。",
+        f"Cloudflare 账号已添加。已自动识别可管理域名：{summarize_zone_names(zone_names)}；当前使用 {selected_zone_name}（邮箱 {account_name}）。",
         "success",
     )
     return redirect(url_for("admin_cloudflare_accounts"))
@@ -6208,12 +6247,15 @@ def admin_update_cloudflare_account(account_id: int):
     sort_order_raw = request.form.get("sort_order", "").strip()
 
     if not account_name:
-        flash("账号名称不能为空。", "error")
+        flash("Cloudflare 邮箱不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    if not looks_like_email(account_name):
+        flash("Cloudflare 邮箱格式无效。", "error")
         return redirect(url_for("admin_cloudflare_accounts"))
     if not api_token:
         api_token = (existing["api_token"] or "").strip()
     if not api_token:
-        flash("API Token 不能为空。", "error")
+        flash("Global API Key 不能为空。", "error")
         return redirect(url_for("admin_cloudflare_accounts"))
     try:
         sort_order = int(sort_order_raw) if sort_order_raw else 100
@@ -6226,6 +6268,7 @@ def admin_update_cloudflare_account(account_id: int):
     try:
         selected_zone_name, selected_zone_id, zone_names = resolve_cloudflare_zone_from_token(
             api_token,
+            auth_email=account_name,
             preferred_zone_name=preferred_zone,
         )
     except Exception as exc:
@@ -6255,7 +6298,7 @@ def admin_update_cloudflare_account(account_id: int):
     )
     db.commit()
     flash(
-        f"Cloudflare 账号已更新。已自动识别可管理域名：{summarize_zone_names(zone_names)}；当前使用 {selected_zone_name}。",
+        f"Cloudflare 账号已更新。已自动识别可管理域名：{summarize_zone_names(zone_names)}；当前使用 {selected_zone_name}（邮箱 {account_name}）。",
         "success",
     )
     return redirect(url_for("admin_cloudflare_accounts"))
