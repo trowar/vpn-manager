@@ -77,5 +77,15 @@
   <p class="helper">
     如果连接失败，请先检查：套餐是否生效、设备系统时间是否准确、网络是否允许 UDP。
   </p>
+  <div class="guide-image-grid">
+    <figure class="guide-image-card">
+      <img src="{{ url_for('static', filename='openvpn_import_step1.svg', v='20260410-4') }}" alt="OpenVPN 导入步骤 1">
+      <figcaption>OpenVPN 导入步骤 1：点击 “Have a configuration file instead (.ovpn)?” 后选择 “Upload File”。</figcaption>
+    </figure>
+    <figure class="guide-image-card">
+      <img src="{{ url_for('static', filename='openvpn_import_step2.svg', v='20260410-4') }}" alt="OpenVPN 导入步骤 2">
+      <figcaption>OpenVPN 导入步骤 2：选择下载的 `.ovpn` 配置文件并打开完成导入。</figcaption>
+    </figure>
+  </div>
 </section>
 {% endblock %}
