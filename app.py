@@ -2728,7 +2728,12 @@ def openvpn_download_redirect(platform: str):
 def index():
     if session.get("user_id"):
         return redirect(url_for("dashboard"))
-    return render_template("index.html")
+    db = get_db()
+    landing_plans = load_subscription_plans(db, active_only=True)
+    return render_template(
+        "index.html",
+        landing_plans=landing_plans,
+    )
 
 
 @app.route("/register", methods=["GET", "POST"])

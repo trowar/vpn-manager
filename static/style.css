@@ -95,6 +95,12 @@ body {
   padding: 20px 0 40px;
 }
 
+.guest-topbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
 .card {
   background: var(--card);
   border: 1px solid var(--border);

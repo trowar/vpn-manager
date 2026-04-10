@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
+<div class="guest-topbar">
+  <a class="btn secondary" href="{{ url_for('login') }}">登录</a>
+</div>
+
 <section class="card hero">
   <h2>VPN 门户（WireGuard + OpenVPN，支持 USDT 付费）</h2>
   <p>
@@ -8,10 +12,38 @@
   </p>
   <div class="actions">
     <a class="btn" href="{{ url_for('register') }}">注册账号</a>
-    <a class="btn secondary" href="{{ url_for('login') }}">登录控制台</a>
-    <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">WireGuard 客户端</a>
-    <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">OpenVPN 客户端</a>
   </div>
+</section>
+
+<section class="card">
+  <div class="section-title-row">
+    <h3>套餐种类与价格</h3>
+    <span class="helper">默认付款方式：USDT（{{ usdt_default_network }}）</span>
+  </div>
+  {% if landing_plans %}
+    <table class="subscriptions-table">
+      <thead>
+        <tr>
+          <th>套餐名称</th>
+          <th>收费模式</th>
+          <th>套餐内容</th>
+          <th>价格</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for plan in landing_plans %}
+          <tr>
+            <td>{{ plan["plan_name"] }}</td>
+            <td>{{ plan["mode_label"] }}</td>
+            <td>{{ plan["value_label"] }}</td>
+            <td><strong>{{ plan["price_usdt"] }} USDT</strong></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">管理员暂未配置可售套餐，请稍后再试。</p>
+  {% endif %}
 </section>
 
 <section class="card">
@@ -37,7 +69,27 @@
 </section>
 
 <section class="card">
-  <h3>如何设置 VPN（新手说明）</h3>
+  <h3>客户端下载</h3>
+  <div class="feature-grid">
+    <div class="feature-item">
+      <h4>WireGuard 客户端</h4>
+      <p>提供 Windows、macOS、Android、iOS 官方下载入口。</p>
+      <div class="actions">
+        <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">进入 WireGuard 下载页</a>
+      </div>
+    </div>
+    <div class="feature-item">
+      <h4>OpenVPN 客户端</h4>
+      <p>提供 OpenVPN Connect 官方下载入口及 `.ovpn` 导入说明。</p>
+      <div class="actions">
+        <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">进入 OpenVPN 下载页</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h3>客户端使用说明</h3>
   <ol class="guide-steps">
     <li>在手机或电脑安装 WireGuard 或 OpenVPN 客户端。</li>
     <li>登录用户控制台，确认订阅状态为“已生效”。</li>
