@@ -161,3 +161,12 @@ docker compose --profile vpn-server restart vpnmanager-server
 docker compose logs -f --tail=200 web
 docker compose --profile vpn-server logs -f --tail=200 vpnmanager-server
 ```
+
+## 推送并更新 Release
+
+每次推送后可使用脚本自动更新 `latest` release（会强制移动 `latest` tag 到当前提交）：
+
+```powershell
+$env:GH_TOKEN="<你的 GitHub Token>"
+powershell -ExecutionPolicy Bypass -File .\scripts\push_and_update_release.ps1
+```
