@@ -2724,24 +2724,26 @@ def init_db() -> None:
     ensure_default_payment_methods(db)
     onboarding_settings = load_onboarding_settings(db)
     default_cf_account_id = None
-    if (
-        (onboarding_settings.get("cloudflare_account") or "").strip()
-        and (onboarding_settings.get("cloudflare_password") or "").strip()
-    ):
+    legacy_cf_account = str(onboarding_settings.get("cloudflare_account") or "").strip()
+    legacy_cf_password = str(onboarding_settings.get("cloudflare_password") or "").strip()
+    if legacy_cf_account and legacy_cf_password:
         existing_cf_count = db.execute(
             "SELECT COUNT(*) AS cnt FROM cloudflare_accounts"
         ).fetchone()["cnt"]
-        if int(existing_cf_count or 0) == 0:
+        if int(existing_cf_count or 0) == 0 and looks_like_email(legacy_cf_account):
             zone_from_portal = guess_zone_name_from_domain(
                 str(onboarding_settings.get("portal_domain") or "")
             ) or normalize_fqdn(str(onboarding_settings.get("portal_domain") or ""))
-            if zone_from_portal:
+            try:
                 default_cf_account_id = upsert_primary_cloudflare_account_from_onboarding(
                     db,
-                    account_name=str(onboarding_settings.get("cloudflare_account") or "").strip(),
-                    api_token=str(onboarding_settings.get("cloudflare_password") or "").strip(),
+                    account_name=legacy_cf_account,
+                    api_token=legacy_cf_password,
                     zone_name=zone_from_portal,
                 )
+            except Exception:
+                # Do not block application boot for historical/invalid legacy settings.
+                default_cf_account_id = None
     if not default_cf_account_id:
         default_cf_account_id = get_default_cloudflare_account_id(db)
     portal_domain = normalize_fqdn(str(onboarding_settings.get("portal_domain") or ""))
