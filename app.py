@@ -1571,6 +1571,88 @@ def cloudflare_get_zone_id(api_token: str, zone_name: str) -> str:
     return zone_id
 
 
+def cloudflare_list_zones(api_token: str) -> list[dict[str, str]]:
+    zones: list[dict[str, str]] = []
+    page = 1
+    max_pages = 20
+    while page <= max_pages:
+        response = cloudflare_api_request(
+            api_token,
+            "GET",
+            "/zones",
+            query={"per_page": 50, "page": page},
+        )
+        result = response.get("result") or []
+        if not isinstance(result, list):
+            result = []
+
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            zone_name = normalize_fqdn(item.get("name"))
+            zone_id = (item.get("id") or "").strip()
+            if not zone_name or not zone_id:
+                continue
+            zones.append(
+                {
+                    "zone_name": zone_name,
+                    "zone_id": zone_id,
+                }
+            )
+
+        result_info = response.get("result_info") or {}
+        try:
+            total_pages = int(result_info.get("total_pages") or 1)
+        except Exception:
+            total_pages = 1
+        if page >= total_pages or not result:
+            break
+        page += 1
+
+    deduped: dict[str, dict[str, str]] = {}
+    for item in zones:
+        deduped[item["zone_name"]] = item
+    return sorted(deduped.values(), key=lambda x: x["zone_name"])
+
+
+def resolve_cloudflare_zone_from_token(
+    api_token: str,
+    *,
+    preferred_zone_name: str = "",
+) -> tuple[str, str, list[str]]:
+    zones = cloudflare_list_zones(api_token)
+    if not zones:
+        raise RuntimeError("该 API Token 未查询到可管理域名（Zone）。")
+
+    normalized_preferred = normalize_fqdn(preferred_zone_name)
+    selected_zone: dict[str, str] | None = None
+    if normalized_preferred:
+        for item in zones:
+            if item["zone_name"] == normalized_preferred:
+                selected_zone = item
+                break
+        if selected_zone is None:
+            raise RuntimeError(f"Token 无权管理 Zone：{normalized_preferred}")
+    if selected_zone is None:
+        selected_zone = zones[0]
+
+    names = [item["zone_name"] for item in zones]
+    return selected_zone["zone_name"], selected_zone["zone_id"], names
+
+
+def summarize_zone_names(zone_names: list[str], limit: int = 6) -> str:
+    cleaned: list[str] = []
+    for value in zone_names or []:
+        normalized = normalize_fqdn(value)
+        if normalized:
+            cleaned.append(normalized)
+    if not cleaned:
+        return "无"
+    if len(cleaned) <= limit:
+        return "、".join(cleaned)
+    return "、".join(cleaned[:limit]) + f" 等 {len(cleaned)} 个"
+
+
 def cloudflare_upsert_a_record(
     api_token: str,
     zone_id: str,
@@ -1854,17 +1936,19 @@ def upsert_primary_cloudflare_account_from_onboarding(
     *,
     account_name: str,
     api_token: str,
-    zone_name: str,
+    zone_name: str = "",
 ) -> int:
     normalized_account_name = (account_name or "").strip()
-    normalized_zone_name = normalize_fqdn(zone_name)
     token = (api_token or "").strip()
     if not normalized_account_name:
         raise RuntimeError("Cloudflare 账号名称不能为空。")
     if not token:
         raise RuntimeError("Cloudflare API Token 不能为空。")
-    if not normalized_zone_name:
-        raise RuntimeError("Cloudflare Zone 域名不能为空。")
+
+    selected_zone_name, selected_zone_id, _ = resolve_cloudflare_zone_from_token(
+        token,
+        preferred_zone_name=zone_name,
+    )
 
     now_iso = utcnow_iso()
     existing = db.execute(
@@ -1883,6 +1967,7 @@ def upsert_primary_cloudflare_account_from_onboarding(
             SET account_name = ?,
                 api_token = ?,
                 zone_name = ?,
+                zone_id = ?,
                 is_active = 1,
                 updated_at = ?
             WHERE id = ?
@@ -1890,7 +1975,8 @@ def upsert_primary_cloudflare_account_from_onboarding(
             (
                 normalized_account_name,
                 token,
-                normalized_zone_name,
+                selected_zone_name,
+                selected_zone_id,
                 now_iso,
                 account_id,
             ),
@@ -1909,12 +1995,13 @@ def upsert_primary_cloudflare_account_from_onboarding(
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, '', 1, 10, ?, ?)
+        VALUES (?, ?, ?, ?, 1, 10, ?, ?)
         """,
         (
             normalized_account_name,
             token,
-            normalized_zone_name,
+            selected_zone_name,
+            selected_zone_id,
             now_iso,
             now_iso,
         ),
@@ -4888,24 +4975,21 @@ def admin_onboarding_step_cloudflare():
     cloudflare_account = request.form.get("cloudflare_account", "").strip()
     cloudflare_password = request.form.get("cloudflare_password", "").strip()
     cloudflare_zone_name = normalize_fqdn(request.form.get("cloudflare_zone_name", ""))
-    if not cloudflare_zone_name:
-        cloudflare_zone_name = guess_zone_name_from_domain(
-            load_onboarding_settings(db).get("portal_domain", "")
-        )
 
     if not cloudflare_account or not cloudflare_password:
         flash("请填写 Cloudflare 账号名称和 API Token。", "error")
         return redirect_admin_onboarding_modal(3)
-    if not cloudflare_zone_name:
-        flash("请填写 Cloudflare Zone 域名（例如 network000.com）。", "error")
-        return redirect_admin_onboarding_modal(3)
 
-    account_id = upsert_primary_cloudflare_account_from_onboarding(
-        db,
-        account_name=cloudflare_account,
-        api_token=cloudflare_password,
-        zone_name=cloudflare_zone_name,
-    )
+    try:
+        account_id = upsert_primary_cloudflare_account_from_onboarding(
+            db,
+            account_name=cloudflare_account,
+            api_token=cloudflare_password,
+            zone_name=cloudflare_zone_name,
+        )
+    except Exception as exc:
+        flash(f"Cloudflare 配置失败：{exc}", "error")
+        return redirect_admin_onboarding_modal(3)
     upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT, cloudflare_account)
     upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_PASSWORD, cloudflare_password)
     portal_domain = normalize_fqdn(load_onboarding_settings(db).get("portal_domain", ""))
@@ -5888,15 +5972,21 @@ def admin_create_cloudflare_account():
     if not api_token:
         flash("API Token 不能为空。", "error")
         return redirect(url_for("admin_cloudflare_accounts"))
-    if not zone_name:
-        flash("Zone 域名不能为空。", "error")
-        return redirect(url_for("admin_cloudflare_accounts"))
     try:
         sort_order = int(sort_order_raw) if sort_order_raw else 100
     except Exception:
         sort_order = 100
     if sort_order < 0:
         sort_order = 0
+
+    try:
+        selected_zone_name, selected_zone_id, zone_names = resolve_cloudflare_zone_from_token(
+            api_token,
+            preferred_zone_name=zone_name,
+        )
+    except Exception as exc:
+        flash(f"Cloudflare 域名读取失败：{exc}", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
 
     now_iso = utcnow_iso()
     db.execute(
@@ -5911,12 +6001,23 @@ def admin_create_cloudflare_account():
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, '', 1, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 1, ?, ?, ?)
         """,
-        (account_name, api_token, zone_name, sort_order, now_iso, now_iso),
+        (
+            account_name,
+            api_token,
+            selected_zone_name,
+            selected_zone_id,
+            sort_order,
+            now_iso,
+            now_iso,
+        ),
     )
     db.commit()
-    flash("Cloudflare 账号已添加。", "success")
+    flash(
+        f"Cloudflare 账号已添加。已自动识别可管理域名：{summarize_zone_names(zone_names)}；当前使用 {selected_zone_name}。",
+        "success",
+    )
     return redirect(url_for("admin_cloudflare_accounts"))
 
 
@@ -5927,7 +6028,7 @@ def admin_update_cloudflare_account(account_id: int):
     db = get_db()
     existing = db.execute(
         """
-        SELECT id, api_token
+        SELECT id, api_token, zone_name
         FROM cloudflare_accounts
         WHERE id = ?
         LIMIT 1
@@ -5946,9 +6047,6 @@ def admin_update_cloudflare_account(account_id: int):
     if not account_name:
         flash("账号名称不能为空。", "error")
         return redirect(url_for("admin_cloudflare_accounts"))
-    if not zone_name:
-        flash("Zone 域名不能为空。", "error")
-        return redirect(url_for("admin_cloudflare_accounts"))
     if not api_token:
         api_token = (existing["api_token"] or "").strip()
     if not api_token:
@@ -5961,12 +6059,23 @@ def admin_update_cloudflare_account(account_id: int):
     if sort_order < 0:
         sort_order = 0
 
+    preferred_zone = zone_name or normalize_fqdn(existing["zone_name"] or "")
+    try:
+        selected_zone_name, selected_zone_id, zone_names = resolve_cloudflare_zone_from_token(
+            api_token,
+            preferred_zone_name=preferred_zone,
+        )
+    except Exception as exc:
+        flash(f"Cloudflare 域名读取失败：{exc}", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+
     db.execute(
         """
         UPDATE cloudflare_accounts
         SET account_name = ?,
             api_token = ?,
             zone_name = ?,
+            zone_id = ?,
             sort_order = ?,
             updated_at = ?
         WHERE id = ?
@@ -5974,14 +6083,18 @@ def admin_update_cloudflare_account(account_id: int):
         (
             account_name,
             api_token,
-            zone_name,
+            selected_zone_name,
+            selected_zone_id,
             sort_order,
             utcnow_iso(),
             account_id,
         ),
     )
     db.commit()
-    flash("Cloudflare 账号已更新。", "success")
+    flash(
+        f"Cloudflare 账号已更新。已自动识别可管理域名：{summarize_zone_names(zone_names)}；当前使用 {selected_zone_name}。",
+        "success",
+    )
     return redirect(url_for("admin_cloudflare_accounts"))
 
 

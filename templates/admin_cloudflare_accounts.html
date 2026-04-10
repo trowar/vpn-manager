@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>Cloudflare 账号</h2>
-  <p class="helper">管理用于自动分配域名的 Cloudflare 账号。建议使用 API Token（Zone DNS 编辑权限）。</p>
+  <p class="helper">管理用于自动分配域名的 Cloudflare 账号。填写 API Token 后，系统会自动读取可管理域名并回填 Zone ID。</p>
 
   <div class="section-title-row">
     <h3>账号列表</h3>
@@ -86,8 +86,8 @@
       <label>API Token
         <input type="password" name="api_token" placeholder="请输入 Cloudflare API Token" required>
       </label>
-      <label>Zone 域名（根域）
-        <input type="text" name="zone_name" placeholder="例如：network000.com" required>
+      <label>优先 Zone（可选）
+        <input type="text" name="zone_name" placeholder="不填则自动使用 Token 可管理的第一个域名">
       </label>
       <label>排序（数字越小越靠前）
         <input type="number" name="sort_order" min="0" step="1" value="100">
@@ -110,8 +110,8 @@
       <label>API Token（留空则保持不变）
         <input type="password" name="api_token" id="cf-edit-api-token" placeholder="如需更换再填写">
       </label>
-      <label>Zone 域名（根域）
-        <input type="text" name="zone_name" id="cf-edit-zone-name" required>
+      <label>优先 Zone（可选）
+        <input type="text" name="zone_name" id="cf-edit-zone-name" placeholder="不填则自动读取">
       </label>
       <label>排序（数字越小越靠前）
         <input type="number" name="sort_order" id="cf-edit-sort-order" min="0" step="1" value="100">
