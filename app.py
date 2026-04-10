@@ -849,6 +849,10 @@ def get_portal_domain_setting() -> str:
 
 
 def get_wireguard_endpoint_for_clients() -> str:
+    wg_endpoint = (WG_ENDPOINT or "").strip()
+    if wg_endpoint:
+        return wg_endpoint
+
     portal_domain = get_portal_domain_setting()
     if not portal_domain:
         return WG_ENDPOINT
