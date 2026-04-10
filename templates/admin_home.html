@@ -36,9 +36,12 @@
     {% else %}
       <span class="tag tag-warn">未生成</span>
     {% endif %}
-    ? <strong>分配 IP：</strong>{{ admin_assigned_ip_display }}
+    ，<strong>分配 IP：</strong>{{ admin_assigned_ip_display }}
   </p>
-  <p><strong>有效期：</strong>永久 ? <strong>流量剩余：</strong>永久 ? <strong>已用流量：</strong>{{ admin_traffic_stats["total_human"] }}</p>
+  <p><strong>有效期：</strong>永久，<strong>流量剩余：</strong>永久，<strong>已用流量：</strong>{{ admin_traffic_stats["total_human"] }}</p>
+  {% if admin_self_error %}
+    <p class="helper">自动生成失败：{{ admin_self_error }}</p>
+  {% endif %}
   <div class="actions">
     <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载 WireGuard 配置</a>
     {% if openvpn_enabled %}

@@ -4613,6 +4613,27 @@ def admin_home():
         "SELECT * FROM users WHERE id = ? AND role = 'admin'",
         (admin_session_user["id"],),
     ).fetchone()
+    admin_self_error = ""
+    if admin_user is not None:
+        admin_has_keys = bool(
+            (row_get(admin_user, "client_private_key", "") or "").strip()
+            and (row_get(admin_user, "client_public_key", "") or "").strip()
+            and (row_get(admin_user, "client_psk", "") or "").strip()
+        )
+        admin_enabled = int(row_get(admin_user, "wg_enabled", 0) or 0) == 1
+        if not admin_has_keys or not admin_enabled:
+            try:
+                admin_user = ensure_admin_self_vpn_ready(db, admin_user)
+            except Exception as exc:
+                admin_self_error = summarize_text(str(exc), 240)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                admin_user = db.execute(
+                    "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+                    (admin_session_user["id"],),
+                ).fetchone()
     admin_traffic_stats = (
         get_user_traffic_stats(admin_user) if admin_user is not None else get_user_traffic_stats(admin_session_user)
     )
@@ -4621,7 +4642,9 @@ def admin_home():
         and int(row_get(admin_user, "wg_enabled", 0) or 0) == 1
         and (row_get(admin_user, "client_public_key", "") or "").strip()
     )
-    if is_dynamic_ip_assignment_mode():
+    if not admin_self_ready:
+        admin_assigned_ip_display = "待生成"
+    elif is_dynamic_ip_assignment_mode():
         admin_assigned_ip_display = "DHCP 动态分配（按连接分配）"
     else:
         admin_assigned_ip_display = (
@@ -4676,6 +4699,7 @@ def admin_home():
         admin_self_ready=admin_self_ready,
         admin_assigned_ip_display=admin_assigned_ip_display,
         admin_traffic_stats=admin_traffic_stats,
+        admin_self_error=admin_self_error,
         admin_page="home",
     )
 
