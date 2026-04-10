@@ -41,6 +41,9 @@
             <td>{{ a["sort_order"] }}</td>
             <td>
               <div class="subscription-actions">
+                <form method="post" action="{{ url_for('admin_refresh_cloudflare_domains', account_id=a['id']) }}" class="inline-form">
+                  <button type="submit" class="btn secondary">刷新域名</button>
+                </form>
                 <form method="post" action="{{ url_for('admin_toggle_cloudflare_account', account_id=a['id']) }}" class="inline-form">
                   {% if a["is_active"] == 1 %}
                     <button type="submit">停用</button>

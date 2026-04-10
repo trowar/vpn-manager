@@ -1653,6 +1653,169 @@ def summarize_zone_names(zone_names: list[str], limit: int = 6) -> str:
     return "、".join(cleaned[:limit]) + f" 等 {len(cleaned)} 个"
 
 
+def sync_domains_from_cloudflare_account(
+    db: sqlite3.Connection,
+    account_id: int,
+) -> dict[str, object]:
+    account = db.execute(
+        """
+        SELECT id, account_name, api_token, zone_name, is_active
+        FROM cloudflare_accounts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
+    if not account:
+        raise RuntimeError("Cloudflare 账号不存在。")
+    if int(account["is_active"] or 0) != 1:
+        raise RuntimeError("Cloudflare 账号已停用，请先启用后再刷新。")
+
+    api_token = (account["api_token"] or "").strip()
+    if not api_token:
+        raise RuntimeError("Cloudflare API Token 为空。")
+
+    zones = cloudflare_list_zones(api_token)
+    if not zones:
+        raise RuntimeError("该 API Token 未查询到可管理域名（Zone）。")
+
+    preferred_zone = normalize_fqdn(account["zone_name"] or "")
+    selected_zone = zones[0]
+    for zone in zones:
+        if zone["zone_name"] == preferred_zone:
+            selected_zone = zone
+            break
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        UPDATE cloudflare_accounts
+        SET zone_name = ?,
+            zone_id = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (selected_zone["zone_name"], selected_zone["zone_id"], now_iso, account_id),
+    )
+
+    touched_ids: list[int] = []
+    inserted_count = 0
+    updated_count = 0
+    base_sort = 10
+    sync_prefix = "Cloudflare账号刷新同步"
+    for idx, zone in enumerate(zones):
+        domain_name = normalize_fqdn(zone["zone_name"])
+        existing = db.execute(
+            """
+            SELECT id
+            FROM managed_domains
+            WHERE lower(domain_name) = lower(?)
+            LIMIT 1
+            """,
+            (domain_name,),
+        ).fetchone()
+        if existing:
+            domain_id = int(existing["id"])
+            updated_count += 1
+        else:
+            cursor = db.execute(
+                """
+                INSERT INTO managed_domains (
+                    domain_name,
+                    cloudflare_account_id,
+                    assigned_server_id,
+                    dns_record_id,
+                    is_active,
+                    sort_order,
+                    last_sync_at,
+                    last_sync_message,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, NULL, '', 1, ?, ?, ?, ?, ?)
+                """,
+                (
+                    domain_name,
+                    account_id,
+                    base_sort + idx,
+                    now_iso,
+                    f"{sync_prefix}：自动导入",
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            domain_id = int(cursor.lastrowid)
+            inserted_count += 1
+
+        db.execute(
+            """
+            UPDATE managed_domains
+            SET cloudflare_account_id = ?,
+                is_active = 1,
+                sort_order = ?,
+                last_sync_at = ?,
+                last_sync_message = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                account_id,
+                base_sort + idx,
+                now_iso,
+                f"{sync_prefix}：自动同步",
+                now_iso,
+                domain_id,
+            ),
+        )
+        touched_ids.append(domain_id)
+
+    disabled_count = 0
+    stale_rows = db.execute(
+        """
+        SELECT id
+        FROM managed_domains
+        WHERE cloudflare_account_id = ?
+          AND assigned_server_id IS NULL
+          AND (
+            last_sync_message LIKE 'Cloudflare账号刷新同步%'
+            OR last_sync_message LIKE '本次刷新未包含该域名%'
+          )
+        """,
+        (account_id,),
+    ).fetchall()
+    touched_id_set = set(touched_ids)
+    for stale in stale_rows:
+        stale_id = int(stale["id"])
+        if stale_id in touched_id_set:
+            continue
+        db.execute(
+            """
+            UPDATE managed_domains
+            SET is_active = 0,
+                last_sync_at = ?,
+                last_sync_message = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                now_iso,
+                "本次刷新未包含该域名，已自动停用。",
+                now_iso,
+                stale_id,
+            ),
+        )
+        disabled_count += 1
+
+    return {
+        "zone_count": len(zones),
+        "zone_names": [zone["zone_name"] for zone in zones],
+        "inserted_count": inserted_count,
+        "updated_count": updated_count,
+        "disabled_count": disabled_count,
+        "selected_zone_name": selected_zone["zone_name"],
+    }
+
+
 def cloudflare_upsert_a_record(
     api_token: str,
     zone_id: str,
@@ -6098,6 +6261,47 @@ def admin_update_cloudflare_account(account_id: int):
     return redirect(url_for("admin_cloudflare_accounts"))
 
 
+@app.route("/admin/cloudflare-accounts/<int:account_id>/refresh-domains", methods=["POST"])
+@login_required
+@admin_required
+def admin_refresh_cloudflare_domains(account_id: int):
+    db = get_db()
+    account = db.execute(
+        """
+        SELECT id, account_name
+        FROM cloudflare_accounts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
+    if not account:
+        flash("Cloudflare 账号不存在。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+
+    try:
+        summary = sync_domains_from_cloudflare_account(db, int(account_id))
+        db.commit()
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        flash(f"刷新失败：{exc}", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+
+    flash(
+        (
+            f"账号 {account['account_name']} 域名刷新完成。"
+            f"同步 Zone {summary['zone_count']} 个（{summarize_zone_names(summary['zone_names'])}），"
+            f"新增 {summary['inserted_count']}、更新 {summary['updated_count']}、停用 {summary['disabled_count']}。"
+            f"当前默认 Zone：{summary['selected_zone_name']}。"
+        ),
+        "success",
+    )
+    return redirect(url_for("admin_cloudflare_accounts"))
+
+
 @app.route("/admin/cloudflare-accounts/<int:account_id>/toggle", methods=["POST"])
 @login_required
 @admin_required
@@ -6189,77 +6393,7 @@ def admin_domains():
 @login_required
 @admin_required
 def admin_create_domain():
-    db = get_db()
-    domain_name = normalize_fqdn(request.form.get("domain_name", ""))
-    account_id_raw = request.form.get("cloudflare_account_id", "").strip()
-    sort_order_raw = request.form.get("sort_order", "").strip()
-
-    if not domain_name:
-        flash("域名不能为空。", "error")
-        return redirect(url_for("admin_domains"))
-    try:
-        account_id = int(account_id_raw)
-    except Exception:
-        account_id = 0
-    if account_id <= 0:
-        flash("请选择 Cloudflare 账号。", "error")
-        return redirect(url_for("admin_domains"))
-    account = db.execute(
-        """
-        SELECT id, is_active
-        FROM cloudflare_accounts
-        WHERE id = ?
-        LIMIT 1
-        """,
-        (account_id,),
-    ).fetchone()
-    if not account:
-        flash("Cloudflare 账号不存在。", "error")
-        return redirect(url_for("admin_domains"))
-    if int(account["is_active"] or 0) != 1:
-        flash("所选 Cloudflare 账号已停用，请先启用后再绑定域名。", "error")
-        return redirect(url_for("admin_domains"))
-    try:
-        sort_order = int(sort_order_raw) if sort_order_raw else 100
-    except Exception:
-        sort_order = 100
-    if sort_order < 0:
-        sort_order = 0
-
-    existing = db.execute(
-        """
-        SELECT id
-        FROM managed_domains
-        WHERE lower(domain_name) = lower(?)
-        LIMIT 1
-        """,
-        (domain_name,),
-    ).fetchone()
-    if existing:
-        flash("该域名已存在。", "error")
-        return redirect(url_for("admin_domains"))
-
-    now_iso = utcnow_iso()
-    db.execute(
-        """
-        INSERT INTO managed_domains (
-            domain_name,
-            cloudflare_account_id,
-            assigned_server_id,
-            dns_record_id,
-            is_active,
-            sort_order,
-            last_sync_at,
-            last_sync_message,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, NULL, '', 1, ?, NULL, '', ?, ?)
-        """,
-        (domain_name, account_id, sort_order, now_iso, now_iso),
-    )
-    db.commit()
-    flash("域名已添加。", "success")
+    flash("已禁用手动新增。请在 Cloudflare 账号列表点击“刷新域名”自动同步。", "error")
     return redirect(url_for("admin_domains"))
 
 

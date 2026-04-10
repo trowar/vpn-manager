@@ -2,11 +2,10 @@
 {% block content %}
 <section class="card">
   <h2>域名管理</h2>
-  <p class="helper">这里维护可自动分配给服务器的域名池。服务器部署成功后会自动更新 Cloudflare A 记录并绑定域名。</p>
+  <p class="helper">这里展示自动分配域名池。请在“Cloudflare 账号”页面点击“刷新域名”同步全量可管理域名。</p>
 
   <div class="section-title-row">
     <h3>域名列表</h3>
-    <button type="button" id="open-domain-create-modal">新增域名</button>
   </div>
 
   {% if managed_domains %}
@@ -83,35 +82,9 @@
       </tbody>
     </table>
   {% else %}
-    <p class="helper">暂无域名，请先添加。</p>
+    <p class="helper">暂无域名，请到“Cloudflare 账号”页面点击“刷新域名”同步。</p>
   {% endif %}
 </section>
-
-<div class="payment-modal" id="domain-create-modal" hidden>
-  <div class="payment-modal-card plan-create-modal-card">
-    <div class="section-title-row">
-      <h4>新增域名</h4>
-      <button type="button" class="btn secondary" id="close-domain-create-modal">关闭</button>
-    </div>
-    <form method="post" action="{{ url_for('admin_create_domain') }}" class="form">
-      <label>域名
-        <input type="text" name="domain_name" placeholder="例如：hk1.network000.com" required>
-      </label>
-      <label>Cloudflare 账号
-        <select name="cloudflare_account_id" required>
-          <option value="">请选择账号</option>
-          {% for a in cloudflare_accounts %}
-            <option value="{{ a['id'] }}">{{ a["account_name"] }}（{{ a["zone_name"] }}）</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>排序（数字越小越靠前）
-        <input type="number" name="sort_order" min="0" step="1" value="100">
-      </label>
-      <button type="submit">添加域名</button>
-    </form>
-  </div>
-</div>
 
 <div class="payment-modal" id="domain-edit-modal" hidden>
   <div class="payment-modal-card plan-create-modal-card">
@@ -155,10 +128,6 @@
 
 <script>
   (function () {
-    var createOpenBtn = document.getElementById("open-domain-create-modal");
-    var createCloseBtn = document.getElementById("close-domain-create-modal");
-    var createModal = document.getElementById("domain-create-modal");
-
     var editButtons = document.querySelectorAll(".open-domain-edit-modal");
     var editModal = document.getElementById("domain-edit-modal");
     var editCloseBtn = document.getElementById("close-domain-edit-modal");
@@ -194,10 +163,6 @@
         }
       });
     }
-
-    if (createOpenBtn) createOpenBtn.addEventListener("click", function () { openModal(createModal); });
-    if (createCloseBtn) createCloseBtn.addEventListener("click", function () { closeModal(createModal); });
-    bindOverlayClose(createModal);
 
     if (editCloseBtn) editCloseBtn.addEventListener("click", function () { closeModal(editModal); });
     bindOverlayClose(editModal);
