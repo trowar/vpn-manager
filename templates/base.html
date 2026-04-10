@@ -8,41 +8,35 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260409-10') }}">
 </head>
 <body>
-  <div class="app-shell">
+  <div class="app-shell{% if not current_user %} app-shell-guest{% endif %}">
+    {% if current_user %}
     <aside class="site-sidebar">
       <h1 class="site-brand"><a href="{{ url_for('index') }}">VPN 门户</a></h1>
 
-      {% if current_user %}
-        <p class="site-user">当前用户：<span class="tag">{{ current_user["username"] }}</span></p>
-      {% endif %}
+      <p class="site-user">当前用户：<span class="tag">{{ current_user["username"] }}</span></p>
 
       <nav class="site-nav">
-        {% if current_user %}
-          {% if current_user["role"] == "admin" %}
-            {% if not admin_setup_completed %}
-              <a class="site-nav-link {% if admin_page == 'onboarding' %}active{% endif %}" href="{{ url_for('admin_onboarding') }}">初始化向导</a>
-            {% endif %}
-            <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">首页</a>
-            <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器管理</a>
-            <a class="site-nav-link {% if admin_page == 'payment_methods' %}active{% endif %}" href="{{ url_for('admin_payment_methods') }}">付款方式</a>
-            <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐管理</a>
-            <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">待处理订单</a>
-            <a class="site-nav-link {% if admin_page == 'paid_orders' %}active{% endif %}" href="{{ url_for('admin_paid_orders') }}">已支付订单</a>
-            <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户订阅</a>
-            <a class="site-nav-link {% if admin_page == 'change_password' %}active{% endif %}" href="{{ url_for('admin_change_password') }}">修改密码</a>
-          {% else %}
-            <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
-            <a class="site-nav-link {% if dashboard_page == 'guide' %}active{% endif %}" href="{{ url_for('dashboard_guide') }}">使用说明</a>
-            <a class="site-nav-link {% if dashboard_page == 'orders' %}active{% endif %}" href="{{ url_for('dashboard_orders') }}">订单管理</a>
+        {% if current_user["role"] == "admin" %}
+          {% if not admin_setup_completed %}
+            <a class="site-nav-link {% if admin_page == 'onboarding' %}active{% endif %}" href="{{ url_for('admin_onboarding') }}">初始化向导</a>
           {% endif %}
-          <a class="site-nav-link" href="{{ url_for('logout') }}">退出登录</a>
+          <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">首页</a>
+          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器管理</a>
+          <a class="site-nav-link {% if admin_page == 'payment_methods' %}active{% endif %}" href="{{ url_for('admin_payment_methods') }}">付款方式</a>
+          <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐管理</a>
+          <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">待处理订单</a>
+          <a class="site-nav-link {% if admin_page == 'paid_orders' %}active{% endif %}" href="{{ url_for('admin_paid_orders') }}">已支付订单</a>
+          <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户订阅</a>
+          <a class="site-nav-link {% if admin_page == 'change_password' %}active{% endif %}" href="{{ url_for('admin_change_password') }}">修改密码</a>
         {% else %}
-          <a class="site-nav-link" href="{{ url_for('index') }}">首页</a>
-          <a class="site-nav-link" href="{{ url_for('login') }}">登录</a>
-          <a class="site-nav-link" href="{{ url_for('register') }}">注册</a>
+          <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
+          <a class="site-nav-link {% if dashboard_page == 'guide' %}active{% endif %}" href="{{ url_for('dashboard_guide') }}">使用说明</a>
+          <a class="site-nav-link {% if dashboard_page == 'orders' %}active{% endif %}" href="{{ url_for('dashboard_orders') }}">订单管理</a>
         {% endif %}
+        <a class="site-nav-link" href="{{ url_for('logout') }}">退出登录</a>
       </nav>
     </aside>
+    {% endif %}
 
     <main class="site-main">
       <div class="site-content">

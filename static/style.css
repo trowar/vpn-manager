@@ -26,6 +26,10 @@ body {
   grid-template-columns: 230px minmax(0, 1fr);
 }
 
+.app-shell.app-shell-guest {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .site-sidebar {
   position: sticky;
   top: 0;
