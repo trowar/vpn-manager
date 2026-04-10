@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title or "VPN 门户" }}</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg', v='20260409-1') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260410-3') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260410-4') }}">
 </head>
 <body>
   <div class="app-shell{% if not current_user %} app-shell-guest{% endif %}">
@@ -18,7 +18,7 @@
       <nav class="site-nav">
         {% if current_user["role"] == "admin" %}
           {% if not admin_setup_completed %}
-            <a class="site-nav-link {% if admin_page == 'onboarding' %}active{% endif %}" href="{{ url_for('admin_onboarding') }}">初始化向导</a>
+            <a class="site-nav-link {% if admin_page == 'onboarding' or (admin_page == 'home' and not admin_setup_completed) %}active{% endif %}" href="{{ url_for('admin_home', onboarding_open='1') }}">继续初始化</a>
           {% endif %}
           <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">首页</a>
           <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器管理</a>

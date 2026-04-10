@@ -146,6 +146,11 @@ ONBOARDING_SETTING_CLOUDFLARE_PASSWORD = "cloudflare_password"
 ONBOARDING_SETTING_SETUP_COMPLETED = "setup_completed"
 ONBOARDING_SETTING_SETUP_COMPLETED_AT = "setup_completed_at"
 ONBOARDING_SETTING_LAST_SERVER_ID = "setup_last_server_id"
+ONBOARDING_SETTING_DRAFT_SERVER_NAME = "setup_draft_server_name"
+ONBOARDING_SETTING_DRAFT_SERVER_HOST = "setup_draft_server_host"
+ONBOARDING_SETTING_DRAFT_SERVER_PORT = "setup_draft_server_port"
+ONBOARDING_SETTING_DRAFT_SERVER_USERNAME = "setup_draft_server_username"
+ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD = "setup_draft_server_password"
 ONBOARDING_SETTINGS_DEFAULTS = {
     ONBOARDING_SETTING_PORTAL_DOMAIN: "",
     ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT: "",
@@ -153,6 +158,11 @@ ONBOARDING_SETTINGS_DEFAULTS = {
     ONBOARDING_SETTING_SETUP_COMPLETED: "0",
     ONBOARDING_SETTING_SETUP_COMPLETED_AT: "",
     ONBOARDING_SETTING_LAST_SERVER_ID: "",
+    ONBOARDING_SETTING_DRAFT_SERVER_NAME: "",
+    ONBOARDING_SETTING_DRAFT_SERVER_HOST: "",
+    ONBOARDING_SETTING_DRAFT_SERVER_PORT: "22",
+    ONBOARDING_SETTING_DRAFT_SERVER_USERNAME: "root",
+    ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD: "",
 }
 SERVER_DEPLOY_DEFAULT_WG_PORT = 51820
 SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 1194
@@ -698,6 +708,89 @@ def load_onboarding_settings(db: sqlite3.Connection) -> dict[str, str | bool]:
         "setup_completed_at": merged[ONBOARDING_SETTING_SETUP_COMPLETED_AT],
         "last_server_id": merged[ONBOARDING_SETTING_LAST_SERVER_ID],
     }
+
+
+def load_onboarding_server_draft(db: sqlite3.Connection) -> dict[str, str | int]:
+    values = load_named_settings(
+        db,
+        (
+            ONBOARDING_SETTING_DRAFT_SERVER_NAME,
+            ONBOARDING_SETTING_DRAFT_SERVER_HOST,
+            ONBOARDING_SETTING_DRAFT_SERVER_PORT,
+            ONBOARDING_SETTING_DRAFT_SERVER_USERNAME,
+            ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD,
+        ),
+    )
+    merged = {**ONBOARDING_SETTINGS_DEFAULTS, **values}
+    return {
+        "server_name": (merged[ONBOARDING_SETTING_DRAFT_SERVER_NAME] or "").strip(),
+        "server_host": normalize_remote_host(merged[ONBOARDING_SETTING_DRAFT_SERVER_HOST]),
+        "server_port": normalize_server_port(
+            merged[ONBOARDING_SETTING_DRAFT_SERVER_PORT], 22
+        ),
+        "server_username": (
+            merged[ONBOARDING_SETTING_DRAFT_SERVER_USERNAME] or "root"
+        ).strip()
+        or "root",
+        "server_password": merged[ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD] or "",
+    }
+
+
+def save_onboarding_server_draft(
+    db: sqlite3.Connection,
+    *,
+    server_name: str,
+    server_host: str,
+    server_port: int,
+    server_username: str,
+    server_password: str,
+) -> None:
+    upsert_app_setting(db, ONBOARDING_SETTING_DRAFT_SERVER_NAME, (server_name or "").strip())
+    upsert_app_setting(
+        db, ONBOARDING_SETTING_DRAFT_SERVER_HOST, normalize_remote_host(server_host)
+    )
+    upsert_app_setting(
+        db,
+        ONBOARDING_SETTING_DRAFT_SERVER_PORT,
+        str(normalize_server_port(server_port, 22)),
+    )
+    upsert_app_setting(
+        db,
+        ONBOARDING_SETTING_DRAFT_SERVER_USERNAME,
+        ((server_username or "").strip() or "root"),
+    )
+    upsert_app_setting(
+        db, ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD, server_password or ""
+    )
+
+
+def get_admin_onboarding_step_status(db: sqlite3.Connection) -> tuple[dict[int, bool], int]:
+    settings = load_onboarding_settings(db)
+    payment_settings = load_payment_settings(db)
+    plan_count = db.execute("SELECT COUNT(*) AS cnt FROM subscription_plans").fetchone()["cnt"]
+
+    step_status = {
+        1: int(plan_count or 0) > 0,
+        2: bool((payment_settings["usdt_receive_address"] or "").strip())
+        and bool((settings["portal_domain"] or "").strip()),
+        3: bool((settings["cloudflare_account"] or "").strip())
+        and bool((settings["cloudflare_password"] or "").strip()),
+        4: bool(settings["setup_completed"]),
+    }
+
+    default_step = 4
+    for step in (1, 2, 3, 4):
+        if not step_status[step]:
+            default_step = step
+            break
+    return step_status, default_step
+
+
+def next_admin_onboarding_step(db: sqlite3.Connection, fallback: int = 4) -> int:
+    _, next_step = get_admin_onboarding_step_status(db)
+    if next_step < 1 or next_step > 4:
+        return fallback
+    return next_step
 
 
 def is_admin_onboarding_completed(db: sqlite3.Connection) -> bool:
@@ -1859,8 +1952,13 @@ def enforce_admin_onboarding():
 
     allowed_endpoints = {
         "logout",
+        "admin_home",
         "admin_change_password",
         "admin_onboarding",
+        "admin_onboarding_step_plan",
+        "admin_onboarding_step_payment",
+        "admin_onboarding_step_cloudflare",
+        "admin_onboarding_step_server",
         "admin_test_server_connection",
         "static",
     }
@@ -1871,11 +1969,11 @@ def enforce_admin_onboarding():
         return {
             "ok": False,
             "error": "admin_onboarding_required",
-            "redirect": url_for("admin_onboarding"),
+            "redirect": url_for("admin_home", onboarding_open="1"),
         }, 403
 
     flash("首次登录请先完成初始化向导。", "error")
-    return redirect(url_for("admin_onboarding"))
+    return redirect(url_for("admin_home", onboarding_open="1"))
 
 
 def login_required(view):
@@ -2903,9 +3001,8 @@ def admin_change_password():
                 (generate_password_hash(new_password), user["id"]),
             )
             db.commit()
-            session.clear()
-            flash("密码修改成功，请使用新密码重新登录。", "success")
-            return redirect(url_for("login"))
+            flash("密码修改成功，请继续完成初始化向导。", "success")
+            return redirect(url_for("admin_home", onboarding_open="1"))
 
     return render_template(
         "admin_change_password.html",
@@ -3533,10 +3630,258 @@ def update_server_deploy_result(
     db.execute(sql, params)
 
 
+def redirect_admin_onboarding_modal(step: int | None = None):
+    if step is not None and 1 <= step <= 4:
+        return redirect(
+            url_for("admin_home", onboarding_open="1", onboarding_step=str(step))
+        )
+    return redirect(url_for("admin_home", onboarding_open="1"))
+
+
+@app.route("/admin/onboarding/step-plan", methods=["POST"])
+@login_required
+@admin_required
+def admin_onboarding_step_plan():
+    db = get_db()
+    if is_admin_onboarding_completed(db):
+        flash("初始化已完成。", "success")
+        return redirect(url_for("admin_home"))
+
+    plan_name = request.form.get("plan_name", "").strip()
+    plan_mode = normalize_plan_mode(request.form.get("plan_mode", PLAN_MODE_DURATION))
+    plan_price_raw = request.form.get("plan_price_usdt", "").strip()
+    plan_duration_raw = request.form.get("plan_duration_months", "").strip()
+    plan_traffic_raw = request.form.get("plan_traffic_gb", "").strip()
+
+    if not plan_name:
+        flash("请填写套餐名称。", "error")
+        return redirect_admin_onboarding_modal(1)
+    try:
+        plan_price = parse_usdt_amount_strict(plan_price_raw)
+    except Exception:
+        flash("套餐价格格式无效。", "error")
+        return redirect_admin_onboarding_modal(1)
+
+    if plan_mode == PLAN_MODE_DURATION:
+        try:
+            plan_duration = parse_positive_int(plan_duration_raw)
+        except Exception:
+            flash("按时长套餐请填写大于 0 的月数。", "error")
+            return redirect_admin_onboarding_modal(1)
+        plan_traffic = None
+    else:
+        try:
+            plan_traffic = parse_positive_int(plan_traffic_raw)
+        except Exception:
+            flash("按流量套餐请填写大于 0 的流量（GB）。", "error")
+            return redirect_admin_onboarding_modal(1)
+        plan_duration = None
+
+    upsert_first_plan_from_onboarding(
+        db,
+        plan_name=plan_name,
+        billing_mode=plan_mode,
+        duration_months=plan_duration,
+        traffic_gb=plan_traffic,
+        price_usdt=plan_price,
+        sort_order=10,
+    )
+    db.commit()
+    flash("步骤 1 已保存。", "success")
+    return redirect_admin_onboarding_modal(next_admin_onboarding_step(db, fallback=2))
+
+
+@app.route("/admin/onboarding/step-payment", methods=["POST"])
+@login_required
+@admin_required
+def admin_onboarding_step_payment():
+    db = get_db()
+    if is_admin_onboarding_completed(db):
+        flash("初始化已完成。", "success")
+        return redirect(url_for("admin_home"))
+
+    payment_network = request.form.get("payment_network", "TRC20").strip().upper()
+    payment_address = request.form.get("payment_address", "").strip()
+    portal_domain = normalize_domain_host(request.form.get("portal_domain", ""))
+
+    if payment_network not in USDT_NETWORK_OPTIONS:
+        flash("收款网络无效。", "error")
+        return redirect_admin_onboarding_modal(2)
+    if not payment_address:
+        flash("请填写收款地址。", "error")
+        return redirect_admin_onboarding_modal(2)
+    if not portal_domain:
+        flash("请填写站点域名。", "error")
+        return redirect_admin_onboarding_modal(2)
+
+    upsert_primary_payment_method_from_onboarding(
+        db,
+        network=payment_network,
+        receive_address=payment_address,
+    )
+    upsert_app_setting(db, ONBOARDING_SETTING_PORTAL_DOMAIN, portal_domain)
+    db.commit()
+    flash("步骤 2 已保存。", "success")
+    return redirect_admin_onboarding_modal(next_admin_onboarding_step(db, fallback=3))
+
+
+@app.route("/admin/onboarding/step-cloudflare", methods=["POST"])
+@login_required
+@admin_required
+def admin_onboarding_step_cloudflare():
+    db = get_db()
+    if is_admin_onboarding_completed(db):
+        flash("初始化已完成。", "success")
+        return redirect(url_for("admin_home"))
+
+    cloudflare_account = request.form.get("cloudflare_account", "").strip()
+    cloudflare_password = request.form.get("cloudflare_password", "").strip()
+    if not cloudflare_account or not cloudflare_password:
+        flash("请填写 Cloudflare 账号和密码。", "error")
+        return redirect_admin_onboarding_modal(3)
+
+    upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT, cloudflare_account)
+    upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_PASSWORD, cloudflare_password)
+    db.commit()
+    flash("步骤 3 已保存。", "success")
+    return redirect_admin_onboarding_modal(next_admin_onboarding_step(db, fallback=4))
+
+
+@app.route("/admin/onboarding/step-server", methods=["POST"])
+@login_required
+@admin_required
+def admin_onboarding_step_server():
+    db = get_db()
+    if is_admin_onboarding_completed(db):
+        flash("初始化已完成。", "success")
+        return redirect(url_for("admin_home"))
+
+    action = (request.form.get("action", "save_draft") or "").strip().lower()
+    server_name = request.form.get("server_name", "").strip()
+    server_host = normalize_remote_host(request.form.get("server_host", ""))
+    server_port = normalize_server_port(request.form.get("server_port", "22"), 22)
+    server_username = request.form.get("server_username", "").strip()
+    server_password = request.form.get("server_password", "")
+
+    save_onboarding_server_draft(
+        db,
+        server_name=server_name,
+        server_host=server_host,
+        server_port=server_port,
+        server_username=server_username or "root",
+        server_password=server_password,
+    )
+
+    if action == "save_draft":
+        db.commit()
+        flash("步骤 4 草稿已保存，可稍后继续。", "success")
+        return redirect_admin_onboarding_modal(4)
+
+    if not server_host or not server_username or not server_password:
+        db.commit()
+        flash("请填写服务器 IP/域名、账号、密码。", "error")
+        return redirect_admin_onboarding_modal(4)
+
+    if action == "test_server":
+        ok, message = test_server_connectivity(
+            server_host,
+            server_port,
+            server_username,
+            server_password,
+        )
+        db.commit()
+        flash(message, "success" if ok else "error")
+        return redirect_admin_onboarding_modal(4)
+
+    step_status, next_step = get_admin_onboarding_step_status(db)
+    if not step_status[1] or not step_status[2] or not step_status[3]:
+        db.commit()
+        flash("请先完成前 3 个步骤后再部署服务器。", "error")
+        return redirect_admin_onboarding_modal(next_step)
+
+    ok, test_message = test_server_connectivity(
+        server_host,
+        server_port,
+        server_username,
+        server_password,
+    )
+    if not ok:
+        db.commit()
+        flash(f"服务器连通测试失败：{test_message}", "error")
+        return redirect_admin_onboarding_modal(4)
+
+    settings = load_onboarding_settings(db)
+    portal_domain = normalize_domain_host(str(settings["portal_domain"]))
+    if not server_name:
+        server_name = server_host
+
+    deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
+    server_id = create_server_record(
+        db,
+        server_name=server_name,
+        host=server_host,
+        port=server_port,
+        username=server_username,
+        password=server_password,
+        domain=portal_domain,
+        wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+        openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+        dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+        vpn_api_token=deploy_token,
+        status="deploying",
+    )
+    update_server_test_result(
+        db,
+        server_id,
+        ok=True,
+        message=test_message,
+    )
+
+    deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+        host=server_host,
+        port=server_port,
+        username=server_username,
+        password=server_password,
+        wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+        openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+        dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+        vpn_api_token=deploy_token,
+    )
+    update_server_deploy_result(
+        db,
+        server_id,
+        ok=deploy_ok,
+        message=deploy_message,
+        status="online" if deploy_ok else "deploy_failed",
+        vpn_api_token=final_token,
+    )
+    if deploy_ok:
+        upsert_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED, "1")
+        upsert_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED_AT, utcnow_iso())
+        upsert_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, str(server_id))
+        save_onboarding_server_draft(
+            db,
+            server_name=server_name,
+            server_host=server_host,
+            server_port=server_port,
+            server_username=server_username,
+            server_password="",
+        )
+        db.commit()
+        flash("初始化完成，VPN 服务端部署成功。", "success")
+        return redirect(url_for("admin_home"))
+
+    db.commit()
+    flash(f"服务器部署失败：{deploy_message}", "error")
+    return redirect_admin_onboarding_modal(4)
+
+
 @app.route("/admin/onboarding", methods=["GET", "POST"])
 @login_required
 @admin_required
 def admin_onboarding():
+    return redirect_admin_onboarding_modal()
+
     db = get_db()
     settings = load_onboarding_settings(db)
     if settings["setup_completed"]:
@@ -3966,6 +4311,22 @@ def admin_home():
     db = get_db()
     reconcile_expired_subscriptions(db)
 
+    onboarding_settings = load_onboarding_settings(db)
+    onboarding_step_status, onboarding_default_step = get_admin_onboarding_step_status(db)
+    onboarding_current_step = onboarding_default_step
+    requested_step_raw = (request.args.get("onboarding_step", "") or "").strip()
+    if requested_step_raw.isdigit():
+        candidate_step = int(requested_step_raw)
+        if 1 <= candidate_step <= 4:
+            onboarding_current_step = candidate_step
+    onboarding_force_open = (
+        (request.args.get("onboarding_open", "") or "").strip() == "1"
+        or "onboarding_step" in request.args
+    )
+    first_plan = load_first_plan_for_onboarding(db)
+    payment_settings = load_payment_settings(db)
+    onboarding_server_draft = load_onboarding_server_draft(db)
+
     pending_count = db.execute(
         "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'pending'"
     ).fetchone()["cnt"]
@@ -3987,6 +4348,14 @@ def admin_home():
         total_users=total_users,
         webhook_enabled=bool(PAYMENT_WEBHOOK_SECRET),
         webhook_min_confirmations=PAYMENT_MIN_CONFIRMATIONS,
+        onboarding_settings=onboarding_settings,
+        onboarding_step_status=onboarding_step_status,
+        onboarding_default_step=onboarding_default_step,
+        onboarding_current_step=onboarding_current_step,
+        onboarding_force_open=onboarding_force_open,
+        first_plan=first_plan,
+        payment_settings=payment_settings,
+        onboarding_server_draft=onboarding_server_draft,
         admin_page="home",
     )
 

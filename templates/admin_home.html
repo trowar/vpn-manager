@@ -10,8 +10,20 @@
     {% else %}
       <span class="tag tag-warn">未配置</span>
     {% endif %}
-    ｜最小确认数：{{ webhook_min_confirmations }}
+    · 最少确认数：{{ webhook_min_confirmations }}
   </p>
+
+  {% if not admin_setup_completed %}
+    <div class="onboarding-entry">
+      <p class="helper">首次初始化尚未完成。你可以中途关闭向导，稍后继续处理未完成步骤。</p>
+      <div class="actions">
+        <button type="button" id="open-onboarding-wizard">打开初始化向导</button>
+        <span class="tag tag-warn">当前建议步骤：{{ onboarding_default_step }}/4</span>
+      </div>
+    </div>
+  {% else %}
+    <p class="helper"><span class="tag tag-ok">初始化已完成</span></p>
+  {% endif %}
 </section>
 
 <section class="card">
@@ -32,4 +44,207 @@
   </div>
   <p class="helper">用户总数：{{ total_users }}</p>
 </section>
+
+{% if not admin_setup_completed %}
+  <div class="payment-modal" id="onboarding-modal" hidden>
+    <div class="payment-modal-card onboarding-modal-card">
+      <div class="section-title-row">
+        <h4>首次初始化向导</h4>
+        <button type="button" class="btn secondary modal-close-x" id="onboarding-modal-close">×</button>
+      </div>
+      <p class="helper">一个弹窗对应一个功能，可分步保存；关闭后可在“管理员首页”继续。</p>
+
+      <div class="onboarding-step-tabs">
+        <button type="button" class="onboarding-step-tab" data-step="1" data-done="{{ 1 if onboarding_step_status[1] else 0 }}">1. 套餐{% if onboarding_step_status[1] %}（已完成）{% endif %}</button>
+        <button type="button" class="onboarding-step-tab" data-step="2" data-done="{{ 1 if onboarding_step_status[2] else 0 }}">2. 收款与域名{% if onboarding_step_status[2] %}（已完成）{% endif %}</button>
+        <button type="button" class="onboarding-step-tab" data-step="3" data-done="{{ 1 if onboarding_step_status[3] else 0 }}">3. Cloudflare{% if onboarding_step_status[3] %}（已完成）{% endif %}</button>
+        <button type="button" class="onboarding-step-tab" data-step="4" data-done="{{ 1 if onboarding_step_status[4] else 0 }}">4. 服务器{% if onboarding_step_status[4] %}（已完成）{% endif %}</button>
+      </div>
+
+      <section class="onboarding-step-panel" data-panel-step="1">
+        <h5>步骤 1：设置第一个套餐</h5>
+        <form method="post" action="{{ url_for('admin_onboarding_step_plan') }}" class="form">
+          <label>套餐名称
+            <input type="text" name="plan_name" value="{{ first_plan['plan_name'] }}" required>
+          </label>
+          <label>计费模式
+            <select name="plan_mode" id="wizard-plan-mode" required>
+              <option value="duration" {% if first_plan['billing_mode'] == 'duration' %}selected{% endif %}>按时长收费</option>
+              <option value="traffic" {% if first_plan['billing_mode'] == 'traffic' %}selected{% endif %}>按流量收费</option>
+            </select>
+          </label>
+          <label id="wizard-plan-duration-row">时长（月）
+            <input type="number" name="plan_duration_months" min="1" step="1" value="{{ first_plan['duration_months'] }}">
+          </label>
+          <label id="wizard-plan-traffic-row" hidden>流量（GB）
+            <input type="number" name="plan_traffic_gb" min="1" step="1" value="{{ first_plan['traffic_gb'] }}">
+          </label>
+          <label>价格（USDT）
+            <input type="text" name="plan_price_usdt" value="{{ first_plan['price_usdt'] }}" required>
+          </label>
+          <div class="actions">
+            <button type="submit">保存并下一步</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="onboarding-step-panel" data-panel-step="2" hidden>
+        <h5>步骤 2：设置收款方式和域名</h5>
+        <form method="post" action="{{ url_for('admin_onboarding_step_payment') }}" class="form">
+          <label>收款网络
+            <select name="payment_network" required>
+              {% for network in usdt_network_options %}
+                <option value="{{ network }}" {% if payment_settings['usdt_default_network'] == network %}selected{% endif %}>{{ network }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>收款地址
+            <input type="text" name="payment_address" value="{{ payment_settings['usdt_receive_address'] }}" required>
+          </label>
+          <label>站点域名（示例：www.network000.com）
+            <input type="text" name="portal_domain" value="{{ onboarding_settings['portal_domain'] }}" required>
+          </label>
+          <div class="actions">
+            <button type="submit">保存并下一步</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="onboarding-step-panel" data-panel-step="3" hidden>
+        <h5>步骤 3：Cloudflare 信息</h5>
+        <form method="post" action="{{ url_for('admin_onboarding_step_cloudflare') }}" class="form">
+          <label>Cloudflare 账号
+            <input type="text" name="cloudflare_account" value="{{ onboarding_settings['cloudflare_account'] }}" required>
+          </label>
+          <label>Cloudflare 密码
+            <input type="password" name="cloudflare_password" value="{{ onboarding_settings['cloudflare_password'] }}" required>
+          </label>
+          <div class="actions">
+            <button type="submit">保存并下一步</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="onboarding-step-panel" data-panel-step="4" hidden>
+        <h5>步骤 4：添加并部署第一台服务器</h5>
+        <form method="post" action="{{ url_for('admin_onboarding_step_server') }}" class="form">
+          <label>服务器名称（可选）
+            <input type="text" name="server_name" value="{{ onboarding_server_draft['server_name'] }}">
+          </label>
+          <label>服务器 IP/域名
+            <input type="text" name="server_host" value="{{ onboarding_server_draft['server_host'] }}" required>
+          </label>
+          <label>SSH 端口
+            <input type="number" name="server_port" min="1" max="65535" value="{{ onboarding_server_draft['server_port'] }}" required>
+          </label>
+          <label>登录账号
+            <input type="text" name="server_username" value="{{ onboarding_server_draft['server_username'] }}" required>
+          </label>
+          <label>登录密码
+            <input type="password" name="server_password" value="{{ onboarding_server_draft['server_password'] }}" required>
+          </label>
+          <div class="actions">
+            <button type="submit" name="action" value="test_server" class="btn secondary">测试连接</button>
+            <button type="submit" name="action" value="save_draft" class="btn secondary">保存草稿</button>
+            <button type="submit" name="action" value="save_and_deploy">部署并完成初始化</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var modal = document.getElementById("onboarding-modal");
+      var openBtn = document.getElementById("open-onboarding-wizard");
+      var closeBtn = document.getElementById("onboarding-modal-close");
+      var tabs = Array.prototype.slice.call(document.querySelectorAll(".onboarding-step-tab"));
+      var panels = Array.prototype.slice.call(document.querySelectorAll(".onboarding-step-panel"));
+      var closeStateKey = "adminOnboardingWizardClosed";
+      var forceOpen = {{ "true" if onboarding_force_open else "false" }};
+      var currentStep = {{ onboarding_current_step }};
+      var defaultStep = {{ onboarding_default_step }};
+
+      function setStep(step) {
+        var safeStep = parseInt(step, 10);
+        if (!(safeStep >= 1 && safeStep <= 4)) safeStep = 1;
+        tabs.forEach(function (tab) {
+          tab.classList.toggle("active", parseInt(tab.dataset.step, 10) === safeStep);
+          tab.classList.toggle("done", tab.dataset.done === "1");
+        });
+        panels.forEach(function (panel) {
+          var show = parseInt(panel.dataset.panelStep, 10) === safeStep;
+          panel.hidden = !show;
+          panel.classList.toggle("active", show);
+        });
+      }
+
+      function openModal(step, fromButton) {
+        if (!modal) return;
+        if (fromButton) {
+          try { sessionStorage.removeItem(closeStateKey); } catch (e) {}
+        }
+        modal.hidden = false;
+        document.body.classList.add("modal-open");
+        setStep(step || defaultStep || 1);
+      }
+
+      function closeModal() {
+        if (!modal) return;
+        modal.hidden = true;
+        document.body.classList.remove("modal-open");
+        try { sessionStorage.setItem(closeStateKey, "1"); } catch (e) {}
+      }
+
+      if (openBtn) {
+        openBtn.addEventListener("click", function () {
+          openModal(defaultStep || 1, true);
+        });
+      }
+      if (closeBtn) closeBtn.addEventListener("click", closeModal);
+      if (modal) {
+        modal.addEventListener("click", function (event) {
+          if (event.target === modal) closeModal();
+        });
+      }
+      tabs.forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          setStep(tab.dataset.step);
+        });
+      });
+
+      var modeSelect = document.getElementById("wizard-plan-mode");
+      var durationRow = document.getElementById("wizard-plan-duration-row");
+      var trafficRow = document.getElementById("wizard-plan-traffic-row");
+      function refreshPlanMode() {
+        if (!modeSelect || !durationRow || !trafficRow) return;
+        var durationInput = durationRow.querySelector("input");
+        var trafficInput = trafficRow.querySelector("input");
+        if (modeSelect.value === "traffic") {
+          durationRow.hidden = true;
+          trafficRow.hidden = false;
+          if (durationInput) durationInput.removeAttribute("required");
+          if (trafficInput) trafficInput.setAttribute("required", "required");
+        } else {
+          durationRow.hidden = false;
+          trafficRow.hidden = true;
+          if (trafficInput) trafficInput.removeAttribute("required");
+          if (durationInput) durationInput.setAttribute("required", "required");
+        }
+      }
+      if (modeSelect) {
+        modeSelect.addEventListener("change", refreshPlanMode);
+        refreshPlanMode();
+      }
+
+      var closed = false;
+      try { closed = sessionStorage.getItem(closeStateKey) === "1"; } catch (e) {}
+      if (forceOpen) {
+        openModal(currentStep || defaultStep || 1, true);
+      } else if (!closed) {
+        openModal(defaultStep || 1, false);
+      }
+    })();
+  </script>
+{% endif %}
 {% endblock %}
