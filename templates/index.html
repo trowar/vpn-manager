@@ -12,6 +12,7 @@
   </p>
 </section>
 
+{% if admin_setup_completed %}
 <section class="card">
   <div class="section-title-row">
     <h3>套餐种类与价格</h3>
@@ -42,6 +43,7 @@
     <p class="helper">管理员暂未配置可售套餐，请稍后再试。</p>
   {% endif %}
 </section>
+{% endif %}
 
 <section class="card">
   <h3>客户端下载</h3>
