@@ -1473,7 +1473,6 @@ def init_db() -> None:
     ensure_default_onboarding_settings(db)
     ensure_default_payment_methods(db)
     sync_legacy_payment_settings_with_default_method(db)
-    ensure_default_subscription_plans(db)
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_status_created ON users(status, created_at)"
     )
