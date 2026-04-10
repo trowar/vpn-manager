@@ -1314,8 +1314,9 @@ def build_vpn_node_deploy_script(
           git clone --depth 1 https://github.com/trowar/vpn-manager.git /opt/vpn-node >/dev/null 2>&1
         else
           git -C /opt/vpn-node fetch --depth 1 origin main >/dev/null 2>&1
-          git -C /opt/vpn-node checkout -f main >/dev/null 2>&1
-          git -C /opt/vpn-node pull --ff-only origin main >/dev/null 2>&1
+          git -C /opt/vpn-node checkout -f main >/dev/null 2>&1 || \
+          git -C /opt/vpn-node checkout -B main origin/main >/dev/null 2>&1
+          git -C /opt/vpn-node reset --hard origin/main >/dev/null 2>&1
         fi
 
         cd /opt/vpn-node
