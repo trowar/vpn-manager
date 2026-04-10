@@ -11,6 +11,12 @@ WG_SERVER_PUBLIC_KEY_FILE = Path(
     os.environ.get("WG_SERVER_PUBLIC_KEY_FILE", "/srv/vpn-shared/server_public.key")
 )
 VPN_API_TOKEN = os.environ.get("VPN_API_TOKEN", "").strip()
+OPENVPN_CA_CERT_FILE = Path(
+    os.environ.get("OPENVPN_CA_CERT_FILE", "/etc/openvpn/server/ca.crt")
+)
+OPENVPN_TLS_CRYPT_KEY_FILE = Path(
+    os.environ.get("OPENVPN_TLS_CRYPT_KEY_FILE", "/etc/openvpn/server/tls-crypt.key")
+)
 
 app = Flask(__name__)
 
@@ -66,6 +72,19 @@ def wireguard_dump():
     interface = (request.args.get("interface") or WG_INTERFACE).strip() or WG_INTERFACE
     dump = run_command(["wg", "show", interface, "dump"], check=False)
     return {"ok": True, "dump": dump}
+
+
+@app.route("/openvpn/client-materials")
+def openvpn_client_materials():
+    if not OPENVPN_CA_CERT_FILE.exists():
+        return {"ok": False, "error": f"openvpn ca cert not found: {OPENVPN_CA_CERT_FILE}"}, 404
+    ca_cert = OPENVPN_CA_CERT_FILE.read_text(encoding="utf-8").strip()
+    if not ca_cert:
+        return {"ok": False, "error": f"openvpn ca cert empty: {OPENVPN_CA_CERT_FILE}"}, 500
+    tls_crypt_key = ""
+    if OPENVPN_TLS_CRYPT_KEY_FILE.exists():
+        tls_crypt_key = OPENVPN_TLS_CRYPT_KEY_FILE.read_text(encoding="utf-8").strip()
+    return {"ok": True, "ca_cert": ca_cert, "tls_crypt_key": tls_crypt_key}
 
 
 @app.route("/wireguard/generate-keys", methods=["POST"])

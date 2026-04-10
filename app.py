@@ -167,6 +167,7 @@ ONBOARDING_SETTINGS_DEFAULTS = {
 SERVER_DEPLOY_DEFAULT_WG_PORT = 51820
 SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 1194
 SERVER_DEPLOY_DEFAULT_DNS_PORT = 53
+SERVER_DEPLOY_DEFAULT_VPN_API_PORT = 8081
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("PORTAL_SECRET_KEY", "change-this-secret")
@@ -527,6 +528,22 @@ def read_required_text(path: Path, label: str) -> str:
     return content
 
 
+def get_openvpn_client_materials() -> tuple[str, str]:
+    if use_vpn_api():
+        result = vpn_api_request("GET", "/openvpn/client-materials")
+        ca_text = (result.get("ca_cert") or "").strip()
+        tls_crypt_text = (result.get("tls_crypt_key") or "").strip()
+        if not ca_text:
+            raise RuntimeError("VPN API 未返回 OpenVPN CA 证书。")
+        return ca_text, tls_crypt_text
+
+    ca_text = read_required_text(OPENVPN_CA_CERT_FILE, "OpenVPN CA 证书")
+    tls_crypt_text = ""
+    if OPENVPN_TLS_CRYPT_KEY_FILE.exists():
+        tls_crypt_text = OPENVPN_TLS_CRYPT_KEY_FILE.read_text(encoding="utf-8").strip()
+    return ca_text, tls_crypt_text
+
+
 def build_openvpn_client_config(
     username: str,
     *,
@@ -535,10 +552,7 @@ def build_openvpn_client_config(
     if not OPENVPN_ENABLED:
         raise RuntimeError("管理员尚未启用 OpenVPN 支持。")
 
-    ca_text = read_required_text(OPENVPN_CA_CERT_FILE, "OpenVPN CA 证书")
-    tls_crypt_text = ""
-    if OPENVPN_TLS_CRYPT_KEY_FILE.exists():
-        tls_crypt_text = OPENVPN_TLS_CRYPT_KEY_FILE.read_text(encoding="utf-8").strip()
+    ca_text, tls_crypt_text = get_openvpn_client_materials()
 
     remote_host = get_openvpn_endpoint_host()
     lines = [
@@ -1345,12 +1359,13 @@ WG_INTERFACE=wg0
 WG_PUBLIC_PORT={wg_port}
 OPENVPN_PUBLIC_PORT={openvpn_port}
 DNS_PUBLIC_PORT={dns_port}
+VPN_API_PUBLIC_PORT={SERVER_DEPLOY_DEFAULT_VPN_API_PORT}
 VPN_ENABLE_WIREGUARD=1
 VPN_ENABLE_DNSMASQ=1
 VPN_ENABLE_OPENVPN=0
 EOF
 
-        docker compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpn >/dev/null
+        docker compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpnmanager-server >/dev/null
         docker compose -f docker-compose.vpn-node.yml --env-file .env ps
         log "completed"
         """
@@ -2014,17 +2029,82 @@ def run_command(args, input_text=None, check=True) -> str:
 
 
 def use_vpn_api() -> bool:
-    return bool(VPN_API_URL)
+    api_url, _ = get_runtime_vpn_api_target()
+    return bool(api_url)
+
+
+def host_for_http_url(raw_host: str) -> str:
+    host = (raw_host or "").strip()
+    if not host:
+        return ""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def get_runtime_vpn_api_target() -> tuple[str, str]:
+    if VPN_API_URL:
+        return VPN_API_URL, VPN_API_TOKEN
+
+    try:
+        db = get_db()
+    except Exception:
+        return "", ""
+
+    try:
+        settings = load_onboarding_settings(db)
+        preferred_server_id_raw = str(settings.get("last_server_id", "") or "").strip()
+    except Exception:
+        preferred_server_id_raw = ""
+
+    row = None
+    if preferred_server_id_raw.isdigit():
+        row = db.execute(
+            """
+            SELECT host, vpn_api_token, status
+            FROM vpn_servers
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (int(preferred_server_id_raw),),
+        ).fetchone()
+
+    if not row:
+        row = db.execute(
+            """
+            SELECT host, vpn_api_token, status
+            FROM vpn_servers
+            WHERE status = 'online'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if not row:
+        return "", ""
+
+    status = (row_get(row, "status", "") or "").strip().lower()
+    if status != "online":
+        return "", ""
+
+    host = normalize_remote_host(row_get(row, "host", ""))
+    token = (row_get(row, "vpn_api_token", "") or "").strip()
+    if not host or not token:
+        return "", ""
+
+    host_url = host_for_http_url(host)
+    return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token
 
 
 def vpn_api_request(method: str, path: str, payload: dict | None = None) -> dict:
-    if not VPN_API_URL:
-        raise RuntimeError("VPN_API_URL 未配置。")
+    runtime_api_url, runtime_api_token = get_runtime_vpn_api_target()
+    if not runtime_api_url:
+        raise RuntimeError("VPN 服务未配置，请先在后台完成服务器部署。")
 
-    url = f"{VPN_API_URL}{path}"
+    url = f"{runtime_api_url}{path}"
     headers = {"Accept": "application/json"}
-    if VPN_API_TOKEN:
-        headers["X-VPN-Token"] = VPN_API_TOKEN
+    if runtime_api_token:
+        headers["X-VPN-Token"] = runtime_api_token
 
     body_bytes = None
     if payload is not None:

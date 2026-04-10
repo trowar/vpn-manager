@@ -1,9 +1,9 @@
 services:
-  vpn:
+  vpnmanager-server:
     build:
       context: .
       dockerfile: docker/vpn/Dockerfile
-    container_name: vpn-core
+    container_name: vpnmanager-server
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
@@ -35,6 +35,7 @@ services:
       - "${OPENVPN_PUBLIC_PORT:-1194}:1194/udp"
       - "${DNS_PUBLIC_PORT:-53}:53/udp"
       - "${DNS_PUBLIC_PORT:-53}:53/tcp"
+      - "${VPN_API_PUBLIC_PORT:-8081}:8081/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2)"]
       interval: 10s
