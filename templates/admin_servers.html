@@ -10,7 +10,8 @@
   </div>
 
   {% if servers %}
-    <table class="subscriptions-table">
+    <div class="table-scroll server-table-scroll">
+    <table class="subscriptions-table server-table">
       <thead>
         <tr>
           <th>ID</th>
@@ -51,13 +52,13 @@
             </td>
             <td>
               <div>{{ s["last_test_at"]|fmt_utc }}</div>
-              <div class="helper">{{ s["last_test_message"] or "-" }}</div>
+              <div class="helper server-log-snippet">{{ s["last_test_message"] or "-" }}</div>
             </td>
             <td>
               <div>{{ s["last_deploy_at"]|fmt_utc }}</div>
-              <div class="helper">{{ s["last_deploy_message"] or "-" }}</div>
+              <div class="helper server-log-snippet">{{ s["last_deploy_message"] or "-" }}</div>
             </td>
-            <td>
+            <td class="server-actions-cell">
               <div class="subscription-actions">
                 <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
                   <button type="submit" class="btn secondary">测试</button>
@@ -96,6 +97,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <p class="helper">暂无服务器，点击右上角“新增服务器”开始。</p>
   {% endif %}

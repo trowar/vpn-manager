@@ -307,6 +307,26 @@ td {
   width: min(420px, 100%);
 }
 
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.server-table {
+  min-width: 1320px;
+}
+
+.server-table .server-log-snippet {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-table .server-actions-cell {
+  min-width: 360px;
+}
+
 .subscription-actions {
   display: flex;
   align-items: center;
