@@ -1,18 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="guest-topbar">
+  <a class="btn" href="{{ url_for('register') }}">注册账号</a>
   <a class="btn secondary" href="{{ url_for('login') }}">登录</a>
 </div>
 
 <section class="card hero">
-  <h2>VPN 门户（WireGuard + OpenVPN，支持 USDT 付费）</h2>
+  <h2>多版本多主机互联互通，移动办公首选</h2>
   <p>
-    注册后可直接登录。用户下单并使用 USDT 转账，提交交易哈希后系统会通过 Webhook 自动核验到账并开通或续费 VPN。
-    客户端支持 WireGuard 与 OpenVPN 两种协议。
+    支持多版本客户端与多主机节点互联互通，稳定高效，满足跨地域访问与移动办公场景。
   </p>
-  <div class="actions">
-    <a class="btn" href="{{ url_for('register') }}">注册账号</a>
-  </div>
 </section>
 
 <section class="card">
