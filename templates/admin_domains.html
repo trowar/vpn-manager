@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>域名管理</h2>
+  <p class="helper">这里维护可自动分配给服务器的域名池。服务器部署成功后会自动更新 Cloudflare A 记录并绑定域名。</p>
+
+  <div class="section-title-row">
+    <h3>域名列表</h3>
+    <button type="button" id="open-domain-create-modal">新增域名</button>
+  </div>
+
+  {% if managed_domains %}
+    <table class="subscriptions-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>域名</th>
+          <th>Cloudflare 账号</th>
+          <th>分配服务器</th>
+          <th>DNS 记录 ID</th>
+          <th>最近同步</th>
+          <th>状态</th>
+          <th>排序</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in managed_domains %}
+          <tr>
+            <td>{{ d["id"] }}</td>
+            <td><strong>{{ d["domain_name"] }}</strong></td>
+            <td>
+              <div>{{ d["account_name"] or "-" }}</div>
+              <div class="helper">{{ d["zone_name"] or "-" }}</div>
+            </td>
+            <td>
+              {% if d["assigned_server_id"] %}
+                <div>#{{ d["assigned_server_id"] }} {{ d["assigned_server_name"] or "" }}</div>
+              {% else %}
+                <span class="helper">未分配</span>
+              {% endif %}
+            </td>
+            <td><code>{{ d["dns_record_id"] or "-" }}</code></td>
+            <td>
+              <div>{{ d["last_sync_at"]|fmt_utc }}</div>
+              <div class="helper">{{ d["last_sync_message"] or "-" }}</div>
+            </td>
+            <td>
+              {% if d["is_active"] == 1 %}
+                <span class="tag tag-ok">启用中</span>
+              {% else %}
+                <span class="tag tag-warn">已停用</span>
+              {% endif %}
+            </td>
+            <td>{{ d["sort_order"] }}</td>
+            <td>
+              <div class="subscription-actions">
+                <form method="post" action="{{ url_for('admin_toggle_domain', domain_id=d['id']) }}" class="inline-form">
+                  {% if d["is_active"] == 1 %}
+                    <button type="submit">停用</button>
+                  {% else %}
+                    <button type="submit">启用</button>
+                  {% endif %}
+                </form>
+                <button
+                  type="button"
+                  class="btn secondary open-domain-edit-modal"
+                  data-update-url="{{ url_for('admin_update_domain', domain_id=d['id']) }}"
+                  data-domain-name="{{ d['domain_name'] }}"
+                  data-account-id="{{ d['cloudflare_account_id'] }}"
+                  data-sort-order="{{ d['sort_order'] }}"
+                >编辑</button>
+                <button
+                  type="button"
+                  class="danger open-domain-delete-modal"
+                  data-delete-url="{{ url_for('admin_delete_domain', domain_id=d['id']) }}"
+                  data-domain-name="{{ d['domain_name'] }}"
+                >删除</button>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无域名，请先添加。</p>
+  {% endif %}
+</section>
+
+<div class="payment-modal" id="domain-create-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>新增域名</h4>
+      <button type="button" class="btn secondary" id="close-domain-create-modal">关闭</button>
+    </div>
+    <form method="post" action="{{ url_for('admin_create_domain') }}" class="form">
+      <label>域名
+        <input type="text" name="domain_name" placeholder="例如：hk1.network000.com" required>
+      </label>
+      <label>Cloudflare 账号
+        <select name="cloudflare_account_id" required>
+          <option value="">请选择账号</option>
+          {% for a in cloudflare_accounts %}
+            <option value="{{ a['id'] }}">{{ a["account_name"] }}（{{ a["zone_name"] }}）</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" min="0" step="1" value="100">
+      </label>
+      <button type="submit">添加域名</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="domain-edit-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>编辑域名</h4>
+      <button type="button" class="btn secondary" id="close-domain-edit-modal">关闭</button>
+    </div>
+    <form method="post" id="domain-edit-form" class="form">
+      <label>域名
+        <input type="text" name="domain_name" id="domain-edit-name" required>
+      </label>
+      <label>Cloudflare 账号
+        <select name="cloudflare_account_id" id="domain-edit-account" required>
+          <option value="">请选择账号</option>
+          {% for a in cloudflare_accounts %}
+            <option value="{{ a['id'] }}">{{ a["account_name"] }}（{{ a["zone_name"] }}）</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" id="domain-edit-sort" min="0" step="1" value="100">
+      </label>
+      <button type="submit">保存修改</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="domain-delete-modal" hidden>
+  <div class="payment-modal-card" style="max-width:460px;">
+    <div class="section-title-row">
+      <h4>确认删除</h4>
+      <button type="button" class="btn secondary" id="close-domain-delete-modal">关闭</button>
+    </div>
+    <p id="domain-delete-message">确定删除该域名吗？</p>
+    <form method="post" id="domain-delete-form" class="actions">
+      <button type="submit" class="danger">确认删除</button>
+      <button type="button" class="btn secondary" id="cancel-domain-delete-modal">取消</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var createOpenBtn = document.getElementById("open-domain-create-modal");
+    var createCloseBtn = document.getElementById("close-domain-create-modal");
+    var createModal = document.getElementById("domain-create-modal");
+
+    var editButtons = document.querySelectorAll(".open-domain-edit-modal");
+    var editModal = document.getElementById("domain-edit-modal");
+    var editCloseBtn = document.getElementById("close-domain-edit-modal");
+    var editForm = document.getElementById("domain-edit-form");
+    var editName = document.getElementById("domain-edit-name");
+    var editAccount = document.getElementById("domain-edit-account");
+    var editSort = document.getElementById("domain-edit-sort");
+
+    var deleteButtons = document.querySelectorAll(".open-domain-delete-modal");
+    var deleteModal = document.getElementById("domain-delete-modal");
+    var deleteCloseBtn = document.getElementById("close-domain-delete-modal");
+    var deleteCancelBtn = document.getElementById("cancel-domain-delete-modal");
+    var deleteForm = document.getElementById("domain-delete-form");
+    var deleteMessage = document.getElementById("domain-delete-message");
+
+    function openModal(modal) {
+      if (!modal) return;
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal(modal) {
+      if (!modal) return;
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    function bindOverlayClose(modal) {
+      if (!modal) return;
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) {
+          closeModal(modal);
+        }
+      });
+    }
+
+    if (createOpenBtn) createOpenBtn.addEventListener("click", function () { openModal(createModal); });
+    if (createCloseBtn) createCloseBtn.addEventListener("click", function () { closeModal(createModal); });
+    bindOverlayClose(createModal);
+
+    if (editCloseBtn) editCloseBtn.addEventListener("click", function () { closeModal(editModal); });
+    bindOverlayClose(editModal);
+    editButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!editForm) return;
+        editForm.action = btn.dataset.updateUrl || "";
+        if (editName) editName.value = btn.dataset.domainName || "";
+        if (editAccount) editAccount.value = btn.dataset.accountId || "";
+        if (editSort) editSort.value = btn.dataset.sortOrder || "100";
+        openModal(editModal);
+      });
+    });
+
+    if (deleteCloseBtn) deleteCloseBtn.addEventListener("click", function () { closeModal(deleteModal); });
+    if (deleteCancelBtn) deleteCancelBtn.addEventListener("click", function () { closeModal(deleteModal); });
+    bindOverlayClose(deleteModal);
+    deleteButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (deleteForm) deleteForm.action = btn.dataset.deleteUrl || "";
+        if (deleteMessage) {
+          deleteMessage.textContent = "确定删除域名“" + (btn.dataset.domainName || "该域名") + "”吗？";
+        }
+        openModal(deleteModal);
+      });
+    });
+  })();
+</script>
+{% endblock %}

@@ -5,7 +5,7 @@
   <p class="helper">按行管理付款方式。当前下单与 Webhook 仅支持 USDT 网络。</p>
 
   <div class="section-title-row">
-    <h3>付款方式列表（按行显示）</h3>
+    <h3>付款方式列表</h3>
     <button type="button" id="open-payment-method-modal">新增付款方式</button>
   </div>
 
@@ -40,13 +40,31 @@
             </td>
             <td>{{ m["sort_order"] }}</td>
             <td>
-              <form method="post" action="{{ url_for('admin_toggle_payment_method', method_id=m['id']) }}" class="inline-form">
-                {% if m["is_active"] == 1 %}
-                  <button type="submit">停用</button>
-                {% else %}
-                  <button type="submit">启用</button>
-                {% endif %}
-              </form>
+              <div class="subscription-actions">
+                <form method="post" action="{{ url_for('admin_toggle_payment_method', method_id=m['id']) }}" class="inline-form">
+                  {% if m["is_active"] == 1 %}
+                    <button type="submit">停用</button>
+                  {% else %}
+                    <button type="submit">启用</button>
+                  {% endif %}
+                </form>
+                <button
+                  type="button"
+                  class="btn secondary open-payment-method-edit-modal"
+                  data-update-url="{{ url_for('admin_update_payment_method', method_id=m['id']) }}"
+                  data-method-name="{{ m['method_name'] }}"
+                  data-method-code="{{ m['method_code'] }}"
+                  data-network="{{ m['network'] }}"
+                  data-address="{{ m['receive_address'] }}"
+                  data-sort-order="{{ m['sort_order'] }}"
+                >编辑</button>
+                <button
+                  type="button"
+                  class="danger open-payment-method-delete-modal"
+                  data-delete-url="{{ url_for('admin_delete_payment_method', method_id=m['id']) }}"
+                  data-method-name="{{ m['method_name'] }}"
+                >删除</button>
+              </div>
             </td>
           </tr>
         {% endfor %}
@@ -91,41 +109,151 @@
   </div>
 </div>
 
+<div class="payment-modal" id="payment-method-edit-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>编辑付款方式</h4>
+      <button type="button" class="btn secondary" id="close-payment-method-edit-modal">关闭</button>
+    </div>
+
+    <form method="post" id="payment-method-edit-form" class="form">
+      <label>付款方式
+        <select name="method_code" id="payment-method-edit-code" required>
+          <option value="usdt">USDT</option>
+        </select>
+      </label>
+      <label>显示名称
+        <input type="text" name="method_name" id="payment-method-edit-name" required>
+      </label>
+      <label>网络
+        <select name="network" id="payment-method-edit-network" required>
+          {% for network in usdt_network_options %}
+            <option value="{{ network }}">{{ network }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>收款地址
+        <input type="text" name="receive_address" id="payment-method-edit-address" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" id="payment-method-edit-sort" min="0" step="1" value="100">
+      </label>
+      <button type="submit">保存修改</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="payment-method-delete-modal" hidden>
+  <div class="payment-modal-card" style="max-width:460px;">
+    <div class="section-title-row">
+      <h4>确认删除</h4>
+      <button type="button" class="btn secondary" id="close-payment-method-delete-modal">关闭</button>
+    </div>
+    <p id="payment-method-delete-message">确定删除该付款方式吗？删除后无法恢复。</p>
+    <form method="post" id="payment-method-delete-form" class="actions">
+      <button type="submit" class="danger">确认删除</button>
+      <button type="button" class="btn secondary" id="cancel-payment-method-delete-modal">取消</button>
+    </form>
+  </div>
+</div>
+
 <script>
   (function () {
-    var openBtn = document.getElementById("open-payment-method-modal");
-    var closeBtn = document.getElementById("close-payment-method-modal");
-    var modal = document.getElementById("payment-method-modal");
+    var createOpenBtn = document.getElementById("open-payment-method-modal");
+    var createCloseBtn = document.getElementById("close-payment-method-modal");
+    var createModal = document.getElementById("payment-method-modal");
 
-    function openModal() {
-      if (!modal) {
-        return;
-      }
+    var editButtons = document.querySelectorAll(".open-payment-method-edit-modal");
+    var editModal = document.getElementById("payment-method-edit-modal");
+    var editCloseBtn = document.getElementById("close-payment-method-edit-modal");
+    var editForm = document.getElementById("payment-method-edit-form");
+    var editCode = document.getElementById("payment-method-edit-code");
+    var editName = document.getElementById("payment-method-edit-name");
+    var editNetwork = document.getElementById("payment-method-edit-network");
+    var editAddress = document.getElementById("payment-method-edit-address");
+    var editSort = document.getElementById("payment-method-edit-sort");
+
+    var deleteButtons = document.querySelectorAll(".open-payment-method-delete-modal");
+    var deleteModal = document.getElementById("payment-method-delete-modal");
+    var deleteCloseBtn = document.getElementById("close-payment-method-delete-modal");
+    var deleteCancelBtn = document.getElementById("cancel-payment-method-delete-modal");
+    var deleteForm = document.getElementById("payment-method-delete-form");
+    var deleteMessage = document.getElementById("payment-method-delete-message");
+
+    function openModal(modal) {
+      if (!modal) return;
       modal.hidden = false;
       document.body.classList.add("modal-open");
     }
 
-    function closeModal() {
-      if (!modal) {
-        return;
-      }
+    function closeModal(modal) {
+      if (!modal) return;
       modal.hidden = true;
       document.body.classList.remove("modal-open");
     }
 
-    if (openBtn) {
-      openBtn.addEventListener("click", openModal);
-    }
-    if (closeBtn) {
-      closeBtn.addEventListener("click", closeModal);
-    }
-    if (modal) {
+    function bindOverlayClose(modal) {
+      if (!modal) return;
       modal.addEventListener("click", function (event) {
         if (event.target === modal) {
-          closeModal();
+          closeModal(modal);
         }
       });
     }
+
+    if (createOpenBtn) {
+      createOpenBtn.addEventListener("click", function () {
+        openModal(createModal);
+      });
+    }
+    if (createCloseBtn) {
+      createCloseBtn.addEventListener("click", function () {
+        closeModal(createModal);
+      });
+    }
+    bindOverlayClose(createModal);
+
+    if (editCloseBtn) {
+      editCloseBtn.addEventListener("click", function () {
+        closeModal(editModal);
+      });
+    }
+    bindOverlayClose(editModal);
+    editButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!editForm) return;
+        editForm.action = btn.dataset.updateUrl || "";
+        if (editCode) editCode.value = btn.dataset.methodCode || "usdt";
+        if (editName) editName.value = btn.dataset.methodName || "";
+        if (editNetwork) editNetwork.value = btn.dataset.network || "TRC20";
+        if (editAddress) editAddress.value = btn.dataset.address || "";
+        if (editSort) editSort.value = btn.dataset.sortOrder || "100";
+        openModal(editModal);
+      });
+    });
+
+    if (deleteCloseBtn) {
+      deleteCloseBtn.addEventListener("click", function () {
+        closeModal(deleteModal);
+      });
+    }
+    if (deleteCancelBtn) {
+      deleteCancelBtn.addEventListener("click", function () {
+        closeModal(deleteModal);
+      });
+    }
+    bindOverlayClose(deleteModal);
+    deleteButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (deleteForm) {
+          deleteForm.action = btn.dataset.deleteUrl || "";
+        }
+        if (deleteMessage) {
+          deleteMessage.textContent = "确定删除付款方式“" + (btn.dataset.methodName || "该方式") + "”吗？删除后无法恢复。";
+        }
+        openModal(deleteModal);
+      });
+    });
   })();
 </script>
 {% endblock %}

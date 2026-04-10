@@ -22,6 +22,8 @@
           {% endif %}
           <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">首页</a>
           <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器管理</a>
+          <a class="site-nav-link {% if admin_page == 'cloudflare_accounts' %}active{% endif %}" href="{{ url_for('admin_cloudflare_accounts') }}">Cloudflare账号</a>
+          <a class="site-nav-link {% if admin_page == 'domains' %}active{% endif %}" href="{{ url_for('admin_domains') }}">域名管理</a>
           <a class="site-nav-link {% if admin_page == 'payment_methods' %}active{% endif %}" href="{{ url_for('admin_payment_methods') }}">付款方式</a>
           <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐管理</a>
           <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">待处理订单</a>

@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -14,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from pathlib import Path
 from urllib import error as urllib_error
+from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 import paramiko
@@ -97,6 +99,7 @@ OPENVPN_DOWNLOAD_LINKS = {
     "linux": "https://openvpn.net/client/",
     "official": "https://openvpn.net/client/",
 }
+CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 VPN_API_URL = os.environ.get("VPN_API_URL", "").strip().rstrip("/")
 VPN_API_TOKEN = os.environ.get("VPN_API_TOKEN", "").strip()
 VPN_API_TIMEOUT_RAW = os.environ.get("VPN_API_TIMEOUT_SECONDS", "8").strip()
@@ -782,13 +785,18 @@ def get_admin_onboarding_step_status(db: sqlite3.Connection) -> tuple[dict[int, 
     settings = load_onboarding_settings(db)
     payment_settings = load_payment_settings(db)
     plan_count = db.execute("SELECT COUNT(*) AS cnt FROM subscription_plans").fetchone()["cnt"]
+    cloudflare_active_count = db.execute(
+        "SELECT COUNT(*) AS cnt FROM cloudflare_accounts WHERE is_active = 1"
+    ).fetchone()["cnt"]
+    legacy_cloudflare_ready = bool((settings["cloudflare_account"] or "").strip()) and bool(
+        (settings["cloudflare_password"] or "").strip()
+    )
 
     step_status = {
         1: int(plan_count or 0) > 0,
         2: bool((payment_settings["usdt_receive_address"] or "").strip())
         and bool((settings["portal_domain"] or "").strip()),
-        3: bool((settings["cloudflare_account"] or "").strip())
-        and bool((settings["cloudflare_password"] or "").strip()),
+        3: int(cloudflare_active_count or 0) > 0 or legacy_cloudflare_ready,
         4: bool(settings["setup_completed"]),
     }
 
@@ -836,6 +844,28 @@ def normalize_domain_host(raw_domain: str | None) -> str:
     value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
     value = value.split("/", 1)[0].strip()
     return value
+
+
+def normalize_fqdn(raw_domain: str | None) -> str:
+    return normalize_domain_host(raw_domain).strip().strip(".").lower()
+
+
+def domain_belongs_to_zone(domain_name: str, zone_name: str) -> bool:
+    domain = normalize_fqdn(domain_name)
+    zone = normalize_fqdn(zone_name)
+    if not domain or not zone:
+        return False
+    return domain == zone or domain.endswith(f".{zone}")
+
+
+def guess_zone_name_from_domain(domain_name: str) -> str:
+    normalized = normalize_fqdn(domain_name)
+    if not normalized:
+        return ""
+    parts = normalized.split(".")
+    if len(parts) <= 2:
+        return normalized
+    return ".".join(parts[-2:])
 
 
 def get_portal_domain_setting() -> str:
@@ -1222,6 +1252,587 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
             }
         )
     return servers
+
+
+def load_cloudflare_accounts(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
+    sql = """
+        SELECT
+            id,
+            account_name,
+            api_token,
+            zone_name,
+            zone_id,
+            is_active,
+            sort_order,
+            created_at,
+            updated_at
+        FROM cloudflare_accounts
+    """
+    if active_only:
+        sql += " WHERE is_active = 1"
+    sql += " ORDER BY sort_order ASC, id ASC"
+    rows = db.execute(sql).fetchall()
+    accounts: list[dict] = []
+    for row in rows:
+        accounts.append(
+            {
+                "id": int(row["id"]),
+                "account_name": (row["account_name"] or "").strip(),
+                "api_token": (row["api_token"] or "").strip(),
+                "api_token_masked": mask_secret(row["api_token"] or "", visible=4),
+                "zone_name": normalize_fqdn(row["zone_name"]),
+                "zone_id": (row["zone_id"] or "").strip(),
+                "is_active": 1 if int(row["is_active"] or 0) == 1 else 0,
+                "sort_order": to_non_negative_int(row["sort_order"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+    return accounts
+
+
+def get_default_cloudflare_account_id(db: sqlite3.Connection) -> int | None:
+    row = db.execute(
+        """
+        SELECT id
+        FROM cloudflare_accounts
+        WHERE is_active = 1
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+    return int(row["id"])
+
+
+def load_managed_domains(
+    db: sqlite3.Connection,
+    *,
+    active_only: bool = False,
+    only_unassigned: bool = False,
+) -> list[dict]:
+    conditions: list[str] = []
+    params: list[object] = []
+    if active_only:
+        conditions.append("d.is_active = 1")
+    if only_unassigned:
+        conditions.append("d.assigned_server_id IS NULL")
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+    rows = db.execute(
+        f"""
+        SELECT
+            d.id,
+            d.domain_name,
+            d.cloudflare_account_id,
+            d.assigned_server_id,
+            d.dns_record_id,
+            d.is_active,
+            d.sort_order,
+            d.last_sync_at,
+            d.last_sync_message,
+            d.created_at,
+            d.updated_at,
+            a.account_name,
+            a.zone_name,
+            a.is_active AS account_is_active,
+            s.server_name AS assigned_server_name
+        FROM managed_domains d
+        LEFT JOIN cloudflare_accounts a ON a.id = d.cloudflare_account_id
+        LEFT JOIN vpn_servers s ON s.id = d.assigned_server_id
+        {where_clause}
+        ORDER BY d.sort_order ASC, d.id ASC
+        """,
+        params,
+    ).fetchall()
+    domains: list[dict] = []
+    for row in rows:
+        domains.append(
+            {
+                "id": int(row["id"]),
+                "domain_name": normalize_fqdn(row["domain_name"]),
+                "cloudflare_account_id": row["cloudflare_account_id"],
+                "account_name": (row["account_name"] or "").strip(),
+                "zone_name": normalize_fqdn(row["zone_name"]),
+                "account_is_active": 1 if int(row["account_is_active"] or 0) == 1 else 0,
+                "assigned_server_id": row["assigned_server_id"],
+                "assigned_server_name": (row["assigned_server_name"] or "").strip(),
+                "dns_record_id": (row["dns_record_id"] or "").strip(),
+                "is_active": 1 if int(row["is_active"] or 0) == 1 else 0,
+                "sort_order": to_non_negative_int(row["sort_order"]),
+                "last_sync_at": row["last_sync_at"],
+                "last_sync_message": summarize_text(row["last_sync_message"] or "", 220),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+    return domains
+
+
+def load_available_managed_domains(db: sqlite3.Connection) -> list[dict]:
+    rows = db.execute(
+        """
+        SELECT
+            d.id,
+            d.domain_name,
+            d.sort_order
+        FROM managed_domains d
+        JOIN cloudflare_accounts a ON a.id = d.cloudflare_account_id
+        WHERE d.is_active = 1
+          AND d.assigned_server_id IS NULL
+          AND a.is_active = 1
+        ORDER BY d.sort_order ASC, d.id ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "domain_name": normalize_fqdn(row["domain_name"]),
+            "sort_order": to_non_negative_int(row["sort_order"]),
+        }
+        for row in rows
+    ]
+
+
+def ensure_managed_domain_entry(
+    db: sqlite3.Connection,
+    domain_name: str,
+    *,
+    cloudflare_account_id: int | None = None,
+    sort_order: int = 100,
+) -> int | None:
+    normalized_domain = normalize_fqdn(domain_name)
+    if not normalized_domain:
+        return None
+
+    existing = db.execute(
+        """
+        SELECT id, cloudflare_account_id
+        FROM managed_domains
+        WHERE lower(domain_name) = lower(?)
+        LIMIT 1
+        """,
+        (normalized_domain,),
+    ).fetchone()
+    now_iso = utcnow_iso()
+    if existing:
+        domain_id = int(existing["id"])
+        if cloudflare_account_id and not existing["cloudflare_account_id"]:
+            db.execute(
+                """
+                UPDATE managed_domains
+                SET cloudflare_account_id = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (cloudflare_account_id, now_iso, domain_id),
+            )
+        return domain_id
+
+    cursor = db.execute(
+        """
+        INSERT INTO managed_domains (
+            domain_name,
+            cloudflare_account_id,
+            is_active,
+            sort_order,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, 1, ?, ?, ?)
+        """,
+        (
+            normalized_domain,
+            cloudflare_account_id,
+            max(0, int(sort_order or 0)),
+            now_iso,
+            now_iso,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def cloudflare_extract_error_message(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return "未知错误"
+    errors = payload.get("errors") or []
+    if isinstance(errors, list):
+        messages = []
+        for item in errors:
+            if isinstance(item, dict):
+                message = (item.get("message") or "").strip()
+                code = item.get("code")
+                if message and code:
+                    messages.append(f"[{code}] {message}")
+                elif message:
+                    messages.append(message)
+            elif isinstance(item, str):
+                text = item.strip()
+                if text:
+                    messages.append(text)
+        if messages:
+            return "; ".join(messages)
+    message = (payload.get("message") or "").strip()
+    if message:
+        return message
+    return "未知错误"
+
+
+def cloudflare_api_request(
+    api_token: str,
+    method: str,
+    path: str,
+    *,
+    query: dict[str, str | int | None] | None = None,
+    payload: dict | None = None,
+) -> dict:
+    token = (api_token or "").strip()
+    if not token:
+        raise RuntimeError("Cloudflare API Token 为空。")
+
+    request_path = (path or "").strip()
+    if not request_path.startswith("/"):
+        request_path = "/" + request_path
+    url = f"{CLOUDFLARE_API_BASE}{request_path}"
+    if query:
+        safe_query = {
+            str(k): str(v)
+            for k, v in query.items()
+            if v is not None and str(v).strip() != ""
+        }
+        if safe_query:
+            url = f"{url}?{urllib_parse.urlencode(safe_query)}"
+
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+
+    req = urllib_request.Request(url=url, data=body, method=(method or "GET").upper())
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib_request.urlopen(req, timeout=12) as response:
+            response_text = response.read().decode("utf-8", errors="ignore")
+    except urllib_error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore")
+        parsed: dict | None = None
+        try:
+            parsed = json.loads(raw) if raw else None
+        except Exception:
+            parsed = None
+        detail = cloudflare_extract_error_message(parsed)
+        raise RuntimeError(f"Cloudflare API 错误（HTTP {exc.code}）：{detail}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"Cloudflare API 请求失败：{exc.reason}") from exc
+
+    if not response_text:
+        raise RuntimeError("Cloudflare API 返回空响应。")
+    try:
+        parsed = json.loads(response_text)
+    except Exception as exc:
+        raise RuntimeError("Cloudflare API 响应解析失败。") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Cloudflare API 响应格式错误。")
+    if not parsed.get("success", False):
+        raise RuntimeError(f"Cloudflare API 返回失败：{cloudflare_extract_error_message(parsed)}")
+    return parsed
+
+
+def cloudflare_get_zone_id(api_token: str, zone_name: str) -> str:
+    normalized_zone = normalize_fqdn(zone_name)
+    if not normalized_zone:
+        raise RuntimeError("Zone 域名不能为空。")
+    response = cloudflare_api_request(
+        api_token,
+        "GET",
+        "/zones",
+        query={"name": normalized_zone, "status": "active", "per_page": 1},
+    )
+    result = response.get("result") or []
+    if not isinstance(result, list) or not result:
+        raise RuntimeError(f"未找到 Zone：{normalized_zone}")
+    zone_id = (result[0].get("id") or "").strip()
+    if not zone_id:
+        raise RuntimeError(f"Zone 查询成功但缺少 ID：{normalized_zone}")
+    return zone_id
+
+
+def cloudflare_upsert_a_record(
+    api_token: str,
+    zone_id: str,
+    domain_name: str,
+    ip_v4: str,
+) -> str:
+    normalized_domain = normalize_fqdn(domain_name)
+    if not normalized_domain:
+        raise RuntimeError("域名不能为空。")
+    normalized_zone_id = (zone_id or "").strip()
+    if not normalized_zone_id:
+        raise RuntimeError("Zone ID 不能为空。")
+
+    payload = {
+        "type": "A",
+        "name": normalized_domain,
+        "content": ip_v4,
+        "ttl": 1,
+        "proxied": False,
+    }
+    existing = cloudflare_api_request(
+        api_token,
+        "GET",
+        f"/zones/{normalized_zone_id}/dns_records",
+        query={"type": "A", "name": normalized_domain, "per_page": 1},
+    )
+    records = existing.get("result") or []
+    if isinstance(records, list) and records:
+        record_id = (records[0].get("id") or "").strip()
+        if not record_id:
+            raise RuntimeError("查询到现有 DNS 记录但记录 ID 为空。")
+        cloudflare_api_request(
+            api_token,
+            "PUT",
+            f"/zones/{normalized_zone_id}/dns_records/{record_id}",
+            payload=payload,
+        )
+        return record_id
+
+    created = cloudflare_api_request(
+        api_token,
+        "POST",
+        f"/zones/{normalized_zone_id}/dns_records",
+        payload=payload,
+    )
+    created_result = created.get("result") or {}
+    record_id = (created_result.get("id") or "").strip()
+    if not record_id:
+        raise RuntimeError("DNS 记录创建成功但未返回记录 ID。")
+    return record_id
+
+
+def resolve_ipv4_for_dns_record(host: str) -> str:
+    normalized_host = normalize_remote_host(host)
+    if not normalized_host:
+        raise RuntimeError("服务器地址为空，无法解析 A 记录。")
+    try:
+        parsed = ipaddress.ip_address(normalized_host)
+        if parsed.version == 4:
+            return str(parsed)
+        raise RuntimeError("当前自动分配域名仅支持 IPv4 地址。")
+    except ValueError:
+        pass
+
+    try:
+        resolved = socket.gethostbyname(normalized_host)
+    except Exception as exc:
+        raise RuntimeError(f"无法解析服务器地址 {normalized_host} 的 IPv4。") from exc
+    try:
+        parsed = ipaddress.ip_address(resolved)
+        if parsed.version != 4:
+            raise RuntimeError("解析结果不是 IPv4 地址。")
+    except Exception as exc:
+        raise RuntimeError("服务器地址解析结果无效。") from exc
+    return str(parsed)
+
+
+def assign_managed_domain_to_server(
+    db: sqlite3.Connection,
+    server_id: int,
+    *,
+    preferred_domain: str = "",
+) -> tuple[bool, str]:
+    server = db.execute(
+        """
+        SELECT id, host, domain
+        FROM vpn_servers
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (server_id,),
+    ).fetchone()
+    if not server:
+        return False, "服务器不存在。"
+
+    server_ip = resolve_ipv4_for_dns_record(row_get(server, "host", ""))
+    normalized_preferred = normalize_fqdn(preferred_domain)
+    query_params: list[object] = [server_id]
+    where_domain = ""
+    if normalized_preferred:
+        where_domain = " AND lower(d.domain_name) = lower(?)"
+        query_params.append(normalized_preferred)
+
+    domain_row = db.execute(
+        f"""
+        SELECT
+            d.id,
+            d.domain_name,
+            d.cloudflare_account_id,
+            a.account_name,
+            a.api_token,
+            a.zone_name,
+            a.zone_id
+        FROM managed_domains d
+        JOIN cloudflare_accounts a ON a.id = d.cloudflare_account_id
+        WHERE d.is_active = 1
+          AND a.is_active = 1
+          AND (d.assigned_server_id IS NULL OR d.assigned_server_id = ?)
+          {where_domain}
+        ORDER BY CASE WHEN d.assigned_server_id = ? THEN 0 ELSE 1 END, d.sort_order ASC, d.id ASC
+        LIMIT 1
+        """,
+        tuple(query_params + [server_id]),
+    ).fetchone()
+    if not domain_row:
+        if normalized_preferred:
+            return False, f"域名 {normalized_preferred} 不可用或未在域名管理中启用。"
+        return False, "没有可分配的域名，请先在“域名管理”添加并启用域名。"
+
+    domain_name = normalize_fqdn(domain_row["domain_name"])
+    zone_name = normalize_fqdn(domain_row["zone_name"])
+    api_token = (domain_row["api_token"] or "").strip()
+    if not api_token:
+        return False, f"Cloudflare 账号 {domain_row['account_name']} 缺少 API Token。"
+    if not domain_belongs_to_zone(domain_name, zone_name):
+        return False, f"域名 {domain_name} 不属于 Zone {zone_name}。"
+
+    zone_id = (domain_row["zone_id"] or "").strip()
+    if not zone_id:
+        zone_id = cloudflare_get_zone_id(api_token, zone_name)
+
+    dns_record_id = cloudflare_upsert_a_record(
+        api_token=api_token,
+        zone_id=zone_id,
+        domain_name=domain_name,
+        ip_v4=server_ip,
+    )
+    now_iso = utcnow_iso()
+    success_message = f"已分配域名 {domain_name} -> {server_ip}"
+
+    db.execute(
+        """
+        UPDATE cloudflare_accounts
+        SET zone_id = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (zone_id, now_iso, int(domain_row["cloudflare_account_id"])),
+    )
+    db.execute(
+        """
+        UPDATE managed_domains
+        SET assigned_server_id = NULL,
+            updated_at = ?
+        WHERE assigned_server_id = ?
+          AND id <> ?
+        """,
+        (now_iso, server_id, int(domain_row["id"])),
+    )
+    db.execute(
+        """
+        UPDATE managed_domains
+        SET assigned_server_id = ?,
+            dns_record_id = ?,
+            last_sync_at = ?,
+            last_sync_message = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            server_id,
+            dns_record_id,
+            now_iso,
+            success_message,
+            now_iso,
+            int(domain_row["id"]),
+        ),
+    )
+    db.execute(
+        """
+        UPDATE vpn_servers
+        SET domain = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (domain_name, now_iso, server_id),
+    )
+    return True, success_message
+
+
+def upsert_primary_cloudflare_account_from_onboarding(
+    db: sqlite3.Connection,
+    *,
+    account_name: str,
+    api_token: str,
+    zone_name: str,
+) -> int:
+    normalized_account_name = (account_name or "").strip()
+    normalized_zone_name = normalize_fqdn(zone_name)
+    token = (api_token or "").strip()
+    if not normalized_account_name:
+        raise RuntimeError("Cloudflare 账号名称不能为空。")
+    if not token:
+        raise RuntimeError("Cloudflare API Token 不能为空。")
+    if not normalized_zone_name:
+        raise RuntimeError("Cloudflare Zone 域名不能为空。")
+
+    now_iso = utcnow_iso()
+    existing = db.execute(
+        """
+        SELECT id
+        FROM cloudflare_accounts
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    if existing:
+        account_id = int(existing["id"])
+        db.execute(
+            """
+            UPDATE cloudflare_accounts
+            SET account_name = ?,
+                api_token = ?,
+                zone_name = ?,
+                is_active = 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                normalized_account_name,
+                token,
+                normalized_zone_name,
+                now_iso,
+                account_id,
+            ),
+        )
+        return account_id
+
+    cursor = db.execute(
+        """
+        INSERT INTO cloudflare_accounts (
+            account_name,
+            api_token,
+            zone_name,
+            zone_id,
+            is_active,
+            sort_order,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, '', 1, 10, ?, ?)
+        """,
+        (
+            normalized_account_name,
+            token,
+            normalized_zone_name,
+            now_iso,
+            now_iso,
+        ),
+    )
+    return int(cursor.lastrowid)
 
 
 def open_ssh_client(
@@ -1703,10 +2314,74 @@ def init_db() -> None:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cloudflare_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_name TEXT NOT NULL,
+            api_token TEXT NOT NULL,
+            zone_name TEXT NOT NULL,
+            zone_id TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS managed_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_name TEXT NOT NULL,
+            cloudflare_account_id INTEGER,
+            assigned_server_id INTEGER,
+            dns_record_id TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            last_sync_at TEXT,
+            last_sync_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (cloudflare_account_id) REFERENCES cloudflare_accounts(id) ON DELETE SET NULL,
+            FOREIGN KEY (assigned_server_id) REFERENCES vpn_servers(id) ON DELETE SET NULL
+        )
+        """
+    )
     migrate_schema(db)
     ensure_default_payment_settings(db)
     ensure_default_onboarding_settings(db)
     ensure_default_payment_methods(db)
+    onboarding_settings = load_onboarding_settings(db)
+    default_cf_account_id = None
+    if (
+        (onboarding_settings.get("cloudflare_account") or "").strip()
+        and (onboarding_settings.get("cloudflare_password") or "").strip()
+    ):
+        existing_cf_count = db.execute(
+            "SELECT COUNT(*) AS cnt FROM cloudflare_accounts"
+        ).fetchone()["cnt"]
+        if int(existing_cf_count or 0) == 0:
+            zone_from_portal = guess_zone_name_from_domain(
+                str(onboarding_settings.get("portal_domain") or "")
+            ) or normalize_fqdn(str(onboarding_settings.get("portal_domain") or ""))
+            if zone_from_portal:
+                default_cf_account_id = upsert_primary_cloudflare_account_from_onboarding(
+                    db,
+                    account_name=str(onboarding_settings.get("cloudflare_account") or "").strip(),
+                    api_token=str(onboarding_settings.get("cloudflare_password") or "").strip(),
+                    zone_name=zone_from_portal,
+                )
+    if not default_cf_account_id:
+        default_cf_account_id = get_default_cloudflare_account_id(db)
+    portal_domain = normalize_fqdn(str(onboarding_settings.get("portal_domain") or ""))
+    if portal_domain:
+        ensure_managed_domain_entry(
+            db,
+            portal_domain,
+            cloudflare_account_id=default_cf_account_id,
+            sort_order=10,
+        )
     sync_legacy_payment_settings_with_default_method(db)
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_status_created ON users(status, created_at)"
@@ -1736,6 +2411,18 @@ def init_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_payment_methods_active_sort ON payment_methods(is_active, sort_order, id)"
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_vpn_servers_host ON vpn_servers(host)")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cloudflare_accounts_active_sort ON cloudflare_accounts(is_active, sort_order, id)"
+    )
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_domains_domain_unique ON managed_domains(domain_name)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_managed_domains_active_sort ON managed_domains(is_active, sort_order, id)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_managed_domains_assigned_server ON managed_domains(assigned_server_id)"
+    )
     db.commit()
 
 
@@ -1923,6 +2610,108 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
     if "updated_at" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cloudflare_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_name TEXT NOT NULL,
+            api_token TEXT NOT NULL,
+            zone_name TEXT NOT NULL,
+            zone_id TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cloudflare_columns = {
+        row["name"]: row
+        for row in db.execute("PRAGMA table_info(cloudflare_accounts)").fetchall()
+    }
+    if "account_name" not in cloudflare_columns:
+        db.execute(
+            "ALTER TABLE cloudflare_accounts ADD COLUMN account_name TEXT NOT NULL DEFAULT ''"
+        )
+    if "api_token" not in cloudflare_columns:
+        db.execute(
+            "ALTER TABLE cloudflare_accounts ADD COLUMN api_token TEXT NOT NULL DEFAULT ''"
+        )
+    if "zone_name" not in cloudflare_columns:
+        db.execute(
+            "ALTER TABLE cloudflare_accounts ADD COLUMN zone_name TEXT NOT NULL DEFAULT ''"
+        )
+    if "zone_id" not in cloudflare_columns:
+        db.execute("ALTER TABLE cloudflare_accounts ADD COLUMN zone_id TEXT")
+    if "is_active" not in cloudflare_columns:
+        db.execute(
+            "ALTER TABLE cloudflare_accounts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+        )
+    if "sort_order" not in cloudflare_columns:
+        db.execute(
+            "ALTER TABLE cloudflare_accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+        )
+    if "created_at" not in cloudflare_columns:
+        db.execute(
+            "ALTER TABLE cloudflare_accounts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "updated_at" not in cloudflare_columns:
+        db.execute(
+            "ALTER TABLE cloudflare_accounts ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+        )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS managed_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_name TEXT NOT NULL,
+            cloudflare_account_id INTEGER,
+            assigned_server_id INTEGER,
+            dns_record_id TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            last_sync_at TEXT,
+            last_sync_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (cloudflare_account_id) REFERENCES cloudflare_accounts(id) ON DELETE SET NULL,
+            FOREIGN KEY (assigned_server_id) REFERENCES vpn_servers(id) ON DELETE SET NULL
+        )
+        """
+    )
+    managed_domain_columns = {
+        row["name"]: row
+        for row in db.execute("PRAGMA table_info(managed_domains)").fetchall()
+    }
+    if "domain_name" not in managed_domain_columns:
+        db.execute("ALTER TABLE managed_domains ADD COLUMN domain_name TEXT NOT NULL DEFAULT ''")
+    if "cloudflare_account_id" not in managed_domain_columns:
+        db.execute("ALTER TABLE managed_domains ADD COLUMN cloudflare_account_id INTEGER")
+    if "assigned_server_id" not in managed_domain_columns:
+        db.execute("ALTER TABLE managed_domains ADD COLUMN assigned_server_id INTEGER")
+    if "dns_record_id" not in managed_domain_columns:
+        db.execute("ALTER TABLE managed_domains ADD COLUMN dns_record_id TEXT")
+    if "is_active" not in managed_domain_columns:
+        db.execute(
+            "ALTER TABLE managed_domains ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+        )
+    if "sort_order" not in managed_domain_columns:
+        db.execute(
+            "ALTER TABLE managed_domains ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+        )
+    if "last_sync_at" not in managed_domain_columns:
+        db.execute("ALTER TABLE managed_domains ADD COLUMN last_sync_at TEXT")
+    if "last_sync_message" not in managed_domain_columns:
+        db.execute("ALTER TABLE managed_domains ADD COLUMN last_sync_message TEXT")
+    if "created_at" not in managed_domain_columns:
+        db.execute(
+            "ALTER TABLE managed_domains ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "updated_at" not in managed_domain_columns:
+        db.execute(
+            "ALTER TABLE managed_domains ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def ensure_admin_user() -> None:
@@ -3981,6 +4770,12 @@ def admin_onboarding_step_payment():
         receive_address=payment_address,
     )
     upsert_app_setting(db, ONBOARDING_SETTING_PORTAL_DOMAIN, portal_domain)
+    ensure_managed_domain_entry(
+        db,
+        portal_domain,
+        cloudflare_account_id=get_default_cloudflare_account_id(db),
+        sort_order=10,
+    )
     db.commit()
     flash("步骤 2 已保存。", "success")
     return redirect_admin_onboarding_modal(next_admin_onboarding_step(db, fallback=3))
@@ -3997,12 +4792,35 @@ def admin_onboarding_step_cloudflare():
 
     cloudflare_account = request.form.get("cloudflare_account", "").strip()
     cloudflare_password = request.form.get("cloudflare_password", "").strip()
+    cloudflare_zone_name = normalize_fqdn(request.form.get("cloudflare_zone_name", ""))
+    if not cloudflare_zone_name:
+        cloudflare_zone_name = guess_zone_name_from_domain(
+            load_onboarding_settings(db).get("portal_domain", "")
+        )
+
     if not cloudflare_account or not cloudflare_password:
-        flash("请填写 Cloudflare 账号和密码。", "error")
+        flash("请填写 Cloudflare 账号名称和 API Token。", "error")
+        return redirect_admin_onboarding_modal(3)
+    if not cloudflare_zone_name:
+        flash("请填写 Cloudflare Zone 域名（例如 network000.com）。", "error")
         return redirect_admin_onboarding_modal(3)
 
+    account_id = upsert_primary_cloudflare_account_from_onboarding(
+        db,
+        account_name=cloudflare_account,
+        api_token=cloudflare_password,
+        zone_name=cloudflare_zone_name,
+    )
     upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT, cloudflare_account)
     upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_PASSWORD, cloudflare_password)
+    portal_domain = normalize_fqdn(load_onboarding_settings(db).get("portal_domain", ""))
+    if portal_domain:
+        ensure_managed_domain_entry(
+            db,
+            portal_domain,
+            cloudflare_account_id=account_id,
+            sort_order=10,
+        )
     db.commit()
     flash("步骤 3 已保存。", "success")
     return redirect_admin_onboarding_modal(next_admin_onboarding_step(db, fallback=4))
@@ -4097,7 +4915,7 @@ def admin_onboarding_step_server():
         return redirect_admin_onboarding_modal(4)
 
     settings = load_onboarding_settings(db)
-    portal_domain = normalize_domain_host(str(settings["portal_domain"]))
+    portal_domain = normalize_fqdn(str(settings["portal_domain"]))
     if not server_name:
         server_name = server_host
 
@@ -4109,7 +4927,7 @@ def admin_onboarding_step_server():
         port=server_port,
         username=server_username,
         password=server_password,
-        domain=portal_domain,
+        domain="",
         wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
         openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
         dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
@@ -4141,6 +4959,17 @@ def admin_onboarding_step_server():
         status="online" if deploy_ok else "deploy_failed",
         vpn_api_token=final_token,
     )
+    domain_ok = False
+    domain_message = ""
+    if deploy_ok:
+        try:
+            domain_ok, domain_message = assign_managed_domain_to_server(
+                db,
+                server_id,
+                preferred_domain=portal_domain,
+            )
+        except Exception as exc:
+            domain_message = str(exc)
     if deploy_ok:
         upsert_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED, "1")
         upsert_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED_AT, utcnow_iso())
@@ -4155,12 +4984,21 @@ def admin_onboarding_step_server():
         )
         db.commit()
         if show_deploy_log_window:
+            final_message = deploy_message
+            if domain_message:
+                final_message = (
+                    f"{deploy_message}\n{domain_message}"
+                    if domain_ok
+                    else f"{deploy_message}\n域名分配失败：{domain_message}"
+                )
             return render_onboarding_deploy_log_page(
                 success=True,
-                message=deploy_message,
-                log_text=deploy_log,
+                message=final_message,
+                log_text=f"{deploy_log}\n\n{final_message}",
             )
         flash("初始化完成，VPN 服务端部署成功。", "success")
+        if domain_message:
+            flash(domain_message, "success" if domain_ok else "error")
         return redirect(url_for("admin_home"))
 
     db.commit()
@@ -4380,7 +5218,7 @@ def admin_onboarding():
             port=server_port,
             username=server_username,
             password=server_password,
-            domain=portal_domain,
+            domain="",
             wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
             openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
             dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
@@ -4447,11 +5285,11 @@ def admin_onboarding():
 def admin_servers():
     db = get_db()
     servers = load_admin_servers(db)
-    onboarding_settings = load_onboarding_settings(db)
+    available_domains = load_available_managed_domains(db)
     return render_template(
         "admin_servers.html",
         servers=servers,
-        onboarding_settings=onboarding_settings,
+        available_domains=available_domains,
         admin_page="servers",
     )
 
@@ -4481,7 +5319,7 @@ def admin_create_server():
     port = normalize_server_port(request.form.get("port", "22"), 22)
     username = (request.form.get("username", "") or "").strip()
     password = request.form.get("password", "") or ""
-    domain = normalize_domain_host(request.form.get("domain", "")) or get_portal_domain_setting()
+    preferred_domain = normalize_fqdn(request.form.get("domain", ""))
     wg_port = normalize_server_port(
         request.form.get("wg_port", str(SERVER_DEPLOY_DEFAULT_WG_PORT)),
         SERVER_DEPLOY_DEFAULT_WG_PORT,
@@ -4514,7 +5352,7 @@ def admin_create_server():
         port=port,
         username=username,
         password=password,
-        domain=domain,
+        domain="",
         wg_port=wg_port,
         openvpn_port=openvpn_port,
         dns_port=dns_port,
@@ -4541,10 +5379,23 @@ def admin_create_server():
         status="online" if deploy_ok else "deploy_failed",
         vpn_api_token=final_token,
     )
+    domain_ok = False
+    domain_message = ""
+    if deploy_ok:
+        try:
+            domain_ok, domain_message = assign_managed_domain_to_server(
+                db,
+                server_id,
+                preferred_domain=preferred_domain,
+            )
+        except Exception as exc:
+            domain_message = str(exc)
     db.commit()
 
     if deploy_ok:
         flash("服务器已保存并完成 VPN 服务部署。", "success")
+        if domain_message:
+            flash(domain_message, "success" if domain_ok else "error")
     else:
         flash(f"服务器已保存，但部署失败：{deploy_message}", "error")
     return redirect(url_for("admin_servers"))
@@ -4601,8 +5452,22 @@ def admin_deploy_saved_server(server_id: int):
         status="online" if deploy_ok else "deploy_failed",
         vpn_api_token=final_token,
     )
+    domain_ok = False
+    domain_message = ""
+    if deploy_ok:
+        preferred_domain = normalize_fqdn(row_get(row, "domain", ""))
+        try:
+            domain_ok, domain_message = assign_managed_domain_to_server(
+                db,
+                server_id,
+                preferred_domain=preferred_domain,
+            )
+        except Exception as exc:
+            domain_message = str(exc)
     db.commit()
     flash(deploy_message, "success" if deploy_ok else "error")
+    if deploy_ok and domain_message:
+        flash(domain_message, "success" if domain_ok else "error")
     return redirect(url_for("admin_servers"))
 
 
@@ -4670,6 +5535,18 @@ def admin_home():
     first_plan = load_first_plan_for_onboarding(db)
     payment_settings = load_payment_settings(db)
     onboarding_server_draft = load_onboarding_server_draft(db)
+    cloudflare_accounts = load_cloudflare_accounts(db, active_only=False)
+    first_cloudflare_account = cloudflare_accounts[0] if cloudflare_accounts else None
+    onboarding_cloudflare_default = {
+        "account_name": (
+            (first_cloudflare_account["account_name"] if first_cloudflare_account else "")
+            or str(onboarding_settings.get("cloudflare_account") or "").strip()
+        ),
+        "zone_name": (
+            (first_cloudflare_account["zone_name"] if first_cloudflare_account else "")
+            or guess_zone_name_from_domain(str(onboarding_settings.get("portal_domain") or ""))
+        ),
+    }
 
     pending_count = db.execute(
         "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'pending'"
@@ -4700,6 +5577,7 @@ def admin_home():
         first_plan=first_plan,
         payment_settings=payment_settings,
         onboarding_server_draft=onboarding_server_draft,
+        onboarding_cloudflare_default=onboarding_cloudflare_default,
         admin_self_ready=admin_self_ready,
         admin_assigned_ip_display=admin_assigned_ip_display,
         admin_traffic_stats=admin_traffic_stats,
@@ -4732,6 +5610,463 @@ def admin_payment_methods():
         payment_methods=payment_methods,
         admin_page="payment_methods",
     )
+
+
+@app.route("/admin/cloudflare-accounts")
+@login_required
+@admin_required
+def admin_cloudflare_accounts():
+    db = get_db()
+    accounts = load_cloudflare_accounts(db, active_only=False)
+    return render_template(
+        "admin_cloudflare_accounts.html",
+        cloudflare_accounts=accounts,
+        admin_page="cloudflare_accounts",
+    )
+
+
+@app.route("/admin/cloudflare-accounts/create", methods=["POST"])
+@login_required
+@admin_required
+def admin_create_cloudflare_account():
+    db = get_db()
+    account_name = request.form.get("account_name", "").strip()
+    api_token = request.form.get("api_token", "").strip()
+    zone_name = normalize_fqdn(request.form.get("zone_name", ""))
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if not account_name:
+        flash("账号名称不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    if not api_token:
+        flash("API Token 不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    if not zone_name:
+        flash("Zone 域名不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        INSERT INTO cloudflare_accounts (
+            account_name,
+            api_token,
+            zone_name,
+            zone_id,
+            is_active,
+            sort_order,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, '', 1, ?, ?, ?)
+        """,
+        (account_name, api_token, zone_name, sort_order, now_iso, now_iso),
+    )
+    db.commit()
+    flash("Cloudflare 账号已添加。", "success")
+    return redirect(url_for("admin_cloudflare_accounts"))
+
+
+@app.route("/admin/cloudflare-accounts/<int:account_id>/update", methods=["POST"])
+@login_required
+@admin_required
+def admin_update_cloudflare_account(account_id: int):
+    db = get_db()
+    existing = db.execute(
+        """
+        SELECT id, api_token
+        FROM cloudflare_accounts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
+    if not existing:
+        flash("Cloudflare 账号不存在。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+
+    account_name = request.form.get("account_name", "").strip()
+    api_token = request.form.get("api_token", "").strip()
+    zone_name = normalize_fqdn(request.form.get("zone_name", ""))
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if not account_name:
+        flash("账号名称不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    if not zone_name:
+        flash("Zone 域名不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    if not api_token:
+        api_token = (existing["api_token"] or "").strip()
+    if not api_token:
+        flash("API Token 不能为空。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    db.execute(
+        """
+        UPDATE cloudflare_accounts
+        SET account_name = ?,
+            api_token = ?,
+            zone_name = ?,
+            sort_order = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            account_name,
+            api_token,
+            zone_name,
+            sort_order,
+            utcnow_iso(),
+            account_id,
+        ),
+    )
+    db.commit()
+    flash("Cloudflare 账号已更新。", "success")
+    return redirect(url_for("admin_cloudflare_accounts"))
+
+
+@app.route("/admin/cloudflare-accounts/<int:account_id>/toggle", methods=["POST"])
+@login_required
+@admin_required
+def admin_toggle_cloudflare_account(account_id: int):
+    db = get_db()
+    account = db.execute(
+        """
+        SELECT id, account_name, is_active
+        FROM cloudflare_accounts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
+    if not account:
+        flash("Cloudflare 账号不存在。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+
+    next_active = 0 if int(account["is_active"] or 0) == 1 else 1
+    db.execute(
+        """
+        UPDATE cloudflare_accounts
+        SET is_active = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (next_active, utcnow_iso(), account_id),
+    )
+    db.commit()
+    flash(
+        f"Cloudflare 账号 {account['account_name']} 已{'启用' if next_active == 1 else '停用'}。",
+        "success",
+    )
+    return redirect(url_for("admin_cloudflare_accounts"))
+
+
+@app.route("/admin/cloudflare-accounts/<int:account_id>/delete", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_cloudflare_account(account_id: int):
+    db = get_db()
+    account = db.execute(
+        """
+        SELECT id, account_name
+        FROM cloudflare_accounts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
+    if not account:
+        flash("Cloudflare 账号不存在。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+
+    bound_domain_count = db.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM managed_domains
+        WHERE cloudflare_account_id = ?
+        """,
+        (account_id,),
+    ).fetchone()["cnt"]
+    if int(bound_domain_count or 0) > 0:
+        flash("该账号下仍有关联域名，请先在域名管理中迁移或删除域名。", "error")
+        return redirect(url_for("admin_cloudflare_accounts"))
+
+    db.execute("DELETE FROM cloudflare_accounts WHERE id = ?", (account_id,))
+    db.commit()
+    flash(f"Cloudflare 账号 {account['account_name']} 已删除。", "success")
+    return redirect(url_for("admin_cloudflare_accounts"))
+
+
+@app.route("/admin/domains")
+@login_required
+@admin_required
+def admin_domains():
+    db = get_db()
+    domains = load_managed_domains(db, active_only=False)
+    accounts = load_cloudflare_accounts(db, active_only=False)
+    return render_template(
+        "admin_domains.html",
+        managed_domains=domains,
+        cloudflare_accounts=accounts,
+        admin_page="domains",
+    )
+
+
+@app.route("/admin/domains/create", methods=["POST"])
+@login_required
+@admin_required
+def admin_create_domain():
+    db = get_db()
+    domain_name = normalize_fqdn(request.form.get("domain_name", ""))
+    account_id_raw = request.form.get("cloudflare_account_id", "").strip()
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if not domain_name:
+        flash("域名不能为空。", "error")
+        return redirect(url_for("admin_domains"))
+    try:
+        account_id = int(account_id_raw)
+    except Exception:
+        account_id = 0
+    if account_id <= 0:
+        flash("请选择 Cloudflare 账号。", "error")
+        return redirect(url_for("admin_domains"))
+    account = db.execute(
+        """
+        SELECT id, is_active
+        FROM cloudflare_accounts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
+    if not account:
+        flash("Cloudflare 账号不存在。", "error")
+        return redirect(url_for("admin_domains"))
+    if int(account["is_active"] or 0) != 1:
+        flash("所选 Cloudflare 账号已停用，请先启用后再绑定域名。", "error")
+        return redirect(url_for("admin_domains"))
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    existing = db.execute(
+        """
+        SELECT id
+        FROM managed_domains
+        WHERE lower(domain_name) = lower(?)
+        LIMIT 1
+        """,
+        (domain_name,),
+    ).fetchone()
+    if existing:
+        flash("该域名已存在。", "error")
+        return redirect(url_for("admin_domains"))
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        INSERT INTO managed_domains (
+            domain_name,
+            cloudflare_account_id,
+            assigned_server_id,
+            dns_record_id,
+            is_active,
+            sort_order,
+            last_sync_at,
+            last_sync_message,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, NULL, '', 1, ?, NULL, '', ?, ?)
+        """,
+        (domain_name, account_id, sort_order, now_iso, now_iso),
+    )
+    db.commit()
+    flash("域名已添加。", "success")
+    return redirect(url_for("admin_domains"))
+
+
+@app.route("/admin/domains/<int:domain_id>/update", methods=["POST"])
+@login_required
+@admin_required
+def admin_update_domain(domain_id: int):
+    db = get_db()
+    domain_row = db.execute(
+        """
+        SELECT id, assigned_server_id
+        FROM managed_domains
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (domain_id,),
+    ).fetchone()
+    if not domain_row:
+        flash("域名不存在。", "error")
+        return redirect(url_for("admin_domains"))
+
+    domain_name = normalize_fqdn(request.form.get("domain_name", ""))
+    account_id_raw = request.form.get("cloudflare_account_id", "").strip()
+    sort_order_raw = request.form.get("sort_order", "").strip()
+    if not domain_name:
+        flash("域名不能为空。", "error")
+        return redirect(url_for("admin_domains"))
+    try:
+        account_id = int(account_id_raw)
+    except Exception:
+        account_id = 0
+    if account_id <= 0:
+        flash("请选择 Cloudflare 账号。", "error")
+        return redirect(url_for("admin_domains"))
+    account = db.execute(
+        """
+        SELECT id, is_active
+        FROM cloudflare_accounts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (account_id,),
+    ).fetchone()
+    if not account:
+        flash("Cloudflare 账号不存在。", "error")
+        return redirect(url_for("admin_domains"))
+    if int(account["is_active"] or 0) != 1:
+        flash("所选 Cloudflare 账号已停用，请先启用后再绑定域名。", "error")
+        return redirect(url_for("admin_domains"))
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    conflict = db.execute(
+        """
+        SELECT id
+        FROM managed_domains
+        WHERE lower(domain_name) = lower(?)
+          AND id <> ?
+        LIMIT 1
+        """,
+        (domain_name, domain_id),
+    ).fetchone()
+    if conflict:
+        flash("域名已存在，请使用其他域名。", "error")
+        return redirect(url_for("admin_domains"))
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        UPDATE managed_domains
+        SET domain_name = ?,
+            cloudflare_account_id = ?,
+            dns_record_id = '',
+            sort_order = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (domain_name, account_id, sort_order, now_iso, domain_id),
+    )
+    if domain_row["assigned_server_id"]:
+        db.execute(
+            """
+            UPDATE vpn_servers
+            SET domain = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (domain_name, now_iso, int(domain_row["assigned_server_id"])),
+        )
+    db.commit()
+    flash("域名已更新。", "success")
+    return redirect(url_for("admin_domains"))
+
+
+@app.route("/admin/domains/<int:domain_id>/toggle", methods=["POST"])
+@login_required
+@admin_required
+def admin_toggle_domain(domain_id: int):
+    db = get_db()
+    domain_row = db.execute(
+        """
+        SELECT id, domain_name, is_active
+        FROM managed_domains
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (domain_id,),
+    ).fetchone()
+    if not domain_row:
+        flash("域名不存在。", "error")
+        return redirect(url_for("admin_domains"))
+
+    next_active = 0 if int(domain_row["is_active"] or 0) == 1 else 1
+    db.execute(
+        """
+        UPDATE managed_domains
+        SET is_active = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (next_active, utcnow_iso(), domain_id),
+    )
+    db.commit()
+    flash(
+        f"域名 {domain_row['domain_name']} 已{'启用' if next_active == 1 else '停用'}。",
+        "success",
+    )
+    return redirect(url_for("admin_domains"))
+
+
+@app.route("/admin/domains/<int:domain_id>/delete", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_domain(domain_id: int):
+    db = get_db()
+    domain_row = db.execute(
+        """
+        SELECT id, domain_name, assigned_server_id
+        FROM managed_domains
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (domain_id,),
+    ).fetchone()
+    if not domain_row:
+        flash("域名不存在。", "error")
+        return redirect(url_for("admin_domains"))
+
+    now_iso = utcnow_iso()
+    if domain_row["assigned_server_id"]:
+        db.execute(
+            """
+            UPDATE vpn_servers
+            SET domain = '',
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso, int(domain_row["assigned_server_id"])),
+        )
+    db.execute("DELETE FROM managed_domains WHERE id = ?", (domain_id,))
+    db.commit()
+    flash(f"域名 {domain_row['domain_name']} 已删除。", "success")
+    return redirect(url_for("admin_domains"))
 
 
 @app.route("/admin/orders/pending")
@@ -4898,6 +6233,100 @@ def admin_toggle_payment_method(method_id: int):
         flash(f"付款方式 {method['method_name']} 已启用。", "success")
     else:
         flash(f"付款方式 {method['method_name']} 已停用。", "success")
+    return redirect(url_for("admin_payment_methods"))
+
+
+@app.route("/admin/payment-methods/<int:method_id>/update", methods=["POST"])
+@login_required
+@admin_required
+def admin_update_payment_method(method_id: int):
+    db = get_db()
+    method = db.execute(
+        """
+        SELECT id
+        FROM payment_methods
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (method_id,),
+    ).fetchone()
+    if not method:
+        flash("付款方式不存在。", "error")
+        return redirect(url_for("admin_payment_methods"))
+
+    method_code = normalize_payment_method(request.form.get("method_code", PAYMENT_METHOD_USDT))
+    method_name = request.form.get("method_name", "").strip()
+    network = request.form.get("network", "TRC20").strip().upper()
+    receive_address = request.form.get("receive_address", "").strip()
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if method_code != PAYMENT_METHOD_USDT:
+        flash("当前仅支持 USDT 付款方式。", "error")
+        return redirect(url_for("admin_payment_methods"))
+    if network not in USDT_NETWORK_OPTIONS:
+        flash("付款网络无效。", "error")
+        return redirect(url_for("admin_payment_methods"))
+    if not receive_address:
+        flash("收款地址不能为空。", "error")
+        return redirect(url_for("admin_payment_methods"))
+    if not method_name:
+        method_name = f"{payment_method_label(method_code)} {network}"
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+
+    db.execute(
+        """
+        UPDATE payment_methods
+        SET method_code = ?,
+            method_name = ?,
+            network = ?,
+            receive_address = ?,
+            sort_order = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            method_code,
+            method_name,
+            network,
+            receive_address,
+            sort_order,
+            utcnow_iso(),
+            method_id,
+        ),
+    )
+    sync_legacy_payment_settings_with_default_method(db)
+    db.commit()
+    flash("付款方式已更新。", "success")
+    return redirect(url_for("admin_payment_methods"))
+
+
+@app.route("/admin/payment-methods/<int:method_id>/delete", methods=["POST"])
+@login_required
+@admin_required
+def admin_delete_payment_method(method_id: int):
+    db = get_db()
+    method = db.execute(
+        """
+        SELECT id, method_name
+        FROM payment_methods
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (method_id,),
+    ).fetchone()
+    if not method:
+        flash("付款方式不存在。", "error")
+        return redirect(url_for("admin_payment_methods"))
+
+    db.execute("DELETE FROM payment_methods WHERE id = ?", (method_id,))
+    sync_legacy_payment_settings_with_default_method(db)
+    db.commit()
+    flash(f"付款方式 {method['method_name']} 已删除。", "success")
     return redirect(url_for("admin_payment_methods"))
 
 

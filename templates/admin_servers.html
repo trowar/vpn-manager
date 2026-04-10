@@ -99,9 +99,15 @@
       <label>登录密码
         <input type="password" name="password" id="server-pass-input" required>
       </label>
-      <label>绑定域名（可选）
-        <input type="text" name="domain" id="server-domain-input" value="{{ onboarding_settings['portal_domain'] }}">
+      <label>优先域名（可选）
+        <select name="domain" id="server-domain-input">
+          <option value="">自动分配可用域名</option>
+          {% for d in available_domains %}
+            <option value="{{ d['domain_name'] }}">{{ d['domain_name'] }}</option>
+          {% endfor %}
+        </select>
       </label>
+      <p class="helper">留空时会在“域名管理”中自动选择一个可用域名并同步到 Cloudflare。</p>
       <label>WireGuard 端口
         <input type="number" name="wg_port" min="1" max="65535" value="51820" required>
       </label>

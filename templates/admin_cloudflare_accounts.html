@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>Cloudflare 账号</h2>
+  <p class="helper">管理用于自动分配域名的 Cloudflare 账号。建议使用 API Token（Zone DNS 编辑权限）。</p>
+
+  <div class="section-title-row">
+    <h3>账号列表</h3>
+    <button type="button" id="open-cf-create-modal">新增账号</button>
+  </div>
+
+  {% if cloudflare_accounts %}
+    <table class="subscriptions-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>账号名称</th>
+          <th>Zone 域名</th>
+          <th>Zone ID</th>
+          <th>Token</th>
+          <th>状态</th>
+          <th>排序</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in cloudflare_accounts %}
+          <tr>
+            <td>{{ a["id"] }}</td>
+            <td>{{ a["account_name"] }}</td>
+            <td>{{ a["zone_name"] }}</td>
+            <td><code>{{ a["zone_id"] or "-" }}</code></td>
+            <td><code>{{ a["api_token_masked"] }}</code></td>
+            <td>
+              {% if a["is_active"] == 1 %}
+                <span class="tag tag-ok">启用中</span>
+              {% else %}
+                <span class="tag tag-warn">已停用</span>
+              {% endif %}
+            </td>
+            <td>{{ a["sort_order"] }}</td>
+            <td>
+              <div class="subscription-actions">
+                <form method="post" action="{{ url_for('admin_toggle_cloudflare_account', account_id=a['id']) }}" class="inline-form">
+                  {% if a["is_active"] == 1 %}
+                    <button type="submit">停用</button>
+                  {% else %}
+                    <button type="submit">启用</button>
+                  {% endif %}
+                </form>
+                <button
+                  type="button"
+                  class="btn secondary open-cf-edit-modal"
+                  data-update-url="{{ url_for('admin_update_cloudflare_account', account_id=a['id']) }}"
+                  data-account-name="{{ a['account_name'] }}"
+                  data-zone-name="{{ a['zone_name'] }}"
+                  data-sort-order="{{ a['sort_order'] }}"
+                >编辑</button>
+                <button
+                  type="button"
+                  class="danger open-cf-delete-modal"
+                  data-delete-url="{{ url_for('admin_delete_cloudflare_account', account_id=a['id']) }}"
+                  data-account-name="{{ a['account_name'] }}"
+                >删除</button>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="helper">暂无 Cloudflare 账号，请先添加。</p>
+  {% endif %}
+</section>
+
+<div class="payment-modal" id="cf-create-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>新增 Cloudflare 账号</h4>
+      <button type="button" class="btn secondary" id="close-cf-create-modal">关闭</button>
+    </div>
+    <form method="post" action="{{ url_for('admin_create_cloudflare_account') }}" class="form">
+      <label>账号名称
+        <input type="text" name="account_name" placeholder="例如：主账号" required>
+      </label>
+      <label>API Token
+        <input type="password" name="api_token" placeholder="请输入 Cloudflare API Token" required>
+      </label>
+      <label>Zone 域名（根域）
+        <input type="text" name="zone_name" placeholder="例如：network000.com" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" min="0" step="1" value="100">
+      </label>
+      <button type="submit">添加账号</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="cf-edit-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>编辑 Cloudflare 账号</h4>
+      <button type="button" class="btn secondary" id="close-cf-edit-modal">关闭</button>
+    </div>
+    <form method="post" id="cf-edit-form" class="form">
+      <label>账号名称
+        <input type="text" name="account_name" id="cf-edit-account-name" required>
+      </label>
+      <label>API Token（留空则保持不变）
+        <input type="password" name="api_token" id="cf-edit-api-token" placeholder="如需更换再填写">
+      </label>
+      <label>Zone 域名（根域）
+        <input type="text" name="zone_name" id="cf-edit-zone-name" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" id="cf-edit-sort-order" min="0" step="1" value="100">
+      </label>
+      <button type="submit">保存修改</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="cf-delete-modal" hidden>
+  <div class="payment-modal-card" style="max-width:460px;">
+    <div class="section-title-row">
+      <h4>确认删除</h4>
+      <button type="button" class="btn secondary" id="close-cf-delete-modal">关闭</button>
+    </div>
+    <p id="cf-delete-message">确定删除该 Cloudflare 账号吗？</p>
+    <form method="post" id="cf-delete-form" class="actions">
+      <button type="submit" class="danger">确认删除</button>
+      <button type="button" class="btn secondary" id="cancel-cf-delete-modal">取消</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var createOpenBtn = document.getElementById("open-cf-create-modal");
+    var createCloseBtn = document.getElementById("close-cf-create-modal");
+    var createModal = document.getElementById("cf-create-modal");
+
+    var editButtons = document.querySelectorAll(".open-cf-edit-modal");
+    var editModal = document.getElementById("cf-edit-modal");
+    var editCloseBtn = document.getElementById("close-cf-edit-modal");
+    var editForm = document.getElementById("cf-edit-form");
+    var editAccountName = document.getElementById("cf-edit-account-name");
+    var editApiToken = document.getElementById("cf-edit-api-token");
+    var editZoneName = document.getElementById("cf-edit-zone-name");
+    var editSortOrder = document.getElementById("cf-edit-sort-order");
+
+    var deleteButtons = document.querySelectorAll(".open-cf-delete-modal");
+    var deleteModal = document.getElementById("cf-delete-modal");
+    var deleteCloseBtn = document.getElementById("close-cf-delete-modal");
+    var deleteCancelBtn = document.getElementById("cancel-cf-delete-modal");
+    var deleteForm = document.getElementById("cf-delete-form");
+    var deleteMessage = document.getElementById("cf-delete-message");
+
+    function openModal(modal) {
+      if (!modal) return;
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal(modal) {
+      if (!modal) return;
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    function bindOverlayClose(modal) {
+      if (!modal) return;
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) {
+          closeModal(modal);
+        }
+      });
+    }
+
+    if (createOpenBtn) createOpenBtn.addEventListener("click", function () { openModal(createModal); });
+    if (createCloseBtn) createCloseBtn.addEventListener("click", function () { closeModal(createModal); });
+    bindOverlayClose(createModal);
+
+    if (editCloseBtn) editCloseBtn.addEventListener("click", function () { closeModal(editModal); });
+    bindOverlayClose(editModal);
+    editButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!editForm) return;
+        editForm.action = btn.dataset.updateUrl || "";
+        if (editAccountName) editAccountName.value = btn.dataset.accountName || "";
+        if (editZoneName) editZoneName.value = btn.dataset.zoneName || "";
+        if (editSortOrder) editSortOrder.value = btn.dataset.sortOrder || "100";
+        if (editApiToken) editApiToken.value = "";
+        openModal(editModal);
+      });
+    });
+
+    if (deleteCloseBtn) deleteCloseBtn.addEventListener("click", function () { closeModal(deleteModal); });
+    if (deleteCancelBtn) deleteCancelBtn.addEventListener("click", function () { closeModal(deleteModal); });
+    bindOverlayClose(deleteModal);
+    deleteButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (deleteForm) deleteForm.action = btn.dataset.deleteUrl || "";
+        if (deleteMessage) {
+          deleteMessage.textContent = "确定删除 Cloudflare 账号“" + (btn.dataset.accountName || "该账号") + "”吗？";
+        }
+        openModal(deleteModal);
+      });
+    });
+  })();
+</script>
+{% endblock %}
