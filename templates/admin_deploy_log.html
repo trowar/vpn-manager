@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>部署日志</title>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --card: #ffffff;
+      --border: #d8e0ef;
+      --ok: #14866d;
+      --err: #b13b3b;
+      --text: #0f1a2e;
+      --muted: #5d6982;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1040px;
+      margin: 18px auto;
+      padding: 0 14px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      color: #fff;
+      background: var(--ok);
+    }
+    .tag.error { background: var(--err); }
+    .msg {
+      margin: 12px 0;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 10px 0 12px;
+    }
+    button, a.btn {
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      cursor: pointer;
+      text-decoration: none;
+      color: #fff;
+      background: #153d77;
+    }
+    button.secondary, a.btn.secondary {
+      background: #4c5f85;
+    }
+    .log-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0b1220;
+      color: #d6e0f5;
+      height: 62vh;
+      min-height: 320px;
+      overflow: auto;
+      padding: 12px;
+      white-space: pre;
+      line-height: 1.45;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+    }
+    .hint {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <div class="top">
+        <h1>服务器部署日志</h1>
+        <span class="tag{% if not deploy_success %} error{% endif %}">
+          {% if deploy_success %}部署成功{% else %}部署失败{% endif %}
+        </span>
+      </div>
+
+      <div class="msg">{{ deploy_message }}</div>
+
+      <div class="toolbar">
+        <button type="button" id="copy-deploy-log">复制日志</button>
+        <button type="button" class="secondary" onclick="window.close()">关闭窗口</button>
+        <a class="btn secondary" href="{{ url_for('admin_home') }}" target="_blank" rel="noopener">打开管理首页</a>
+      </div>
+
+      <pre class="log-box" id="deploy-log-box">{{ deploy_log }}</pre>
+      <div class="hint">日志支持滚动查看与复制，部署异常时可直接复制给我继续排查。</div>
+    </section>
+  </div>
+
+  <script>
+    (function () {
+      var logBox = document.getElementById("deploy-log-box");
+      var copyBtn = document.getElementById("copy-deploy-log");
+      if (logBox) {
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+      if (copyBtn && logBox) {
+        copyBtn.addEventListener("click", async function () {
+          var text = logBox.textContent || "";
+          if (!text) return;
+          try {
+            await navigator.clipboard.writeText(text);
+            copyBtn.textContent = "已复制";
+            setTimeout(function () {
+              copyBtn.textContent = "复制日志";
+            }, 1200);
+          } catch (e) {
+            var range = document.createRange();
+            range.selectNodeContents(logBox);
+            var sel = window.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+            copyBtn.textContent = "请手动 Ctrl+C 复制";
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

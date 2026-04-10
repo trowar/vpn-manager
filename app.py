@@ -1506,7 +1506,7 @@ def deploy_vpn_node_server(
     openvpn_port: int,
     dns_port: int,
     vpn_api_token: str | None = None,
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, str, str]:
     safe_token = (vpn_api_token or "").strip()
     if not safe_token:
         safe_token = hashlib.sha256(os.urandom(32)).hexdigest()[:48]
@@ -1535,12 +1535,15 @@ def deploy_vpn_node_server(
         out = stdout.read().decode("utf-8", errors="ignore")
         err = stderr.read().decode("utf-8", errors="ignore")
         code = stdout.channel.recv_exit_status()
-        merged = summarize_text((out + "\n" + err).strip(), 1200)
+        merged_raw = (out + "\n" + err).strip()
+        merged_log = summarize_text(merged_raw, 120000)
+        merged = summarize_text(merged_raw, 1200)
         if code == 0:
-            return True, f"部署成功。{merged}", safe_token
-        return False, f"部署失败（exit={code}）。{merged}", safe_token
+            return True, f"部署成功。{merged}", safe_token, merged_log
+        return False, f"部署失败（exit={code}）。{merged}", safe_token, merged_log
     except Exception as exc:
-        return False, f"部署异常：{exc}", safe_token
+        error_text = f"部署异常：{exc}"
+        return False, error_text, safe_token, error_text
     finally:
         if client:
             client.close()
@@ -3838,6 +3841,18 @@ def redirect_admin_onboarding_modal(step: int | None = None):
     return redirect(url_for("admin_home", onboarding_open="1"))
 
 
+def render_onboarding_deploy_log_page(
+    *, success: bool, message: str, log_text: str
+):
+    return render_template(
+        "admin_deploy_log.html",
+        deploy_success=success,
+        deploy_message=message,
+        deploy_log=(log_text or message),
+        admin_page="home",
+    )
+
+
 @app.route("/admin/onboarding/step-plan", methods=["POST"])
 @login_required
 @admin_required
@@ -3961,6 +3976,10 @@ def admin_onboarding_step_server():
         return redirect(url_for("admin_home"))
 
     action = (request.form.get("action", "save_draft") or "").strip().lower()
+    show_deploy_log_window = (
+        action == "save_and_deploy"
+        and (request.form.get("open_deploy_log_window", "") or "").strip() == "1"
+    )
     server_name = request.form.get("server_name", "").strip()
     server_host = normalize_remote_host(request.form.get("server_host", ""))
     server_port = normalize_server_port(request.form.get("server_port", "22"), 22)
@@ -3983,7 +4002,14 @@ def admin_onboarding_step_server():
 
     if not server_host or not server_username or not server_password:
         db.commit()
-        flash("请填写服务器 IP/域名、账号、密码。", "error")
+        message = "请填写服务器 IP/域名、账号、密码。"
+        if show_deploy_log_window:
+            return render_onboarding_deploy_log_page(
+                success=False,
+                message=message,
+                log_text=message,
+            )
+        flash(message, "error")
         return redirect_admin_onboarding_modal(4)
 
     if action == "test_server":
@@ -4000,7 +4026,14 @@ def admin_onboarding_step_server():
     step_status, next_step = get_admin_onboarding_step_status(db)
     if not step_status[1] or not step_status[2] or not step_status[3]:
         db.commit()
-        flash("请先完成前 3 个步骤后再部署服务器。", "error")
+        message = "请先完成前 3 个步骤后再部署服务器。"
+        if show_deploy_log_window:
+            return render_onboarding_deploy_log_page(
+                success=False,
+                message=message,
+                log_text=message,
+            )
+        flash(message, "error")
         return redirect_admin_onboarding_modal(next_step)
 
     ok, test_message = test_server_connectivity(
@@ -4011,7 +4044,14 @@ def admin_onboarding_step_server():
     )
     if not ok:
         db.commit()
-        flash(f"服务器连通测试失败：{test_message}", "error")
+        message = f"服务器连通测试失败：{test_message}"
+        if show_deploy_log_window:
+            return render_onboarding_deploy_log_page(
+                success=False,
+                message=message,
+                log_text=message,
+            )
+        flash(message, "error")
         return redirect_admin_onboarding_modal(4)
 
     settings = load_onboarding_settings(db)
@@ -4041,7 +4081,7 @@ def admin_onboarding_step_server():
         message=test_message,
     )
 
-    deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+    deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
         host=server_host,
         port=server_port,
         username=server_username,
@@ -4072,10 +4112,22 @@ def admin_onboarding_step_server():
             server_password="",
         )
         db.commit()
+        if show_deploy_log_window:
+            return render_onboarding_deploy_log_page(
+                success=True,
+                message=deploy_message,
+                log_text=deploy_log,
+            )
         flash("初始化完成，VPN 服务端部署成功。", "success")
         return redirect(url_for("admin_home"))
 
     db.commit()
+    if show_deploy_log_window:
+        return render_onboarding_deploy_log_page(
+            success=False,
+            message=deploy_message,
+            log_text=deploy_log,
+        )
     flash(f"服务器部署失败：{deploy_message}", "error")
     return redirect_admin_onboarding_modal(4)
 
@@ -4300,7 +4352,7 @@ def admin_onboarding():
             message=test_message,
         )
 
-        deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+        deploy_ok, deploy_message, final_token, _deploy_log = deploy_vpn_node_server(
             host=server_host,
             port=server_port,
             username=server_username,
@@ -4429,7 +4481,7 @@ def admin_create_server():
     )
     update_server_test_result(db, server_id, ok=True, message=test_message)
 
-    deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+    deploy_ok, deploy_message, final_token, _deploy_log = deploy_vpn_node_server(
         host=host,
         port=port,
         username=username,
@@ -4487,7 +4539,7 @@ def admin_deploy_saved_server(server_id: int):
         flash("服务器不存在。", "error")
         return redirect(url_for("admin_servers"))
 
-    deploy_ok, deploy_message, final_token = deploy_vpn_node_server(
+    deploy_ok, deploy_message, final_token, _deploy_log = deploy_vpn_node_server(
         host=row["host"],
         port=normalize_server_port(row["port"], 22),
         username=row["username"],

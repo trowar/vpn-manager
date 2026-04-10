@@ -128,7 +128,8 @@
 
       <section class="onboarding-step-panel" data-panel-step="4" hidden>
         <h5>步骤 4：添加并部署第一台服务器</h5>
-        <form method="post" action="{{ url_for('admin_onboarding_step_server') }}" class="form">
+        <form method="post" action="{{ url_for('admin_onboarding_step_server') }}" class="form" id="onboarding-server-form">
+          <input type="hidden" name="open_deploy_log_window" id="onboarding-open-deploy-log-window" value="0">
           <label>服务器名称（可选）
             <input type="text" name="server_name" value="{{ onboarding_server_draft['server_name'] }}">
           </label>
@@ -145,9 +146,9 @@
             <input type="password" name="server_password" value="{{ onboarding_server_draft['server_password'] }}" required>
           </label>
           <div class="actions">
-            <button type="submit" name="action" value="test_server" class="btn secondary">测试连接</button>
-            <button type="submit" name="action" value="save_draft" class="btn secondary">保存草稿</button>
-            <button type="submit" name="action" value="save_and_deploy">部署并完成初始化</button>
+            <button type="submit" name="action" value="test_server" class="btn secondary" id="onboarding-test-server-btn">测试连接</button>
+            <button type="submit" name="action" value="save_draft" class="btn secondary" id="onboarding-save-draft-btn">保存草稿</button>
+            <button type="submit" name="action" value="save_and_deploy" id="onboarding-deploy-btn">部署并完成初始化</button>
           </div>
         </form>
       </section>
@@ -252,6 +253,45 @@
       if (modeSelect) {
         modeSelect.addEventListener("change", refreshPlanMode);
         refreshPlanMode();
+      }
+
+      var onboardingServerForm = document.getElementById("onboarding-server-form");
+      var onboardingDeployBtn = document.getElementById("onboarding-deploy-btn");
+      var onboardingTestBtn = document.getElementById("onboarding-test-server-btn");
+      var onboardingSaveDraftBtn = document.getElementById("onboarding-save-draft-btn");
+      var onboardingDeployLogFlag = document.getElementById("onboarding-open-deploy-log-window");
+
+      function resetOnboardingServerSubmit() {
+        if (!onboardingServerForm) return;
+        onboardingServerForm.target = "_self";
+        if (onboardingDeployLogFlag) {
+          onboardingDeployLogFlag.value = "0";
+        }
+      }
+
+      if (onboardingTestBtn) {
+        onboardingTestBtn.addEventListener("click", resetOnboardingServerSubmit);
+      }
+      if (onboardingSaveDraftBtn) {
+        onboardingSaveDraftBtn.addEventListener("click", resetOnboardingServerSubmit);
+      }
+      if (onboardingDeployBtn && onboardingServerForm) {
+        onboardingDeployBtn.addEventListener("click", function () {
+          if (onboardingDeployLogFlag) {
+            onboardingDeployLogFlag.value = "1";
+          }
+          var windowName = "vpnDeployLogWindow";
+          var popup = window.open("", windowName, "width=980,height=760,resizable=yes,scrollbars=yes");
+          if (popup) {
+            onboardingServerForm.target = windowName;
+            closeModal();
+          } else {
+            onboardingServerForm.target = "_self";
+            if (onboardingDeployLogFlag) {
+              onboardingDeployLogFlag.value = "0";
+            }
+          }
+        });
       }
 
       var closed = false;
