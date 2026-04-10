@@ -52,6 +52,10 @@
       <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">下载 OpenVPN 客户端</a>
     {% endif %}
   </div>
+  <div class="payment-qr-wrap">
+    <img src="{{ url_for('admin_download_qr', mode='global') }}" alt="管理员 WireGuard 全局代理二维码" loading="eager">
+  </div>
+  <p class="helper">管理员可直接扫码导入 WireGuard 全局代理配置。</p>
 </section>
 
 {% if not admin_setup_completed %}

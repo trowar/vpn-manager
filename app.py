@@ -5583,6 +5583,47 @@ def admin_download_openvpn_config():
     return Response(config_text, headers=headers, mimetype="text/plain")
 
 
+@app.route("/admin/download/qr")
+@login_required
+@admin_required
+def admin_download_qr():
+    requested_mode = normalize_wg_profile_mode(request.args.get("mode", WG_PROFILE_GLOBAL))
+
+    db = get_db()
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    if not admin:
+        flash("管理员账号不存在。", "error")
+        return redirect(url_for("admin_home"))
+
+    try:
+        admin = ensure_admin_self_vpn_ready(db, admin)
+        config_text, _ = build_user_wireguard_config(
+            admin,
+            profile_mode=requested_mode,
+        )
+    except Exception as exc:
+        flash(f"管理员二维码生成失败：{exc}", "error")
+        return redirect(url_for("admin_home"))
+
+    qr = subprocess.run(
+        ["qrencode", "-o", "-", "-t", "PNG"],
+        input=config_text.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    if qr.returncode != 0:
+        msg = (qr.stderr or b"").decode("utf-8", errors="ignore").strip() or "未知错误"
+        flash(f"管理员二维码生成失败：{msg}", "error")
+        return redirect(url_for("admin_home"))
+
+    filename = f"wg-admin-{safe_name(admin['username'])}-{wireguard_profile_filename_suffix(requested_mode)}.png"
+    headers = {"Content-Disposition": f'inline; filename=\"{filename}\"'}
+    return Response(qr.stdout, headers=headers, mimetype="image/png")
+
+
 
 @app.route("/download/qr")
 @login_required
