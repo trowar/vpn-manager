@@ -1327,12 +1327,12 @@ def build_vpn_node_deploy_script(
         fi
 
         if [ ! -f docker/vpn/wireguard/server_public.key ]; then
-          cat docker/vpn/wireguard/server_private.key | wg pubkey > docker/vpn/wireguard/server_public.key
+          wg pubkey < docker/vpn/wireguard/server_private.key > docker/vpn/wireguard/server_public.key
           chmod 600 docker/vpn/wireguard/server_public.key
         fi
 
         if [ ! -f docker/vpn/wireguard/wg0.conf ]; then
-          UPLINK_IF=$(ip route | awk '/default/ {{print $5; exit}}')
+          UPLINK_IF=$(ip -o route show default 2>/dev/null | awk 'NR==1 {{print $5}}')
           if [ -z "$UPLINK_IF" ]; then
             UPLINK_IF=eth0
           fi
@@ -1405,11 +1405,7 @@ def deploy_vpn_node_server(
             password,
             timeout=12,
         )
-        stdin, stdout, stderr = client.exec_command(
-            "bash -s",
-            get_pty=True,
-            timeout=2400,
-        )
+        stdin, stdout, stderr = client.exec_command("bash -s", timeout=2400)
         stdin.write(script)
         stdin.channel.shutdown_write()
         out = stdout.read().decode("utf-8", errors="ignore")
