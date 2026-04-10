@@ -18,11 +18,12 @@
         <option value="traffic" {% if selected_mode == 'traffic' %}selected{% endif %}>按流量收费</option>
       </select>
     </label>
-    <label id="onboarding-duration-row">时长（月）
-      <input type="number" name="plan_duration_months" min="1" step="1" value="{{ request.form.get('plan_duration_months', first_plan['duration_months']) }}">
+    {% set onboarding_is_traffic = selected_mode == 'traffic' %}
+    <label id="onboarding-duration-row" {% if onboarding_is_traffic %}hidden style="display:none;"{% endif %}>时长（月）
+      <input type="number" name="plan_duration_months" min="1" step="1" value="{{ request.form.get('plan_duration_months', first_plan['duration_months']) }}" {% if onboarding_is_traffic %}disabled{% else %}required{% endif %}>
     </label>
-    <label id="onboarding-traffic-row" hidden>流量（GB）
-      <input type="number" name="plan_traffic_gb" min="1" step="1" value="{{ request.form.get('plan_traffic_gb', first_plan['traffic_gb']) }}">
+    <label id="onboarding-traffic-row" {% if not onboarding_is_traffic %}hidden style="display:none;"{% endif %}>流量（GB）
+      <input type="number" name="plan_traffic_gb" min="1" step="1" value="{{ request.form.get('plan_traffic_gb', first_plan['traffic_gb']) }}" {% if onboarding_is_traffic %}required{% else %}disabled{% endif %}>
     </label>
     <label>价格（USDT）
       <input type="text" name="plan_price_usdt" value="{{ request.form.get('plan_price_usdt', first_plan['price_usdt']) }}" required>
@@ -99,14 +100,30 @@
       var trafficInput = trafficRow.querySelector("input");
       if (modeSelect.value === "traffic") {
         durationRow.hidden = true;
+        durationRow.style.display = "none";
         trafficRow.hidden = false;
-        if (durationInput) durationInput.removeAttribute("required");
-        if (trafficInput) trafficInput.setAttribute("required", "required");
+        trafficRow.style.display = "";
+        if (durationInput) {
+          durationInput.removeAttribute("required");
+          durationInput.disabled = true;
+        }
+        if (trafficInput) {
+          trafficInput.setAttribute("required", "required");
+          trafficInput.disabled = false;
+        }
       } else {
         durationRow.hidden = false;
+        durationRow.style.display = "";
         trafficRow.hidden = true;
-        if (trafficInput) trafficInput.removeAttribute("required");
-        if (durationInput) durationInput.setAttribute("required", "required");
+        trafficRow.style.display = "none";
+        if (trafficInput) {
+          trafficInput.removeAttribute("required");
+          trafficInput.disabled = true;
+        }
+        if (durationInput) {
+          durationInput.setAttribute("required", "required");
+          durationInput.disabled = false;
+        }
       }
     }
 

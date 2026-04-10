@@ -63,6 +63,7 @@
 
       <section class="onboarding-step-panel" data-panel-step="1">
         <h5>步骤 1：设置第一个套餐</h5>
+        {% set wizard_is_traffic = first_plan['billing_mode'] == 'traffic' %}
         <form method="post" action="{{ url_for('admin_onboarding_step_plan') }}" class="form">
           <label>套餐名称
             <input type="text" name="plan_name" value="{{ first_plan['plan_name'] }}" required>
@@ -73,11 +74,11 @@
               <option value="traffic" {% if first_plan['billing_mode'] == 'traffic' %}selected{% endif %}>按流量收费</option>
             </select>
           </label>
-          <label id="wizard-plan-duration-row">时长（月）
-            <input type="number" name="plan_duration_months" min="1" step="1" value="{{ first_plan['duration_months'] }}">
+          <label id="wizard-plan-duration-row" {% if wizard_is_traffic %}hidden style="display:none;"{% endif %}>时长（月）
+            <input type="number" name="plan_duration_months" min="1" step="1" value="{{ first_plan['duration_months'] }}" {% if wizard_is_traffic %}disabled{% else %}required{% endif %}>
           </label>
-          <label id="wizard-plan-traffic-row" hidden>流量（GB）
-            <input type="number" name="plan_traffic_gb" min="1" step="1" value="{{ first_plan['traffic_gb'] }}">
+          <label id="wizard-plan-traffic-row" {% if not wizard_is_traffic %}hidden style="display:none;"{% endif %}>流量（GB）
+            <input type="number" name="plan_traffic_gb" min="1" step="1" value="{{ first_plan['traffic_gb'] }}" {% if wizard_is_traffic %}required{% else %}disabled{% endif %}>
           </label>
           <label>价格（USDT）
             <input type="text" name="plan_price_usdt" value="{{ first_plan['price_usdt'] }}" required>
@@ -222,14 +223,30 @@
         var trafficInput = trafficRow.querySelector("input");
         if (modeSelect.value === "traffic") {
           durationRow.hidden = true;
+          durationRow.style.display = "none";
           trafficRow.hidden = false;
-          if (durationInput) durationInput.removeAttribute("required");
-          if (trafficInput) trafficInput.setAttribute("required", "required");
+          trafficRow.style.display = "";
+          if (durationInput) {
+            durationInput.removeAttribute("required");
+            durationInput.disabled = true;
+          }
+          if (trafficInput) {
+            trafficInput.setAttribute("required", "required");
+            trafficInput.disabled = false;
+          }
         } else {
           durationRow.hidden = false;
+          durationRow.style.display = "";
           trafficRow.hidden = true;
-          if (trafficInput) trafficInput.removeAttribute("required");
-          if (durationInput) durationInput.setAttribute("required", "required");
+          trafficRow.style.display = "none";
+          if (trafficInput) {
+            trafficInput.removeAttribute("required");
+            trafficInput.disabled = true;
+          }
+          if (durationInput) {
+            durationInput.setAttribute("required", "required");
+            durationInput.disabled = false;
+          }
         }
       }
       if (modeSelect) {

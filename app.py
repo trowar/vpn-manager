@@ -3732,6 +3732,10 @@ def admin_onboarding_step_plan():
     plan_price_raw = request.form.get("plan_price_usdt", "").strip()
     plan_duration_raw = request.form.get("plan_duration_months", "").strip()
     plan_traffic_raw = request.form.get("plan_traffic_gb", "").strip()
+    if plan_mode == PLAN_MODE_DURATION:
+        plan_traffic_raw = ""
+    else:
+        plan_duration_raw = ""
 
     if not plan_name:
         flash("请填写套餐名称。", "error")
@@ -3995,6 +3999,10 @@ def admin_onboarding():
         plan_price_raw = request.form.get("plan_price_usdt", "").strip()
         plan_duration_raw = request.form.get("plan_duration_months", "").strip()
         plan_traffic_raw = request.form.get("plan_traffic_gb", "").strip()
+        if plan_mode == PLAN_MODE_DURATION:
+            plan_traffic_raw = ""
+        else:
+            plan_duration_raw = ""
 
         payment_network = request.form.get("payment_network", "TRC20").strip().upper()
         payment_address = request.form.get("payment_address", "").strip()
@@ -4642,6 +4650,10 @@ def admin_create_plan():
     billing_mode = normalize_plan_mode(request.form.get("billing_mode", "duration"))
     duration_months_raw = request.form.get("duration_months", "").strip()
     traffic_gb_raw = request.form.get("traffic_gb", "").strip()
+    if billing_mode == PLAN_MODE_DURATION:
+        traffic_gb_raw = ""
+    else:
+        duration_months_raw = ""
     price_raw = request.form.get("price_usdt", "").strip()
     sort_order_raw = request.form.get("sort_order", "").strip()
 
@@ -4724,6 +4736,10 @@ def admin_update_plan(plan_id: int):
     billing_mode = normalize_plan_mode(request.form.get("billing_mode", "duration"))
     duration_months_raw = request.form.get("duration_months", "").strip()
     traffic_gb_raw = request.form.get("traffic_gb", "").strip()
+    if billing_mode == PLAN_MODE_DURATION:
+        traffic_gb_raw = ""
+    else:
+        duration_months_raw = ""
     price_raw = request.form.get("price_usdt", "").strip()
     sort_order_raw = request.form.get("sort_order", "").strip()
 

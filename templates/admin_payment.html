@@ -95,10 +95,10 @@
         </select>
       </label>
       <label id="plan-duration-row">时长（月）
-        <input type="number" name="duration_months" min="1" step="1" value="1">
+        <input type="number" name="duration_months" min="1" step="1" value="1" required>
       </label>
-      <label id="plan-traffic-row" hidden>流量（GB）
-        <input type="number" name="traffic_gb" min="1" step="1">
+      <label id="plan-traffic-row" hidden style="display:none;">流量（GB）
+        <input type="number" name="traffic_gb" min="1" step="1" disabled>
       </label>
       <label>价格（USDT）
         <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
@@ -129,10 +129,10 @@
         </select>
       </label>
       <label id="plan-edit-duration-row">时长（月）
-        <input type="number" name="duration_months" id="plan-edit-duration-input" min="1" step="1">
+        <input type="number" name="duration_months" id="plan-edit-duration-input" min="1" step="1" required>
       </label>
-      <label id="plan-edit-traffic-row" hidden>流量（GB）
-        <input type="number" name="traffic_gb" id="plan-edit-traffic-input" min="1" step="1">
+      <label id="plan-edit-traffic-row" hidden style="display:none;">流量（GB）
+        <input type="number" name="traffic_gb" id="plan-edit-traffic-input" min="1" step="1" disabled>
       </label>
       <label>价格（USDT）
         <input type="text" name="price_usdt" id="plan-edit-price" required>
@@ -223,21 +223,29 @@
       var trafficInput = trafficRow.querySelector("input");
       if (modeSelect.value === "traffic") {
         trafficRow.hidden = false;
+        trafficRow.style.display = "";
         durationRow.hidden = true;
+        durationRow.style.display = "none";
         if (durationInput) {
           durationInput.removeAttribute("required");
+          durationInput.disabled = true;
         }
         if (trafficInput) {
           trafficInput.setAttribute("required", "required");
+          trafficInput.disabled = false;
         }
       } else {
         trafficRow.hidden = true;
+        trafficRow.style.display = "none";
         durationRow.hidden = false;
+        durationRow.style.display = "";
         if (trafficInput) {
           trafficInput.removeAttribute("required");
+          trafficInput.disabled = true;
         }
         if (durationInput) {
           durationInput.setAttribute("required", "required");
+          durationInput.disabled = false;
         }
       }
     }
