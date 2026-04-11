@@ -1,8 +1,31 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="card">
-  <h1>用户中心</h1>
-  <p>V1 规划中的用户菜单（首页/套餐/订单/配置/个人中心）将在后续迭代补齐。</p>
+  <h1 style="margin-top:0;">用户首页</h1>
+  <p class="muted">M2 起将补齐套餐、订单、配置下载等完整功能。当前页面用于验证账号体系。</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>字段</th>
+          <th>值</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>邮箱账号</td>
+          <td>{{ user["email"] }}</td>
+        </tr>
+        <tr>
+          <td>账号状态</td>
+          <td>{{ "正常" if user["status"] == "active" else "停用" }}</td>
+        </tr>
+        <tr>
+          <td>邮箱验证</td>
+          <td>{{ "已验证" if user["email_verified"] == 1 else "未验证" }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 {% endblock %}
-

@@ -3,23 +3,126 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VPN Platform V1</title>
+  <title>{% block title %}VPN 管理平台 V1{% endblock %}</title>
   <style>
-    body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: #f5f7fb; color: #1b2430; }
-    .shell { min-height: 100vh; display: grid; grid-template-columns: 220px 1fr; }
-    .shell.guest { grid-template-columns: 1fr; }
-    .sidebar { background: #0c1730; color: #fff; padding: 16px; }
-    .sidebar h2 { margin: 0 0 12px; font-size: 20px; }
-    .sidebar a { display: block; color: #d5ddf0; text-decoration: none; padding: 8px 10px; border: 1px solid #223559; border-radius: 8px; margin-bottom: 8px; }
-    .sidebar a:hover { background: #1a2b4b; }
-    .main { padding: 20px; }
-    .card { background: #fff; border: 1px solid #d7deea; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
-    .flash { margin-bottom: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid #d7deea; }
+    :root {
+      --bg: #f3f6fb;
+      --card: #ffffff;
+      --line: #d5deea;
+      --text: #102033;
+      --muted: #506079;
+      --brand: #0e8074;
+      --brand-dark: #0a5a53;
+      --accent: #0f2748;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+      background: radial-gradient(circle at top left, #f9fbff, var(--bg));
+      color: var(--text);
+    }
+    a { color: #124b99; }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: 240px minmax(0, 1fr); }
+    .shell.guest { grid-template-columns: minmax(0, 1fr); }
+    .sidebar {
+      background: linear-gradient(180deg, #061730, #0b2344);
+      color: #fff;
+      padding: 18px 14px;
+    }
+    .sidebar h2 { margin: 0 0 10px; font-size: 24px; line-height: 1.2; }
+    .sidebar p { margin: 0 0 16px; color: #c9d8f5; font-size: 14px; }
+    .sidebar a {
+      display: block;
+      color: #d9e7ff;
+      text-decoration: none;
+      padding: 10px 12px;
+      border: 1px solid #244169;
+      border-radius: 10px;
+      margin-bottom: 8px;
+      transition: background-color .2s ease;
+    }
+    .sidebar a:hover { background: #15345c; }
+    .main {
+      width: 100%;
+      min-width: 0;
+      padding: 24px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 14px;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+    .flash {
+      margin-bottom: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }
     .flash.success { background: #ecfdf5; color: #065f46; }
     .flash.error { background: #fef2f2; color: #991b1b; }
-    input, button { padding: 10px 12px; border-radius: 8px; border: 1px solid #c7d1e2; font: inherit; }
-    button { cursor: pointer; background: #0f766e; color: #fff; border-color: #0f766e; }
-    form { display: grid; gap: 10px; max-width: 420px; }
+    input, button, select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #c7d1e2;
+      font: inherit;
+      background: #fff;
+    }
+    button {
+      width: auto;
+      cursor: pointer;
+      background: var(--brand);
+      color: #fff;
+      border-color: var(--brand);
+      font-weight: 600;
+    }
+    button:hover { background: var(--brand-dark); border-color: var(--brand-dark); }
+    .btn-secondary {
+      background: #243b5b;
+      border-color: #243b5b;
+    }
+    .btn-danger {
+      background: #b91c1c;
+      border-color: #b91c1c;
+    }
+    form {
+      display: grid;
+      gap: 10px;
+      max-width: 520px;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .muted { color: var(--muted); font-size: 14px; }
+    .table-wrap { width: 100%; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 560px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e1e8f3; }
+    th { color: #fff; background: var(--accent); white-space: nowrap; }
+    tr:nth-child(even) td { background: #f7faff; }
+    .captcha-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 130px;
+      gap: 10px;
+      align-items: center;
+    }
+    .captcha-box {
+      border: 1px solid #c5d3e9;
+      border-radius: 8px;
+      width: 130px;
+      height: 44px;
+      display: block;
+      background: #eef3fb;
+      cursor: pointer;
+    }
+    @media (max-width: 900px) {
+      .shell { grid-template-columns: minmax(0, 1fr); }
+      .sidebar { padding: 14px; }
+      .main { padding: 14px; }
+      .captcha-row { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -50,4 +153,3 @@
   </div>
 </body>
 </html>
-

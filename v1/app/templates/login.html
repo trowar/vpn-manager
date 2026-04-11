@@ -1,15 +1,38 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="card">
-  <h1>登录</h1>
-  <p>V1 起步阶段：当前仅管理员与基础登录可用。</p>
+  <h1 style="margin-top:0;">登录</h1>
+  <p class="muted">登录页始终需要图片验证码。</p>
   <form method="post">
     <label>邮箱/账号</label>
-    <input name="email" required>
+    <input name="email" required placeholder="例如：admin 或 user@example.com">
+
     <label>密码</label>
     <input type="password" name="password" required>
-    <button type="submit">登录</button>
+
+    <label>图片验证码</label>
+    <div class="captcha-row">
+      <input name="captcha" required maxlength="6" placeholder="请输入右侧验证码">
+      <img id="captcha-login" class="captcha-box" src="{{ url_for('main.captcha_svg', scene='login') }}" alt="验证码" title="点击刷新验证码">
+    </div>
+
+    <div class="actions">
+      <button type="submit">登录</button>
+      <a href="{{ url_for('main.password_recover') }}"><button type="button" class="btn-secondary">找回密码</button></a>
+      {% if registration_open %}
+        <a href="{{ url_for('main.register') }}"><button type="button" class="btn-secondary">注册账号</button></a>
+      {% endif %}
+    </div>
   </form>
 </section>
+<script>
+  (function () {
+    var el = document.getElementById('captcha-login');
+    if (!el) return;
+    var reload = function () {
+      el.src = "{{ url_for('main.captcha_svg', scene='login') }}" + "&t=" + Date.now();
+    };
+    el.addEventListener('click', reload);
+  })();
+</script>
 {% endblock %}
-

@@ -1,17 +1,41 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="card">
-  <h1>分布式 VPN 平台 V1</h1>
-  <p>已按 PRD 启动全新开发。当前为起步骨架版本。</p>
+  <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+    <div>
+      <h1 style="margin:0 0 10px;">多版本多主机互联互通移动办公首选</h1>
+      <p class="muted" style="max-width:820px;">
+        平台支持 WireGuard 与 OpenVPN，采用 Web 控制端与节点端分离部署。
+        当前版本已完成基础初始化与 M1 账号能力，可用于继续迭代套餐、订单与节点部署能力。
+      </p>
+    </div>
+    {% if not user %}
+      <div class="actions">
+        {% if registration_open %}
+          <a href="{{ url_for('main.register') }}"><button type="button">注册账号</button></a>
+        {% endif %}
+        <a href="{{ url_for('main.login') }}"><button type="button" class="btn-secondary">登录</button></a>
+      </div>
+    {% endif %}
+  </div>
+
   {% if user %}
     {% if user["role"] == "admin" %}
-      <a href="{{ url_for('main.admin_dashboard') }}">进入管理员后台</a>
+      <a href="{{ url_for('main.admin_dashboard') }}"><button type="button">进入管理员后台</button></a>
     {% else %}
-      <a href="{{ url_for('main.user_dashboard') }}">进入用户中心</a>
+      <a href="{{ url_for('main.user_dashboard') }}"><button type="button">进入用户中心</button></a>
     {% endif %}
-  {% else %}
-    <a href="{{ url_for('main.login') }}">登录</a>
   {% endif %}
 </section>
-{% endblock %}
 
+<section class="card">
+  <h2 style="margin-top:0;">当前功能状态</h2>
+  <ul style="line-height:1.8;margin:0;padding-left:18px;">
+    <li>默认管理员：<code>admin / admin</code>（首次登录必须改密）</li>
+    <li>注册需要邮箱验证码与图片验证码</li>
+    <li>登录和找回密码都必须输入图片验证码</li>
+    <li>同一邮箱验证码限制：60 秒限发，每天最多 10 次</li>
+    <li>后台支持开启/关闭开放注册，关闭后注册页不可访问</li>
+  </ul>
+</section>
+{% endblock %}

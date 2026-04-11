@@ -27,11 +27,29 @@ flask --app app run --host 0.0.0.0 --port 8080
 - 密码：`admin`
 - 首次登录后必须修改密码
 
-## 当前范围（起步骨架）
+## 当前范围（M1 已完成）
 
 - SQLite 初始化与默认管理员
 - 首次登录强制改密
-- 左侧导航布局基础框架
-- 管理端/用户端占位页面
+- 注册（邮箱即账号）
+- 邮箱验证码（10 分钟有效）
+- 图片验证码（登录/注册/找回均强制）
+- 发送限频（同邮箱 60 秒限发、每天最多 10 次）
+- 找回密码（重置后旧会话失效）
+- 管理后台开放注册开关
 - 一键安装脚本（apt/yum 双兼容）
 
+## 邮件发送配置（可选）
+
+如果配置 SMTP，验证码将通过邮件发送：
+
+```bash
+export SMTP_HOST=smtp.example.com
+export SMTP_PORT=587
+export SMTP_USER=your_user
+export SMTP_PASS=your_password
+export SMTP_FROM=your_from@example.com
+export SMTP_USE_TLS=1
+```
+
+未配置 SMTP 时，系统会把验证码写入服务日志（测试环境便于调试）。

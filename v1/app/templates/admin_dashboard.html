@@ -1,13 +1,47 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="card">
-  <h1>管理员首页</h1>
-  <p>按照 PRD，后续将逐步实现：</p>
-  <ul>
-    <li>待处理订单、异常节点、即将到期权益、用户总览</li>
-    <li>服务器添加与自动部署、部署报告、节点状态</li>
-    <li>开放注册、赠送策略、订单过期时长等系统配置</li>
-  </ul>
+  <h1 style="margin-top:0;">管理员首页</h1>
+  <p class="muted">这里是 V1 管理控制台。当前重点是账号系统和初始化配置。</p>
+</section>
+
+<section class="card">
+  <h2 style="margin-top:0;">运营概览</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>指标</th>
+          <th>数值</th>
+          <th>说明</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>用户总数</td>
+          <td>{{ user_count }}</td>
+          <td>不含管理员账号</td>
+        </tr>
+        <tr>
+          <td>待使用验证码</td>
+          <td>{{ pending_codes }}</td>
+          <td>状态为 pending 的邮箱验证码</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2 style="margin-top:0;">系统设置</h2>
+  <form method="post" action="{{ url_for('main.admin_set_registration') }}">
+    <label>开放注册</label>
+    <select name="registration_open">
+      <option value="1" {% if registration_open %}selected{% endif %}>开启</option>
+      <option value="0" {% if not registration_open %}selected{% endif %}>关闭</option>
+    </select>
+    <p class="muted">关闭后注册入口会隐藏，注册页面不可访问。</p>
+    <button type="submit">保存设置</button>
+  </form>
 </section>
 {% endblock %}
-

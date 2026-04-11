@@ -32,6 +32,7 @@ def init_db_schema(db: sqlite3.Connection):
             role TEXT NOT NULL DEFAULT 'user',
             email_verified INTEGER NOT NULL DEFAULT 0,
             must_change_password INTEGER NOT NULL DEFAULT 0,
+            session_version INTEGER NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'active',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -100,10 +101,13 @@ def init_db_schema(db: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS email_verifications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL,
+            purpose TEXT NOT NULL DEFAULT 'register',
             code TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
+            ip_address TEXT,
             expire_at TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            used_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -115,6 +119,41 @@ def init_db_schema(db: sqlite3.Connection):
     )
 
 
+def _column_exists(db: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = db.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row["name"] == column_name for row in rows)
+
+
+def ensure_schema_migrations(db: sqlite3.Connection):
+    if not _column_exists(db, "users", "session_version"):
+        db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
+
+    if not _column_exists(db, "email_verifications", "purpose"):
+        db.execute(
+            "ALTER TABLE email_verifications ADD COLUMN purpose TEXT NOT NULL DEFAULT 'register'"
+        )
+    if not _column_exists(db, "email_verifications", "ip_address"):
+        db.execute("ALTER TABLE email_verifications ADD COLUMN ip_address TEXT")
+    if not _column_exists(db, "email_verifications", "used_at"):
+        db.execute("ALTER TABLE email_verifications ADD COLUMN used_at TEXT")
+
+
+def ensure_default_settings(db: sqlite3.Connection):
+    now = utcnow_iso()
+    default_settings = {
+        "registration_open": "1",
+    }
+    for key, value in default_settings.items():
+        db.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (key, value, now),
+        )
+
+
 def ensure_default_admin(db: sqlite3.Connection):
     row = db.execute("SELECT id FROM users WHERE email = 'admin' LIMIT 1").fetchone()
     if row:
@@ -122,8 +161,11 @@ def ensure_default_admin(db: sqlite3.Connection):
     now = utcnow_iso()
     db.execute(
         """
-        INSERT INTO users (email, password_hash, role, email_verified, must_change_password, status, created_at, updated_at)
-        VALUES (?, ?, 'admin', 1, 1, 'active', ?, ?)
+        INSERT INTO users (
+            email, password_hash, role, email_verified, must_change_password,
+            session_version, status, created_at, updated_at
+        )
+        VALUES (?, ?, 'admin', 1, 1, 1, 'active', ?, ?)
         """,
         ("admin", generate_password_hash("admin"), now, now),
     )
@@ -132,6 +174,8 @@ def ensure_default_admin(db: sqlite3.Connection):
 def init_db():
     db = get_db()
     init_db_schema(db)
+    ensure_schema_migrations(db)
+    ensure_default_settings(db)
     ensure_default_admin(db)
     db.commit()
 
@@ -143,4 +187,3 @@ def init_app(app):
     def init_db_command():
         init_db()
         print("Initialized SQLite database.")
-
