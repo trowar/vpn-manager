@@ -7292,18 +7292,30 @@ def admin_create_server():
         status="deploying",
     )
     update_server_test_result(db, server_id, ok=True, message=test_message)
+    # 先落库再部署，确保部署失败/中断时服务器仍保留在列表中可查看日志。
+    db.commit()
 
-    deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
-        host=host,
-        port=port,
-        username=username,
-        password=password,
-        private_key_text=ssh_private_key,
-        wg_port=wg_port,
-        openvpn_port=openvpn_port,
-        dns_port=dns_port,
-        vpn_api_token=deploy_token,
-    )
+    deploy_ok = False
+    deploy_message = "部署未开始。"
+    final_token = deploy_token
+    deploy_log = ""
+    try:
+        deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            private_key_text=ssh_private_key,
+            wg_port=wg_port,
+            openvpn_port=openvpn_port,
+            dns_port=dns_port,
+            vpn_api_token=deploy_token,
+        )
+    except Exception as exc:
+        deploy_ok = False
+        deploy_message = f"部署异常：{exc}"
+        deploy_log = deploy_message
+
     update_server_deploy_result(
         db,
         server_id,
@@ -7475,17 +7487,27 @@ def admin_deploy_saved_server(server_id: int):
         flash("服务器不存在。", "error")
         return redirect(url_for("admin_servers"))
 
-    deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
-        host=row["host"],
-        port=normalize_server_port(row["port"], 22),
-        username=row["username"],
-        password=row["password"],
-        private_key_text=row_get(row, "ssh_private_key", ""),
-        wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-        openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
-        dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
-        vpn_api_token=row_get(row, "vpn_api_token", ""),
-    )
+    deploy_ok = False
+    deploy_message = "部署未开始。"
+    final_token = row_get(row, "vpn_api_token", "")
+    deploy_log = ""
+    try:
+        deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
+            host=row["host"],
+            port=normalize_server_port(row["port"], 22),
+            username=row["username"],
+            password=row["password"],
+            private_key_text=row_get(row, "ssh_private_key", ""),
+            wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+            openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+            dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+            vpn_api_token=row_get(row, "vpn_api_token", ""),
+        )
+    except Exception as exc:
+        deploy_ok = False
+        deploy_message = f"部署异常：{exc}"
+        deploy_log = deploy_message
+
     update_server_deploy_result(
         db,
         server_id,
