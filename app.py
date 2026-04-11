@@ -2862,6 +2862,14 @@ def build_vpn_node_deploy_script(
           exit 1
         fi
 
+        if ! command -v openvpn >/dev/null 2>&1; then
+          pkg_install openvpn || true
+        fi
+        if ! command -v openvpn >/dev/null 2>&1; then
+          log "openvpn 安装失败"
+          exit 1
+        fi
+
         if [ ! -d /opt/vpn-node/.git ]; then
           rm -rf /opt/vpn-node
           git clone --depth 1 https://github.com/trowar/vpn-manager.git /opt/vpn-node >/dev/null 2>&1
