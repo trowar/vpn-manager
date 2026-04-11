@@ -201,6 +201,7 @@
     var createOpenBtn = document.getElementById("open-server-modal");
     var createCloseBtn = document.getElementById("close-server-modal");
     var createModal = document.getElementById("server-modal");
+    var createForm = document.getElementById("server-create-form");
     var createTestBtn = document.getElementById("server-test-btn");
     var createResultNode = document.getElementById("server-test-result");
 
@@ -251,6 +252,11 @@
     if (createOpenBtn) createOpenBtn.addEventListener("click", function () { openModal(createModal); });
     if (createCloseBtn) createCloseBtn.addEventListener("click", function () { closeModal(createModal); });
     bindOverlayClose(createModal);
+    if (createForm) {
+      createForm.addEventListener("submit", function () {
+        closeModal(createModal);
+      });
+    }
 
     async function testServerConnection() {
       if (!createTestBtn) return;

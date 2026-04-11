@@ -14,6 +14,7 @@ import string
 import subprocess
 import tempfile
 import textwrap
+import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
@@ -6586,6 +6587,81 @@ def update_server_deploy_result(
     db.execute(sql, params)
 
 
+def mark_server_deploying(
+    db: sqlite3.Connection,
+    server_id: int,
+    *,
+    message: str = "部署任务已启动，正在后台执行。",
+) -> None:
+    now_iso = utcnow_iso()
+    short_message = summarize_text(message, 1200)
+    db.execute(
+        """
+        UPDATE vpn_servers
+        SET status = 'deploying',
+            last_deploy_at = ?,
+            last_deploy_ok = 0,
+            last_deploy_message = ?,
+            last_deploy_log = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            now_iso,
+            short_message,
+            clip_text(message),
+            now_iso,
+            server_id,
+        ),
+    )
+
+
+def run_server_deploy_task(server_id: int) -> None:
+    with app.app_context():
+        db = get_db()
+        row = db.execute("SELECT * FROM vpn_servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            return
+        try:
+            deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
+                host=row["host"],
+                port=normalize_server_port(row["port"], 22),
+                username=row["username"],
+                password=row["password"],
+                private_key_text=row_get(row, "ssh_private_key", ""),
+                wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+                openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+                dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+                vpn_api_token=row_get(row, "vpn_api_token", ""),
+            )
+        except Exception as exc:
+            deploy_ok = False
+            deploy_message = f"部署异常：{exc}"
+            final_token = row_get(row, "vpn_api_token", "")
+            deploy_log = deploy_message
+
+        update_server_deploy_result(
+            db,
+            server_id,
+            ok=deploy_ok,
+            message=deploy_message,
+            status="online" if deploy_ok else "deploy_failed",
+            vpn_api_token=final_token,
+            deploy_log=deploy_log,
+        )
+        db.commit()
+
+
+def launch_server_deploy_task(server_id: int) -> None:
+    thread = threading.Thread(
+        target=run_server_deploy_task,
+        args=(server_id,),
+        daemon=True,
+        name=f"server-deploy-{server_id}",
+    )
+    thread.start()
+
+
 def redirect_admin_onboarding_modal(step: int | None = None):
     if step is not None and 1 <= step <= 4:
         return redirect(
@@ -7292,45 +7368,11 @@ def admin_create_server():
         status="deploying",
     )
     update_server_test_result(db, server_id, ok=True, message=test_message)
-    # 先落库再部署，确保部署失败/中断时服务器仍保留在列表中可查看日志。
+    mark_server_deploying(db, server_id)
+    # 先落库再异步部署，确保部署失败/中断时服务器仍保留在列表中可查看日志。
     db.commit()
-
-    deploy_ok = False
-    deploy_message = "部署未开始。"
-    final_token = deploy_token
-    deploy_log = ""
-    try:
-        deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            private_key_text=ssh_private_key,
-            wg_port=wg_port,
-            openvpn_port=openvpn_port,
-            dns_port=dns_port,
-            vpn_api_token=deploy_token,
-        )
-    except Exception as exc:
-        deploy_ok = False
-        deploy_message = f"部署异常：{exc}"
-        deploy_log = deploy_message
-
-    update_server_deploy_result(
-        db,
-        server_id,
-        ok=deploy_ok,
-        message=deploy_message,
-        status="online" if deploy_ok else "deploy_failed",
-        vpn_api_token=final_token,
-        deploy_log=deploy_log,
-    )
-    db.commit()
-
-    if deploy_ok:
-        flash("服务器已保存并完成 VPN 服务部署。", "success")
-    else:
-        flash(f"服务器已保存，但部署失败：{deploy_message}", "error")
+    launch_server_deploy_task(server_id)
+    flash("服务器已保存，部署已开始。可在列表查看状态并打开部署日志。", "success")
     return redirect(url_for("admin_servers"))
 
 
@@ -7487,38 +7529,10 @@ def admin_deploy_saved_server(server_id: int):
         flash("服务器不存在。", "error")
         return redirect(url_for("admin_servers"))
 
-    deploy_ok = False
-    deploy_message = "部署未开始。"
-    final_token = row_get(row, "vpn_api_token", "")
-    deploy_log = ""
-    try:
-        deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
-            host=row["host"],
-            port=normalize_server_port(row["port"], 22),
-            username=row["username"],
-            password=row["password"],
-            private_key_text=row_get(row, "ssh_private_key", ""),
-            wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-            openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
-            dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
-            vpn_api_token=row_get(row, "vpn_api_token", ""),
-        )
-    except Exception as exc:
-        deploy_ok = False
-        deploy_message = f"部署异常：{exc}"
-        deploy_log = deploy_message
-
-    update_server_deploy_result(
-        db,
-        server_id,
-        ok=deploy_ok,
-        message=deploy_message,
-        status="online" if deploy_ok else "deploy_failed",
-        vpn_api_token=final_token,
-        deploy_log=deploy_log,
-    )
+    mark_server_deploying(db, server_id)
     db.commit()
-    flash(deploy_message, "success" if deploy_ok else "error")
+    launch_server_deploy_task(server_id)
+    flash("部署任务已启动。可在列表查看状态并打开部署日志。", "success")
     return redirect(url_for("admin_servers"))
 
 
