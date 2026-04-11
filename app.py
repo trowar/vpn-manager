@@ -152,6 +152,8 @@ UNVERIFIED_USER_RETENTION_HOURS = 24
 CAPTCHA_TTL_MINUTES = 5
 CAPTCHA_SCENE_DEFAULT = "default"
 CAPTCHA_SCENES = ("login", "register", "recover")
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B-\x1F\x7F]")
 EMAIL_CODE_PURPOSE_REGISTER = "register"
 EMAIL_CODE_PURPOSE_RECOVER = "recover"
 SETTING_REGISTRATION_OPEN = "registration_open"
@@ -1373,6 +1375,14 @@ def summarize_text(raw: str, limit: int = 600) -> str:
     if len(text) <= limit:
         return text
     return "..." + text[-limit:]
+
+
+def normalize_deploy_log_text(raw: str) -> str:
+    text = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = ANSI_ESCAPE_RE.sub("", text)
+    text = CONTROL_CHAR_RE.sub("", text)
+    normalized_lines = [line.rstrip() for line in text.split("\n")]
+    return "\n".join(normalized_lines).strip()
 
 
 def clip_text(raw: str, limit: int = 200000) -> str:
@@ -3036,9 +3046,11 @@ def deploy_vpn_node_server(
         out = stdout.read().decode("utf-8", errors="ignore")
         err = stderr.read().decode("utf-8", errors="ignore")
         code = stdout.channel.recv_exit_status()
-        merged_raw = (out + "\n" + err).strip()
+        merged_raw = normalize_deploy_log_text(out + "\n" + err)
         merged_log = summarize_text(merged_raw, 120000)
         merged = summarize_text(merged_raw, 1200)
+        if not merged:
+            merged = "部署脚本执行完成，但未返回可读日志。"
         if code == 0:
             return True, f"部署成功。{merged}", safe_token, merged_log
         return False, f"部署失败（exit={code}）。{merged}", safe_token, merged_log
@@ -7405,7 +7417,7 @@ def admin_server_deploy_log(server_id: int):
     db = get_db()
     row = db.execute(
         """
-        SELECT id, server_name, last_deploy_at, last_deploy_message, last_deploy_log
+        SELECT id, server_name, status, last_deploy_at, last_deploy_message, last_deploy_log
         FROM vpn_servers
         WHERE id = ?
         LIMIT 1
@@ -7415,11 +7427,15 @@ def admin_server_deploy_log(server_id: int):
     if not row:
         return {"ok": False, "error": "服务器不存在。"}, 404
 
-    deploy_log = (row_get(row, "last_deploy_log", "") or "").strip()
+    deploy_log = normalize_deploy_log_text(row_get(row, "last_deploy_log", ""))
     if not deploy_log:
-        deploy_log = (row_get(row, "last_deploy_message", "") or "").strip()
+        deploy_log = normalize_deploy_log_text(row_get(row, "last_deploy_message", ""))
     if not deploy_log:
-        deploy_log = "暂无部署日志。"
+        status = (row_get(row, "status", "") or "").strip().lower()
+        if status == "deploying":
+            deploy_log = "部署任务已启动，日志正在生成，请稍后刷新。"
+        else:
+            deploy_log = "暂无部署日志。"
     return {
         "ok": True,
         "server_id": int(row["id"]),

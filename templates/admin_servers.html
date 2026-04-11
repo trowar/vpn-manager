@@ -10,7 +10,6 @@
   </div>
 
   {% if servers %}
-    <div class="table-scroll server-table-scroll">
     <table class="subscriptions-table server-table">
       <thead>
         <tr>
@@ -29,17 +28,8 @@
           <tr>
             <td>{{ s["id"] }}</td>
             <td>{{ s["server_name"] }}</td>
-            <td>
-              <div><strong>{{ s["host"] }}</strong>:{{ s["port"] }}</div>
-              <div class="helper">WG 51820（默认） / OVPN 1194（默认） / DNS 53（默认）</div>
-            </td>
-            <td>
-              <div>{{ s["username"] }}</div>
-              <div class="helper">{{ s["password_masked"] }}</div>
-              {% if s["private_key_enabled"] %}
-                <div class="helper">私钥已配置</div>
-              {% endif %}
-            </td>
+            <td><strong>{{ s["host"] }}</strong></td>
+            <td>{{ s["username"] }}</td>
             <td>
               {% if s["status"] == "online" %}
                 <span class="tag tag-ok">在线</span>
@@ -51,14 +41,8 @@
                 <span class="tag tag-warn">{{ s["status"] }}</span>
               {% endif %}
             </td>
-            <td>
-              <div>{{ s["last_test_at"]|fmt_utc }}</div>
-              <div class="helper server-log-snippet">{{ s["last_test_message"] or "-" }}</div>
-            </td>
-            <td>
-              <div>{{ s["last_deploy_at"]|fmt_utc }}</div>
-              <div class="helper server-log-snippet">{{ s["last_deploy_message"] or "-" }}</div>
-            </td>
+            <td class="server-log-snippet">{{ (s["last_test_at"]|fmt_utc) ~ " | " ~ (s["last_test_message"] or "-") }}</td>
+            <td class="server-log-snippet">{{ (s["last_deploy_at"]|fmt_utc) ~ " | " ~ (s["last_deploy_message"] or "-") }}</td>
             <td class="server-actions-cell">
               <div class="subscription-actions">
                 <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
@@ -94,7 +78,6 @@
         {% endfor %}
       </tbody>
     </table>
-    </div>
   {% else %}
     <p class="helper">暂无服务器，点击右上角“新增服务器”开始。</p>
   {% endif %}
@@ -242,6 +225,16 @@
       document.body.classList.remove("modal-open");
     }
 
+    function normalizeDeployLogText(raw) {
+      if (typeof raw !== "string") return "";
+      var cleaned = raw
+        .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+        .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "")
+        .replace(/\r/g, "")
+        .trim();
+      return cleaned;
+    }
+
     function bindOverlayClose(modal) {
       if (!modal) return;
       modal.addEventListener("click", function (event) {
@@ -367,7 +360,8 @@
             logMeta.textContent = "最近部署时间： " + ts;
           }
           if (logContent) {
-            logContent.textContent = data.deploy_log || "暂无部署日志。";
+            var deployLogText = normalizeDeployLogText(data.deploy_log || "");
+            logContent.textContent = deployLogText || "部署任务已创建，日志暂未写入，请稍后刷新。";
             logContent.scrollTop = logContent.scrollHeight;
           }
         } catch (err) {

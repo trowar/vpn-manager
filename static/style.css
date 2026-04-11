@@ -345,19 +345,45 @@ td {
   overflow-x: auto;
 }
 
+.server-table-scroll {
+  overflow-x: visible;
+}
+
 .server-table {
-  min-width: 1320px;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.server-table th,
+.server-table td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
 }
 
 .server-table .server-log-snippet {
-  max-width: 360px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .server-table .server-actions-cell {
-  min-width: 360px;
+  width: 330px;
+  overflow: visible;
+}
+
+.server-table .subscription-actions {
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
+.server-table .subscription-actions button,
+.server-table .subscription-actions .btn {
+  padding: 6px 8px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .subscription-actions {
@@ -869,6 +895,12 @@ code {
     display: block;
     overflow-x: auto;
     white-space: nowrap;
+  }
+
+  .server-table {
+    display: table;
+    overflow-x: visible;
+    white-space: normal;
   }
 
   .subscription-actions {
