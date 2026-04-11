@@ -31,7 +31,7 @@
             <td>{{ s["server_name"] }}</td>
             <td>
               <div><strong>{{ s["host"] }}</strong>:{{ s["port"] }}</div>
-              <div class="helper">WG 51820（默认） / OVPN 1194（默认） / DNS {{ s["dns_port"] }}</div>
+              <div class="helper">WG 51820（默认） / OVPN 1194（默认） / DNS 53（默认）</div>
             </td>
             <td>
               <div>{{ s["username"] }}</div>
@@ -81,7 +81,6 @@
                   data-host="{{ s['host'] }}"
                   data-port="{{ s['port'] }}"
                   data-username="{{ s['username'] }}"
-                  data-dns-port="{{ s['dns_port'] }}"
                 >修改</button>
                 <button
                   type="button"
@@ -127,10 +126,7 @@
       <label>SSH 私钥（可选）
         <textarea name="ssh_private_key" id="server-key-input" rows="6" placeholder="粘贴私钥内容（-----BEGIN ... PRIVATE KEY-----）"></textarea>
       </label>
-      <p class="helper">WireGuard 端口固定为 51820，OpenVPN 端口固定为 1194。</p>
-      <label>DNS 端口
-        <input type="number" name="dns_port" min="1" max="65535" value="53" required>
-      </label>
+      <p class="helper">WireGuard 端口固定为 51820，OpenVPN 端口固定为 1194，DNS 端口固定为 53。</p>
 
       <div class="actions">
         <button type="button" class="btn secondary" id="server-test-btn">测试连通</button>
@@ -167,10 +163,7 @@
       <label>SSH 私钥（可选，留空则保持不变）
         <textarea name="ssh_private_key" id="server-edit-key" rows="6" placeholder="需改为私钥登录时粘贴完整私钥"></textarea>
       </label>
-      <p class="helper">WireGuard 端口固定为 51820，OpenVPN 端口固定为 1194。</p>
-      <label>DNS 端口
-        <input type="number" name="dns_port" id="server-edit-dns-port" min="1" max="65535" required>
-      </label>
+      <p class="helper">WireGuard 端口固定为 51820，OpenVPN 端口固定为 1194，DNS 端口固定为 53。</p>
       <div class="actions">
         <button type="submit">保存修改</button>
       </div>
@@ -221,7 +214,6 @@
     var editUser = document.getElementById("server-edit-username");
     var editPass = document.getElementById("server-edit-password");
     var editKey = document.getElementById("server-edit-key");
-    var editDnsPort = document.getElementById("server-edit-dns-port");
 
     var deleteModal = document.getElementById("server-delete-modal");
     var deleteCloseBtn = document.getElementById("close-server-delete-modal");
@@ -324,7 +316,6 @@
         if (editUser) editUser.value = btn.dataset.username || "root";
         if (editPass) editPass.value = "";
         if (editKey) editKey.value = "";
-        if (editDnsPort) editDnsPort.value = btn.dataset.dnsPort || "53";
         openModal(editModal);
       });
     });

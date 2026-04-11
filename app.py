@@ -7260,10 +7260,7 @@ def admin_create_server():
     ssh_private_key = request.form.get("ssh_private_key", "") or ""
     wg_port = SERVER_DEPLOY_DEFAULT_WG_PORT
     openvpn_port = SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
-    dns_port = normalize_server_port(
-        request.form.get("dns_port", str(SERVER_DEPLOY_DEFAULT_DNS_PORT)),
-        SERVER_DEPLOY_DEFAULT_DNS_PORT,
-    )
+    dns_port = SERVER_DEPLOY_DEFAULT_DNS_PORT
 
     if not host or not username or (not password and not (ssh_private_key or "").strip()):
         flash("请完整填写服务器地址、账号，并提供密码或私钥。", "error")
@@ -7396,10 +7393,7 @@ def admin_update_saved_server(server_id: int):
     private_key_raw = request.form.get("ssh_private_key", "") or ""
     wg_port = SERVER_DEPLOY_DEFAULT_WG_PORT
     openvpn_port = SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
-    dns_port = normalize_server_port(
-        request.form.get("dns_port", str(row_get(row, "dns_port", SERVER_DEPLOY_DEFAULT_DNS_PORT))),
-        SERVER_DEPLOY_DEFAULT_DNS_PORT,
-    )
+    dns_port = SERVER_DEPLOY_DEFAULT_DNS_PORT
 
     if not host or not username:
         flash("服务器地址和账号不能为空。", "error")
@@ -7489,7 +7483,7 @@ def admin_deploy_saved_server(server_id: int):
         private_key_text=row_get(row, "ssh_private_key", ""),
         wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
         openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
-        dns_port=normalize_server_port(row_get(row, "dns_port"), SERVER_DEPLOY_DEFAULT_DNS_PORT),
+        dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
         vpn_api_token=row_get(row, "vpn_api_token", ""),
     )
     update_server_deploy_result(
