@@ -37,6 +37,9 @@
             <td>
               <div>{{ s["username"] }}</div>
               <div class="helper">{{ s["password_masked"] }}</div>
+              {% if s["private_key_enabled"] %}
+                <div class="helper">私钥已配置</div>
+              {% endif %}
             </td>
             <td>{{ s["domain"] or "-" }}</td>
             <td>
@@ -123,8 +126,11 @@
       <label>登录账号
         <input type="text" name="username" id="server-user-input" value="root" required>
       </label>
-      <label>登录密码
-        <input type="password" name="password" id="server-pass-input" required>
+      <label>登录密码（可选）
+        <input type="password" name="password" id="server-pass-input" placeholder="可留空，使用私钥登录">
+      </label>
+      <label>SSH 私钥（可选）
+        <textarea name="ssh_private_key" id="server-key-input" rows="6" placeholder="粘贴私钥内容（-----BEGIN ... PRIVATE KEY-----）"></textarea>
       </label>
       <label>优先域名（可选）
         <select name="domain" id="server-domain-input">
@@ -176,6 +182,9 @@
       </label>
       <label>登录密码（留空则保持不变）
         <input type="password" name="password" id="server-edit-password" placeholder="不修改可留空">
+      </label>
+      <label>SSH 私钥（可选，留空则保持不变）
+        <textarea name="ssh_private_key" id="server-edit-key" rows="6" placeholder="需改为私钥登录时粘贴完整私钥"></textarea>
       </label>
       <label>绑定域名（可选，留空将清空绑定）
         <input type="text" name="domain" id="server-edit-domain" placeholder="例如：hk1.network000.com">
@@ -238,6 +247,7 @@
     var editPort = document.getElementById("server-edit-port");
     var editUser = document.getElementById("server-edit-username");
     var editPass = document.getElementById("server-edit-password");
+    var editKey = document.getElementById("server-edit-key");
     var editDomain = document.getElementById("server-edit-domain");
     var editWgPort = document.getElementById("server-edit-wg-port");
     var editOpenvpnPort = document.getElementById("server-edit-openvpn-port");
@@ -286,11 +296,12 @@
       var port = document.getElementById("server-port-input");
       var username = document.getElementById("server-user-input");
       var password = document.getElementById("server-pass-input");
-      if (!host || !port || !username || !password) return;
+      var privateKey = document.getElementById("server-key-input");
+      if (!host || !port || !username || !password || !privateKey) return;
 
-      if (!host.value.trim() || !username.value.trim() || !password.value) {
+      if (!host.value.trim() || !username.value.trim() || (!password.value && !privateKey.value.trim())) {
         if (createResultNode) {
-          createResultNode.textContent = "请先填写服务器地址、账号和密码。";
+          createResultNode.textContent = "请先填写服务器地址、账号，并提供密码或私钥。";
           createResultNode.style.color = "#b91c1c";
         }
         return;
@@ -310,7 +321,8 @@
             host: host.value.trim(),
             port: port.value.trim(),
             username: username.value.trim(),
-            password: password.value
+            password: password.value,
+            private_key: privateKey.value
           })
         });
         var data = await response.json();
@@ -341,6 +353,7 @@
         if (editPort) editPort.value = btn.dataset.port || "22";
         if (editUser) editUser.value = btn.dataset.username || "root";
         if (editPass) editPass.value = "";
+        if (editKey) editKey.value = "";
         if (editDomain) editDomain.value = btn.dataset.domain || "";
         if (editWgPort) editWgPort.value = btn.dataset.wgPort || "51820";
         if (editOpenvpnPort) editOpenvpnPort.value = btn.dataset.openvpnPort || "1194";

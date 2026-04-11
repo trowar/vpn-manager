@@ -17,6 +17,9 @@ OPENVPN_CA_CERT_FILE = Path(
 OPENVPN_TLS_CRYPT_KEY_FILE = Path(
     os.environ.get("OPENVPN_TLS_CRYPT_KEY_FILE", "/etc/openvpn/server/tls-crypt.key")
 )
+OPENVPN_STATUS_FILE = Path(
+    os.environ.get("OPENVPN_STATUS_FILE", "/tmp/openvpn-status.log")
+)
 
 app = Flask(__name__)
 
@@ -72,6 +75,41 @@ def wireguard_dump():
     interface = (request.args.get("interface") or WG_INTERFACE).strip() or WG_INTERFACE
     dump = run_command(["wg", "show", interface, "dump"], check=False)
     return {"ok": True, "dump": dump}
+
+
+def parse_openvpn_active_identities(raw_text: str) -> list[str]:
+    identities: set[str] = set()
+    in_client_section = False
+    for raw_line in (raw_text or "").splitlines():
+        line = (raw_line or "").strip()
+        if not line:
+            continue
+        if line.startswith("CLIENT_LIST,"):
+            parts = line.split(",")
+            if len(parts) > 1:
+                candidate = (parts[1] or "").strip().lower()
+                if candidate and candidate != "common name":
+                    identities.add(candidate)
+            continue
+        if line.startswith("Common Name,"):
+            in_client_section = True
+            continue
+        if line.startswith("ROUTING TABLE") or line.startswith("GLOBAL STATS"):
+            in_client_section = False
+            continue
+        if in_client_section and "," in line:
+            candidate = (line.split(",", 1)[0] or "").strip().lower()
+            if candidate and candidate != "common name":
+                identities.add(candidate)
+    return sorted(identities)
+
+
+@app.route("/openvpn/active-users")
+def openvpn_active_users():
+    if not OPENVPN_STATUS_FILE.exists():
+        return {"ok": True, "users": []}
+    raw_text = OPENVPN_STATUS_FILE.read_text(encoding="utf-8", errors="ignore")
+    return {"ok": True, "users": parse_openvpn_active_identities(raw_text)}
 
 
 @app.route("/openvpn/client-materials")

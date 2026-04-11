@@ -376,6 +376,10 @@ td {
   flex-wrap: nowrap;
 }
 
+.admin-reset-password-input {
+  min-width: 170px;
+}
+
 .dashboard-shell {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);

@@ -38,6 +38,14 @@
               <form method="post" action="{{ url_for('admin_mark_order_paid', order_id=o['id']) }}" class="inline-form">
                 <button type="submit">确认已支付</button>
               </form>
+              <form
+                method="post"
+                action="{{ url_for('admin_cancel_pending_order', order_id=o['id']) }}"
+                class="inline-form"
+                onsubmit="return confirm('确定取消该待处理订单吗？');"
+              >
+                <button type="submit" class="danger">取消订单</button>
+              </form>
             </td>
           </tr>
         {% endfor %}

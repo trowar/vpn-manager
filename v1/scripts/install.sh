@@ -18,13 +18,13 @@ install_deps() {
   if has_cmd apt-get; then
     log "Detected apt environment"
     apt-get update -y
-    apt-get install -y git curl wget python3 python3-pip python3-venv
+    apt-get install -y git curl wget python3 python3-pip python3-venv openssl
     return
   fi
   if has_cmd yum; then
     log "Detected yum environment"
     yum makecache -y || true
-    yum install -y git curl wget python3 python3-pip
+    yum install -y git curl wget python3 python3-pip openssl
     return
   fi
   echo "Unsupported package manager. Need apt-get or yum."
@@ -36,14 +36,27 @@ setup_app() {
     rm -rf "$APP_DIR"
   fi
   git clone --depth 1 "$REPO_URL" "$APP_DIR"
-  cd "$APP_DIR/v1"
+  cd "$APP_DIR"
   python3 -m venv .venv
   . .venv/bin/activate
   pip install --upgrade pip
   pip install -r requirements.txt
 }
 
+generate_secret() {
+  if has_cmd openssl; then
+    openssl rand -hex 24
+    return
+  fi
+  python3 - <<'PY'
+import secrets
+print(secrets.token_hex(24))
+PY
+}
+
 write_service() {
+  local portal_secret
+  portal_secret="$(generate_secret)"
   cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=VPN Platform V1 Web
@@ -51,11 +64,13 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=${APP_DIR}/v1
-Environment=PORTAL_SECRET_KEY=$(openssl rand -hex 24 || echo dev-secret)
+WorkingDirectory=${APP_DIR}
+Environment=PORTAL_SECRET_KEY=${portal_secret}
+Environment=ADMIN_USERNAME=admin
+Environment=ADMIN_PASSWORD=admin
 Environment=PORTAL_DATA_DIR=${APP_DIR}/data
 Environment=PORTAL_DB_PATH=${APP_DIR}/data/portal.db
-ExecStart=${APP_DIR}/v1/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${APP_PORT} wsgi:app
+ExecStart=${APP_DIR}/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${APP_PORT} wsgi:app
 Restart=always
 RestartSec=2
 
@@ -63,6 +78,7 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 
+  mkdir -p "${APP_DIR}/data"
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}"
 }

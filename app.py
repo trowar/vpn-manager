@@ -1,6 +1,7 @@
 import calendar
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import os
@@ -173,6 +174,7 @@ ONBOARDING_SETTING_DRAFT_SERVER_HOST = "setup_draft_server_host"
 ONBOARDING_SETTING_DRAFT_SERVER_PORT = "setup_draft_server_port"
 ONBOARDING_SETTING_DRAFT_SERVER_USERNAME = "setup_draft_server_username"
 ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD = "setup_draft_server_password"
+ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY = "setup_draft_server_private_key"
 ONBOARDING_SETTINGS_DEFAULTS = {
     ONBOARDING_SETTING_PORTAL_DOMAIN: "",
     ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT: "",
@@ -185,6 +187,7 @@ ONBOARDING_SETTINGS_DEFAULTS = {
     ONBOARDING_SETTING_DRAFT_SERVER_PORT: "22",
     ONBOARDING_SETTING_DRAFT_SERVER_USERNAME: "root",
     ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD: "",
+    ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY: "",
 }
 SERVER_DEPLOY_DEFAULT_WG_PORT = 51820
 SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 1194
@@ -861,6 +864,7 @@ def load_onboarding_server_draft(db: sqlite3.Connection) -> dict[str, str | int]
             ONBOARDING_SETTING_DRAFT_SERVER_PORT,
             ONBOARDING_SETTING_DRAFT_SERVER_USERNAME,
             ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD,
+            ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY,
         ),
     )
     merged = {**ONBOARDING_SETTINGS_DEFAULTS, **values}
@@ -875,6 +879,7 @@ def load_onboarding_server_draft(db: sqlite3.Connection) -> dict[str, str | int]
         ).strip()
         or "root",
         "server_password": merged[ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD] or "",
+        "server_private_key": merged[ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY] or "",
     }
 
 
@@ -886,6 +891,7 @@ def save_onboarding_server_draft(
     server_port: int,
     server_username: str,
     server_password: str,
+    server_private_key: str = "",
 ) -> None:
     upsert_app_setting(db, ONBOARDING_SETTING_DRAFT_SERVER_NAME, (server_name or "").strip())
     upsert_app_setting(
@@ -903,6 +909,11 @@ def save_onboarding_server_draft(
     )
     upsert_app_setting(
         db, ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD, server_password or ""
+    )
+    upsert_app_setting(
+        db,
+        ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY,
+        (server_private_key or "").strip(),
     )
 
 
@@ -1371,6 +1382,7 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
             port,
             username,
             password,
+            ssh_private_key,
             domain,
             vpn_api_token,
             wg_port,
@@ -1403,6 +1415,7 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
                 "port": normalize_server_port(row["port"], 22),
                 "username": (row["username"] or "").strip(),
                 "password_masked": mask_secret(row["password"] or ""),
+                "private_key_enabled": bool((row["ssh_private_key"] or "").strip()),
                 "domain": (row["domain"] or "").strip(),
                 "vpn_api_token_masked": mask_secret(row["vpn_api_token"] or "", visible=4),
                 "wg_port": normalize_server_port(row["wg_port"], SERVER_DEPLOY_DEFAULT_WG_PORT),
@@ -2454,31 +2467,102 @@ def upsert_primary_cloudflare_account_from_onboarding(
     return int(cursor.lastrowid)
 
 
+def load_ssh_private_key(private_key_text: str) -> paramiko.PKey:
+    normalized = (private_key_text or "").strip()
+    if not normalized:
+        raise ValueError("私钥为空。")
+    last_error: Exception | None = None
+    for key_cls in (
+        paramiko.RSAKey,
+        paramiko.ECDSAKey,
+        paramiko.Ed25519Key,
+        paramiko.DSSKey,
+    ):
+        try:
+            return key_cls.from_private_key(io.StringIO(normalized))
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"私钥格式无效：{last_error}")
+
+
 def open_ssh_client(
-    host: str, port: int, username: str, password: str, *, timeout: int = 10
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    *,
+    private_key_text: str = "",
+    timeout: int = 10,
 ) -> paramiko.SSHClient:
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(
-        hostname=host,
-        port=port,
-        username=username,
-        password=password,
-        timeout=timeout,
-        auth_timeout=timeout,
-        banner_timeout=timeout,
-    )
-    return client
+    auth_errors: list[str] = []
+    normalized_private_key = (private_key_text or "").strip()
+
+    def _new_client() -> paramiko.SSHClient:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        return client
+
+    if normalized_private_key:
+        try:
+            private_key = load_ssh_private_key(normalized_private_key)
+        except Exception as exc:
+            auth_errors.append(str(exc))
+        else:
+            client = _new_client()
+            try:
+                client.connect(
+                    hostname=host,
+                    port=port,
+                    username=username,
+                    pkey=private_key,
+                    timeout=timeout,
+                    auth_timeout=timeout,
+                    banner_timeout=timeout,
+                    look_for_keys=False,
+                    allow_agent=False,
+                )
+                return client
+            except Exception as exc:
+                client.close()
+                auth_errors.append(f"私钥登录失败：{exc}")
+
+    if password:
+        client = _new_client()
+        try:
+            client.connect(
+                hostname=host,
+                port=port,
+                username=username,
+                password=password,
+                timeout=timeout,
+                auth_timeout=timeout,
+                banner_timeout=timeout,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            return client
+        except Exception as exc:
+            client.close()
+            auth_errors.append(f"密码登录失败：{exc}")
+
+    if not auth_errors:
+        raise ValueError("服务器连接信息不完整（需提供密码或私钥）。")
+    raise RuntimeError("；".join(auth_errors))
 
 
 def test_server_connectivity(
-    host: str, port: int, username: str, password: str
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    private_key_text: str = "",
 ) -> tuple[bool, str]:
     safe_host = normalize_remote_host(host)
     safe_port = normalize_server_port(port)
     safe_username = (username or "").strip()
-    if not safe_host or not safe_username or not password:
-        return False, "服务器连接信息不完整。"
+    safe_private_key = (private_key_text or "").strip()
+    if not safe_host or not safe_username or (not password and not safe_private_key):
+        return False, "服务器连接信息不完整（需填写密码或私钥）。"
 
     client: paramiko.SSHClient | None = None
     try:
@@ -2487,6 +2571,7 @@ def test_server_connectivity(
             safe_port,
             safe_username,
             password,
+            private_key_text=safe_private_key,
             timeout=8,
         )
         stdin, stdout, stderr = client.exec_command(
@@ -2898,6 +2983,7 @@ def deploy_vpn_node_server(
     port: int,
     username: str,
     password: str,
+    private_key_text: str = "",
     wg_port: int,
     openvpn_port: int,
     dns_port: int,
@@ -2923,6 +3009,7 @@ def deploy_vpn_node_server(
             normalize_server_port(port, 22),
             (username or "").strip(),
             password,
+            private_key_text=private_key_text,
             timeout=12,
         )
         stdin, stdout, stderr = client.exec_command("bash -s", timeout=2400)
@@ -3098,6 +3185,7 @@ def init_db() -> None:
             port INTEGER NOT NULL DEFAULT 22,
             username TEXT NOT NULL,
             password TEXT NOT NULL,
+            ssh_private_key TEXT NOT NULL DEFAULT '',
             domain TEXT,
             vpn_api_token TEXT,
             wg_port INTEGER NOT NULL DEFAULT 51820,
@@ -3404,6 +3492,7 @@ def migrate_schema(db: sqlite3.Connection) -> None:
             port INTEGER NOT NULL DEFAULT 22,
             username TEXT NOT NULL,
             password TEXT NOT NULL,
+            ssh_private_key TEXT NOT NULL DEFAULT '',
             domain TEXT,
             vpn_api_token TEXT,
             wg_port INTEGER NOT NULL DEFAULT 51820,
@@ -3437,6 +3526,8 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN username TEXT NOT NULL DEFAULT 'root'")
     if "password" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN password TEXT NOT NULL DEFAULT ''")
+    if "ssh_private_key" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN ssh_private_key TEXT NOT NULL DEFAULT ''")
     if "domain" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN domain TEXT")
     if "vpn_api_token" not in vpn_server_columns:
@@ -5736,8 +5827,17 @@ def dashboard_home():
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
     user = sync_user_traffic_usage(db, user)
     traffic_stats = get_user_traffic_stats(user)
+    current_plan_display = get_user_current_plan_display(db, user)
     has_time = has_active_time_subscription(user)
     has_traffic = has_active_traffic_subscription(user)
+    if has_time and has_traffic:
+        benefit_summary = "时长权益 + 流量权益"
+    elif has_time:
+        benefit_summary = "时长权益（不限流量）"
+    elif has_traffic:
+        benefit_summary = "流量权益（有效期永久）"
+    else:
+        benefit_summary = "暂无生效权益"
     if has_traffic and not has_time:
         subscription_expiry_display = "永久"
     else:
@@ -5757,6 +5857,8 @@ def dashboard_home():
         user=user,
         active=is_subscription_active(user),
         traffic_stats=traffic_stats,
+        current_plan_display=current_plan_display,
+        benefit_summary=benefit_summary,
         subscription_expiry_display=subscription_expiry_display,
         assigned_ip_display=assigned_ip_display,
         node_alert_text=node_alert_text,
@@ -6193,6 +6295,36 @@ def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
     return db.execute(base_sql, params).fetchall()
 
 
+def get_user_current_plan_display(db: sqlite3.Connection, user: sqlite3.Row) -> str:
+    row = db.execute(
+        """
+        SELECT
+            plan_name,
+            plan_mode,
+            plan_duration_months,
+            plan_traffic_gb,
+            plan_months
+        FROM payment_orders
+        WHERE user_id = ? AND status = 'paid'
+        ORDER BY COALESCE(paid_at, created_at) DESC, id DESC
+        LIMIT 1
+        """,
+        (int(user["id"]),),
+    ).fetchone()
+    if row:
+        return format_order_plan(row)
+
+    has_time = has_active_time_subscription(user)
+    has_traffic = has_active_traffic_subscription(user)
+    if has_time and has_traffic:
+        return "赠送权益（时长 + 流量）"
+    if has_time:
+        return "赠送时长权益（不限流量）"
+    if has_traffic:
+        return "赠送流量权益（有效期永久）"
+    return "暂无生效套餐"
+
+
 def load_first_plan_for_onboarding(db: sqlite3.Connection) -> dict:
     plan = db.execute(
         """
@@ -6351,6 +6483,7 @@ def create_server_record(
     port: int,
     username: str,
     password: str,
+    ssh_private_key: str = "",
     domain: str,
     wg_port: int,
     openvpn_port: int,
@@ -6362,11 +6495,11 @@ def create_server_record(
     cursor = db.execute(
         """
         INSERT INTO vpn_servers (
-            server_name, host, port, username, password, domain, vpn_api_token,
+            server_name, host, port, username, password, ssh_private_key, domain, vpn_api_token,
             wg_port, openvpn_port, dns_port, status,
             created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             server_name,
@@ -6374,6 +6507,7 @@ def create_server_record(
             port,
             username,
             password,
+            (ssh_private_key or "").strip(),
             domain,
             vpn_api_token,
             wg_port,
@@ -6630,6 +6764,7 @@ def admin_onboarding_step_server():
     server_port = normalize_server_port(request.form.get("server_port", "22"), 22)
     server_username = request.form.get("server_username", "").strip()
     server_password = request.form.get("server_password", "")
+    server_private_key = request.form.get("server_private_key", "")
 
     save_onboarding_server_draft(
         db,
@@ -6638,6 +6773,7 @@ def admin_onboarding_step_server():
         server_port=server_port,
         server_username=server_username or "root",
         server_password=server_password,
+        server_private_key=server_private_key,
     )
 
     if action == "save_draft":
@@ -6645,9 +6781,13 @@ def admin_onboarding_step_server():
         flash("步骤 4 草稿已保存，可稍后继续。", "success")
         return redirect_admin_onboarding_modal(4)
 
-    if not server_host or not server_username or not server_password:
+    if (
+        not server_host
+        or not server_username
+        or (not server_password and not (server_private_key or "").strip())
+    ):
         db.commit()
-        message = "请填写服务器 IP/域名、账号、密码。"
+        message = "请填写服务器 IP/域名、账号，并提供密码或私钥。"
         if show_deploy_log_window:
             return render_onboarding_deploy_log_page(
                 success=False,
@@ -6663,6 +6803,7 @@ def admin_onboarding_step_server():
             server_port,
             server_username,
             server_password,
+            server_private_key,
         )
         db.commit()
         flash(message, "success" if ok else "error")
@@ -6686,6 +6827,7 @@ def admin_onboarding_step_server():
         server_port,
         server_username,
         server_password,
+        server_private_key,
     )
     if not ok:
         db.commit()
@@ -6712,6 +6854,7 @@ def admin_onboarding_step_server():
         port=server_port,
         username=server_username,
         password=server_password,
+        ssh_private_key=server_private_key,
         domain="",
         wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
         openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
@@ -6731,6 +6874,7 @@ def admin_onboarding_step_server():
         port=server_port,
         username=server_username,
         password=server_password,
+        private_key_text=server_private_key,
         wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
         openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
         dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
@@ -6767,6 +6911,7 @@ def admin_onboarding_step_server():
             server_port=server_port,
             server_username=server_username,
             server_password="",
+            server_private_key="",
         )
         db.commit()
         if show_deploy_log_window:
@@ -7092,8 +7237,11 @@ def admin_test_server_connection():
     port = normalize_server_port(payload.get("port", "22"), 22)
     username = (payload.get("username", "") or "").strip()
     password = payload.get("password", "") or ""
+    private_key_text = payload.get("private_key", "") or ""
 
-    ok, message = test_server_connectivity(host, port, username, password)
+    ok, message = test_server_connectivity(
+        host, port, username, password, private_key_text
+    )
     status_code = 200 if ok else 400
     return {"ok": ok, "message": message}, status_code
 
@@ -7108,6 +7256,7 @@ def admin_create_server():
     port = normalize_server_port(request.form.get("port", "22"), 22)
     username = (request.form.get("username", "") or "").strip()
     password = request.form.get("password", "") or ""
+    ssh_private_key = request.form.get("ssh_private_key", "") or ""
     preferred_domain = normalize_fqdn(request.form.get("domain", ""))
     wg_port = normalize_server_port(
         request.form.get("wg_port", str(SERVER_DEPLOY_DEFAULT_WG_PORT)),
@@ -7122,11 +7271,13 @@ def admin_create_server():
         SERVER_DEPLOY_DEFAULT_DNS_PORT,
     )
 
-    if not host or not username or not password:
-        flash("请完整填写服务器地址、账号和密码。", "error")
+    if not host or not username or (not password and not (ssh_private_key or "").strip()):
+        flash("请完整填写服务器地址、账号，并提供密码或私钥。", "error")
         return redirect(url_for("admin_servers"))
 
-    ok, test_message = test_server_connectivity(host, port, username, password)
+    ok, test_message = test_server_connectivity(
+        host, port, username, password, ssh_private_key
+    )
     if not ok:
         flash(f"服务器连接测试失败：{test_message}", "error")
         return redirect(url_for("admin_servers"))
@@ -7141,6 +7292,7 @@ def admin_create_server():
         port=port,
         username=username,
         password=password,
+        ssh_private_key=ssh_private_key,
         domain="",
         wg_port=wg_port,
         openvpn_port=openvpn_port,
@@ -7155,6 +7307,7 @@ def admin_create_server():
         port=port,
         username=username,
         password=password,
+        private_key_text=ssh_private_key,
         wg_port=wg_port,
         openvpn_port=openvpn_port,
         dns_port=dns_port,
@@ -7205,6 +7358,7 @@ def admin_test_saved_server(server_id: int):
         normalize_server_port(row["port"], 22),
         row["username"],
         row["password"],
+        row_get(row, "ssh_private_key", ""),
     )
     update_server_test_result(db, server_id, ok=ok, message=message)
     db.commit()
@@ -7258,6 +7412,7 @@ def admin_update_saved_server(server_id: int):
     port = normalize_server_port(request.form.get("port", "22"), 22)
     username = (request.form.get("username", "") or "").strip()
     password_raw = request.form.get("password", "") or ""
+    private_key_raw = request.form.get("ssh_private_key", "") or ""
     wg_port = normalize_server_port(
         request.form.get("wg_port", str(row_get(row, "wg_port", SERVER_DEPLOY_DEFAULT_WG_PORT))),
         SERVER_DEPLOY_DEFAULT_WG_PORT,
@@ -7285,6 +7440,11 @@ def admin_update_saved_server(server_id: int):
     old_domain = normalize_fqdn(row_get(row, "domain", ""))
     host_changed = host != old_host
     password_to_save = password_raw if password_raw else (row_get(row, "password", "") or "")
+    private_key_to_save = (
+        private_key_raw.strip()
+        if private_key_raw.strip()
+        else (row_get(row, "ssh_private_key", "") or "")
+    )
 
     db.execute(
         """
@@ -7294,6 +7454,7 @@ def admin_update_saved_server(server_id: int):
             port = ?,
             username = ?,
             password = ?,
+            ssh_private_key = ?,
             wg_port = ?,
             openvpn_port = ?,
             dns_port = ?,
@@ -7306,6 +7467,7 @@ def admin_update_saved_server(server_id: int):
             port,
             username,
             password_to_save,
+            private_key_to_save,
             wg_port,
             openvpn_port,
             dns_port,
@@ -7375,6 +7537,7 @@ def admin_deploy_saved_server(server_id: int):
         port=normalize_server_port(row["port"], 22),
         username=row["username"],
         password=row["password"],
+        private_key_text=row_get(row, "ssh_private_key", ""),
         wg_port=normalize_server_port(row_get(row, "wg_port"), SERVER_DEPLOY_DEFAULT_WG_PORT),
         openvpn_port=normalize_server_port(
             row_get(row, "openvpn_port"), SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
@@ -8709,6 +8872,7 @@ def admin_delete_user(user_id: int):
         if qr_path:
             Path(qr_path).unlink(missing_ok=True)
 
+        db.execute("DELETE FROM payment_orders WHERE user_id = ?", (user_id,))
         db.execute("DELETE FROM email_verifications WHERE email = ?", (user["email"],))
         db.execute("DELETE FROM users WHERE id = ? AND role = 'user'", (user_id,))
         db.commit()
@@ -8776,6 +8940,94 @@ def admin_disable_user(user_id: int):
             pass
         flash(f"停用用户失败：{exc}", "error")
     return redirect_admin_subscriptions()
+
+
+@app.route("/admin/users/<int:user_id>/reset-password", methods=["POST"])
+@login_required
+@admin_required
+def admin_reset_user_password(user_id: int):
+    new_password = (request.form.get("new_password", "") or "").strip()
+    if len(new_password) < 8:
+        flash("新密码长度至少需要 8 位。", "error")
+        return redirect_admin_subscriptions()
+
+    db = get_db()
+    user = db.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE id = ? AND role = 'user'
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    if not user:
+        flash("用户不存在。", "error")
+        return redirect_admin_subscriptions()
+
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        latest_user = db.execute(
+            "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if not latest_user:
+            db.rollback()
+            flash("用户不存在。", "error")
+            return redirect_admin_subscriptions()
+        apply_password_change(
+            db,
+            latest_user,
+            new_password=new_password,
+            clear_force_change=False,
+            rotate_vpn=True,
+        )
+        db.commit()
+        flash(f"已重置用户 {latest_user['username']} 的密码，并断开其旧 VPN 会话。", "success")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        flash(f"重置用户密码失败：{exc}", "error")
+    return redirect_admin_subscriptions()
+
+
+@app.route("/admin/orders/<int:order_id>/cancel", methods=["POST"])
+@login_required
+@admin_required
+def admin_cancel_pending_order(order_id: int):
+    db = get_db()
+    order = db.execute(
+        """
+        SELECT id, status, note
+        FROM payment_orders
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (order_id,),
+    ).fetchone()
+    if not order:
+        flash("未找到订单。", "error")
+        return redirect(url_for("admin_pending_orders"))
+    if (order["status"] or "").strip().lower() != "pending":
+        flash("仅待处理订单可取消。", "error")
+        return redirect(url_for("admin_pending_orders"))
+
+    cancel_note = f"[管理员取消] {utcnow_iso()}"
+    merged_note = cancel_note if not order["note"] else f"{order['note']}\n{cancel_note}"
+    db.execute(
+        """
+        UPDATE payment_orders
+        SET status = 'cancelled',
+            note = ?
+        WHERE id = ?
+        """,
+        (merged_note, order_id),
+    )
+    db.commit()
+    flash(f"订单 {order_id} 已取消。", "success")
+    return redirect(url_for("admin_pending_orders"))
 
 
 @app.route("/admin/orders/<int:order_id>/mark-paid", methods=["POST"])

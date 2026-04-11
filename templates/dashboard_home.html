@@ -7,6 +7,7 @@
       <div class="alert alert-error">{{ node_alert_text }}</div>
     {% endif %}
     <p><strong>账号：</strong>{{ user["username"] }}</p>
+    <p><strong>当前套餐：</strong>{{ current_plan_display }}</p>
     <p><strong>分配 IP：</strong>{{ assigned_ip_display }}</p>
     <p>
       <strong>订阅状态：</strong>
@@ -17,6 +18,7 @@
       {% endif %}
     </p>
     <p><strong>有效期至：</strong>{{ subscription_expiry_display }} ｜ <strong>流量剩余：</strong>{{ traffic_stats["remaining_display"] }}</p>
+    <p><strong>权益信息：</strong>{{ benefit_summary }}</p>
 
     <div class="stats-grid">
       <div class="stat-item">

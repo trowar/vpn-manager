@@ -266,8 +266,11 @@
           <label>登录账号
             <input type="text" name="server_username" value="{{ onboarding_server_draft['server_username'] }}" required>
           </label>
-          <label>登录密码
-            <input type="password" name="server_password" value="{{ onboarding_server_draft['server_password'] }}" required>
+          <label>登录密码（可选）
+            <input type="password" name="server_password" value="{{ onboarding_server_draft['server_password'] }}" placeholder="可留空，使用私钥登录">
+          </label>
+          <label>SSH 私钥（可选）
+            <textarea name="server_private_key" rows="6" placeholder="粘贴私钥内容（-----BEGIN ... PRIVATE KEY-----）">{{ onboarding_server_draft['server_private_key'] }}</textarea>
           </label>
           <div class="actions">
             <button type="submit" name="action" value="test_server" class="btn secondary" id="onboarding-test-server-btn">测试连接</button>

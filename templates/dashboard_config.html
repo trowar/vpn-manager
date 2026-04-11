@@ -7,27 +7,47 @@
       <div class="alert alert-error">{{ node_alert_text }}</div>
     {% endif %}
 
-    {% if active %}
-      <div class="actions">
-        <a class="btn" href="{{ url_for('download_config', mode='global') }}">下载 WireGuard 配置（全局代理）</a>
-        <a class="btn secondary" href="{{ url_for('download_openvpn_config', mode='global') }}">下载 OpenVPN 配置（全局代理）</a>
+    <div class="feature-grid guide-grid">
+      <div class="feature-item">
+        <h4>WireGuard</h4>
+        <p>速度快，支持二维码导入，配置统一为全局代理模式。</p>
+        <div class="actions">
+          {% if active %}
+            <a class="btn" href="{{ url_for('download_config', mode='global') }}">下载 WireGuard 配置</a>
+          {% else %}
+            <button type="button" disabled>下载 WireGuard 配置（未生效）</button>
+          {% endif %}
+          <a class="btn secondary" href="{{ url_for('wireguard_download_auto') }}">一键下载客户端</a>
+          <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部下载入口</a>
+        </div>
+        {% if active %}
+          <div class="payment-qr-wrap payment-qr-wrap-inline">
+            <img src="{{ url_for('download_qr', mode='global') }}" alt="WireGuard 全局代理二维码" loading="eager">
+          </div>
+          <p class="helper">二维码为 WireGuard 全局代理配置，手机端可直接扫码导入。</p>
+        {% endif %}
       </div>
-      <div class="payment-qr-wrap">
-        <img src="{{ url_for('download_qr', mode='global') }}" alt="WireGuard 全局代理二维码" loading="eager">
+
+      <div class="feature-item">
+        <h4>OpenVPN</h4>
+        {% if openvpn_enabled %}
+          <p>兼容性广，使用 `.ovpn` 全局代理配置导入。</p>
+          <div class="actions">
+            {% if active %}
+              <a class="btn" href="{{ url_for('download_openvpn_config', mode='global') }}">下载 OpenVPN 配置</a>
+            {% else %}
+              <button type="button" disabled>下载 OpenVPN 配置（未生效）</button>
+            {% endif %}
+            <a class="btn secondary" href="{{ url_for('openvpn_download_auto') }}">一键下载客户端</a>
+            <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">全部下载入口</a>
+          </div>
+        {% else %}
+          <p>当前系统未启用 OpenVPN 协议。</p>
+          <div class="actions">
+            <button type="button" disabled>OpenVPN 未启用</button>
+          </div>
+        {% endif %}
       </div>
-      <p class="helper">二维码为 WireGuard 全局代理配置，手机端可直接扫码导入。</p>
-    {% else %}
-      <p class="helper">当前账号未生效，配置文件下载已停用。你仍可先安装客户端，待套餐生效后再下载配置。</p>
-    {% endif %}
-
-    <hr class="section-divider">
-
-    <h4>客户端下载</h4>
-    <div class="actions">
-      <a class="btn secondary" href="{{ url_for('wireguard_download_auto') }}">一键下载 WireGuard 客户端</a>
-      <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部 WireGuard 下载入口</a>
-      <a class="btn secondary" href="{{ url_for('openvpn_download_auto') }}">一键下载 OpenVPN 客户端</a>
-      <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">全部 OpenVPN 下载入口</a>
     </div>
 
     <hr class="section-divider">
