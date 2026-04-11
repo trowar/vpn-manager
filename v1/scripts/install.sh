@@ -52,10 +52,11 @@ retry_cmd() {
 
   local attempt=1
   while true; do
-    if "$@"; then
+    "$@"
+    local code=$?
+    if [ "$code" -eq 0 ]; then
       return 0
     fi
-    local code=$?
     if [ "$attempt" -ge "$retries" ]; then
       err "命令失败，已重试 ${attempt} 次 (exit=${code}): $*"
       return "$code"
@@ -109,13 +110,15 @@ install_docker() {
     log "Docker already installed"
   elif has_cmd apt-get; then
     log "Installing docker via apt"
-    if ! retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y docker.io docker-compose-plugin; then
-      retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y docker.io docker-compose
+    retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y docker.io
+    if ! retry_cmd 2 5 apt_cmd install -y docker-compose-plugin; then
+      retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y docker-compose
     fi
   elif has_cmd yum; then
     log "Installing docker via yum"
-    if ! retry_cmd 3 5 yum install -y docker docker-compose-plugin; then
-      retry_cmd 3 5 yum install -y docker docker-compose
+    retry_cmd 3 5 yum install -y docker
+    if ! retry_cmd 2 5 yum install -y docker-compose-plugin; then
+      retry_cmd 3 5 yum install -y docker-compose
     fi
   else
     err "Cannot install docker: unsupported package manager."
