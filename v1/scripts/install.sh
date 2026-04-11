@@ -5,6 +5,7 @@ APP_DIR="/opt/vpn-platform-v1"
 REPO_URL="https://github.com/trowar/vpn-manager.git"
 WEB_PUBLIC_PORT="${WEB_PUBLIC_PORT:-8080}"
 ENV_FILE=".env"
+LEGACY_SERVICE_NAME="vpn-platform-v1"
 
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-600}"
 APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
@@ -145,6 +146,24 @@ setup_repo() {
   fi
 }
 
+disable_legacy_service_if_needed() {
+  if ! has_cmd systemctl; then
+    return
+  fi
+  if ! systemctl list-unit-files | grep -q "^${LEGACY_SERVICE_NAME}\\.service"; then
+    return
+  fi
+
+  if systemctl is-active --quiet "${LEGACY_SERVICE_NAME}"; then
+    log "Stopping legacy service: ${LEGACY_SERVICE_NAME}"
+    systemctl stop "${LEGACY_SERVICE_NAME}" || true
+  fi
+  if systemctl is-enabled --quiet "${LEGACY_SERVICE_NAME}" 2>/dev/null; then
+    log "Disabling legacy service: ${LEGACY_SERVICE_NAME}"
+    systemctl disable "${LEGACY_SERVICE_NAME}" || true
+  fi
+}
+
 generate_secret() {
   if has_cmd openssl; then
     openssl rand -hex 24
@@ -221,6 +240,7 @@ main() {
   install_base_deps
   install_docker
   setup_repo
+  disable_legacy_service_if_needed
   prepare_env
   start_web
   print_summary
