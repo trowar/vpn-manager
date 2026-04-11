@@ -70,15 +70,25 @@ apt_cmd() {
   apt-get \
     -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" \
     -o Acquire::Retries=3 \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
     "$@"
+}
+
+repair_apt_state() {
+  log "Repairing dpkg/apt state"
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+  retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd -f install -y || true
 }
 
 install_base_deps() {
   if has_cmd apt-get; then
     log "Detected apt environment"
+    repair_apt_state
     retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd update
     retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y \
       ca-certificates curl gnupg lsb-release git wget openssl
+    repair_apt_state
     return
   fi
 
