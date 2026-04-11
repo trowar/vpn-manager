@@ -7258,14 +7258,8 @@ def admin_create_server():
     username = (request.form.get("username", "") or "").strip()
     password = request.form.get("password", "") or ""
     ssh_private_key = request.form.get("ssh_private_key", "") or ""
-    wg_port = normalize_server_port(
-        request.form.get("wg_port", str(SERVER_DEPLOY_DEFAULT_WG_PORT)),
-        SERVER_DEPLOY_DEFAULT_WG_PORT,
-    )
-    openvpn_port = normalize_server_port(
-        request.form.get("openvpn_port", str(SERVER_DEPLOY_DEFAULT_OPENVPN_PORT)),
-        SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
-    )
+    wg_port = SERVER_DEPLOY_DEFAULT_WG_PORT
+    openvpn_port = SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
     dns_port = normalize_server_port(
         request.form.get("dns_port", str(SERVER_DEPLOY_DEFAULT_DNS_PORT)),
         SERVER_DEPLOY_DEFAULT_DNS_PORT,
@@ -7400,17 +7394,8 @@ def admin_update_saved_server(server_id: int):
     username = (request.form.get("username", "") or "").strip()
     password_raw = request.form.get("password", "") or ""
     private_key_raw = request.form.get("ssh_private_key", "") or ""
-    wg_port = normalize_server_port(
-        request.form.get("wg_port", str(row_get(row, "wg_port", SERVER_DEPLOY_DEFAULT_WG_PORT))),
-        SERVER_DEPLOY_DEFAULT_WG_PORT,
-    )
-    openvpn_port = normalize_server_port(
-        request.form.get(
-            "openvpn_port",
-            str(row_get(row, "openvpn_port", SERVER_DEPLOY_DEFAULT_OPENVPN_PORT)),
-        ),
-        SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
-    )
+    wg_port = SERVER_DEPLOY_DEFAULT_WG_PORT
+    openvpn_port = SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
     dns_port = normalize_server_port(
         request.form.get("dns_port", str(row_get(row, "dns_port", SERVER_DEPLOY_DEFAULT_DNS_PORT))),
         SERVER_DEPLOY_DEFAULT_DNS_PORT,
@@ -7502,10 +7487,8 @@ def admin_deploy_saved_server(server_id: int):
         username=row["username"],
         password=row["password"],
         private_key_text=row_get(row, "ssh_private_key", ""),
-        wg_port=normalize_server_port(row_get(row, "wg_port"), SERVER_DEPLOY_DEFAULT_WG_PORT),
-        openvpn_port=normalize_server_port(
-            row_get(row, "openvpn_port"), SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
-        ),
+        wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+        openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
         dns_port=normalize_server_port(row_get(row, "dns_port"), SERVER_DEPLOY_DEFAULT_DNS_PORT),
         vpn_api_token=row_get(row, "vpn_api_token", ""),
     )
