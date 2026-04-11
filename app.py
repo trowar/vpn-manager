@@ -4712,6 +4712,58 @@ def ensure_admin_self_vpn_ready(
     return db.execute("SELECT * FROM users WHERE id = ?", (admin_user["id"],)).fetchone()
 
 
+def admin_self_vpn_needs_prepare(admin_user: sqlite3.Row | None) -> bool:
+    if not admin_user or row_get(admin_user, "role") != "admin":
+        return True
+    return not all(
+        [
+            int(row_get(admin_user, "wg_enabled", 0) or 0) == 1,
+            (row_get(admin_user, "assigned_ip", "") or "").strip(),
+            (row_get(admin_user, "client_private_key", "") or "").strip(),
+            (row_get(admin_user, "client_public_key", "") or "").strip(),
+            (row_get(admin_user, "client_psk", "") or "").strip(),
+        ]
+    )
+
+
+def enforce_admin_unlimited_entitlement(db: sqlite3.Connection, admin_user_id: int) -> None:
+    db.execute(
+        """
+        UPDATE users
+        SET subscription_expires_at = NULL,
+            traffic_quota_bytes = 0,
+            traffic_used_bytes = 0,
+            traffic_last_total_bytes = 0,
+            wg_enabled = 1
+        WHERE id = ? AND role = 'admin'
+        """,
+        (int(admin_user_id),),
+    )
+
+
+def ensure_admin_self_vpn_profile(
+    db: sqlite3.Connection,
+    admin_user: sqlite3.Row,
+    *,
+    force_prepare: bool = False,
+) -> tuple[sqlite3.Row, bool]:
+    if row_get(admin_user, "role") != "admin":
+        raise ValueError("仅管理员可使用自用 VPN 配置。")
+
+    prepared_now = False
+    refreshed = admin_user
+    if force_prepare or admin_self_vpn_needs_prepare(admin_user):
+        refreshed = ensure_admin_self_vpn_ready(db, admin_user)
+        prepared_now = True
+
+    enforce_admin_unlimited_entitlement(db, int(refreshed["id"]))
+    db.commit()
+    latest = db.execute("SELECT * FROM users WHERE id = ?", (refreshed["id"],)).fetchone()
+    if not latest:
+        raise RuntimeError("管理员账号不存在。")
+    return latest, prepared_now
+
+
 def calculate_new_expiry(current_expire_iso: str | None, months: int) -> str:
     now = utcnow()
     current_expire = parse_iso(current_expire_iso)
@@ -7673,6 +7725,27 @@ def admin_home():
     db = get_db()
     reconcile_expired_subscriptions(db)
     system_settings = load_system_settings(db)
+    admin_row = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    admin_vpn_ready = False
+    admin_vpn_status_text = "未生成"
+    admin_vpn_error = ""
+    if admin_row:
+        try:
+            admin_row, prepared_now = ensure_admin_self_vpn_profile(db, admin_row)
+            # Validate default global conf can be rendered.
+            build_user_wireguard_config(admin_row, profile_mode=WG_PROFILE_GLOBAL)
+            admin_vpn_ready = True
+            admin_vpn_status_text = (
+                "已自动生成（无限期）" if prepared_now else "已就绪（无限期）"
+            )
+        except Exception as exc:
+            admin_vpn_ready = False
+            admin_vpn_status_text = "未生成"
+            admin_vpn_error = str(exc)
+
     pending_count = db.execute(
         "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'pending'"
     ).fetchone()["cnt"]
@@ -7716,6 +7789,9 @@ def admin_home():
         "admin_home.html",
         pending_count=pending_count,
         total_users=total_users,
+        admin_vpn_ready=admin_vpn_ready,
+        admin_vpn_status_text=admin_vpn_status_text,
+        admin_vpn_error=admin_vpn_error,
         abnormal_server_count=server_overview["abnormal"],
         abnormal_servers=abnormal_servers[:8],
         expiring_subscriptions=expiring_subscriptions[:8],
@@ -9215,7 +9291,7 @@ def admin_download_config():
 
     requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
     try:
-        admin = ensure_admin_self_vpn_ready(db, admin)
+        admin, _ = ensure_admin_self_vpn_profile(db, admin)
         config_text, normalized_mode = build_user_wireguard_config(
             admin,
             profile_mode=requested_mode,
@@ -9282,7 +9358,7 @@ def admin_download_openvpn_config():
     requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
     normalized_mode = normalize_wg_profile_mode(requested_mode)
     try:
-        admin = ensure_admin_self_vpn_ready(db, admin)
+        admin, _ = ensure_admin_self_vpn_profile(db, admin)
         config_text = build_openvpn_client_config(
             admin["username"],
             profile_mode=normalized_mode,
@@ -9313,7 +9389,7 @@ def admin_download_qr():
         return redirect(url_for("admin_home"))
 
     try:
-        admin = ensure_admin_self_vpn_ready(db, admin)
+        admin, _ = ensure_admin_self_vpn_profile(db, admin)
         config_text, _ = build_user_wireguard_config(
             admin,
             profile_mode=requested_mode,

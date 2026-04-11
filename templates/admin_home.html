@@ -27,6 +27,33 @@
   </div>
 </section>
 
+<section class="card">
+  <h3>管理员自用 VPN 配置</h3>
+  <p class="helper">系统默认维护管理员无限期权限（有效期永久 + 流量永久），并提供 WireGuard 全局配置下载。</p>
+  {% if admin_vpn_ready %}
+    <p><span class="tag tag-ok">{{ admin_vpn_status_text }}</span></p>
+  {% else %}
+    <p><span class="tag tag-warn">{{ admin_vpn_status_text }}</span></p>
+    {% if admin_vpn_error %}
+      <p class="helper">原因：{{ admin_vpn_error }}</p>
+    {% endif %}
+  {% endif %}
+  <div class="actions">
+    {% if admin_vpn_ready %}
+      <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载管理员 WireGuard 配置（全局）</a>
+      {% if openvpn_enabled %}
+        <a class="btn secondary" href="{{ url_for('admin_download_openvpn_config', mode='global') }}">下载管理员 OpenVPN 配置</a>
+      {% endif %}
+      <a class="btn secondary" href="{{ url_for('admin_download_qr', mode='global') }}" target="_blank" rel="noopener">查看 WireGuard 二维码</a>
+    {% else %}
+      <button type="button" disabled>管理员 WireGuard 配置未就绪</button>
+      {% if openvpn_enabled %}
+        <button type="button" class="secondary" disabled>管理员 OpenVPN 配置未就绪</button>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>
+
 <section class="card" id="node-status">
   <h3>异常节点</h3>
   {% if abnormal_servers %}
