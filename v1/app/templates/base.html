@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VPN Platform V1</title>
+  <style>
+    body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: #f5f7fb; color: #1b2430; }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: 220px 1fr; }
+    .shell.guest { grid-template-columns: 1fr; }
+    .sidebar { background: #0c1730; color: #fff; padding: 16px; }
+    .sidebar h2 { margin: 0 0 12px; font-size: 20px; }
+    .sidebar a { display: block; color: #d5ddf0; text-decoration: none; padding: 8px 10px; border: 1px solid #223559; border-radius: 8px; margin-bottom: 8px; }
+    .sidebar a:hover { background: #1a2b4b; }
+    .main { padding: 20px; }
+    .card { background: #fff; border: 1px solid #d7deea; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+    .flash { margin-bottom: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid #d7deea; }
+    .flash.success { background: #ecfdf5; color: #065f46; }
+    .flash.error { background: #fef2f2; color: #991b1b; }
+    input, button { padding: 10px 12px; border-radius: 8px; border: 1px solid #c7d1e2; font: inherit; }
+    button { cursor: pointer; background: #0f766e; color: #fff; border-color: #0f766e; }
+    form { display: grid; gap: 10px; max-width: 420px; }
+  </style>
+</head>
+<body>
+  <div class="shell {% if not user %}guest{% endif %}">
+    {% if user %}
+      <aside class="sidebar">
+        <h2>VPN 平台 V1</h2>
+        <p>当前账号：{{ user["email"] }}</p>
+        {% if user["role"] == "admin" %}
+          <a href="{{ url_for('main.admin_dashboard') }}">管理员首页</a>
+          <a href="{{ url_for('main.admin_change_password') }}">修改密码</a>
+        {% else %}
+          <a href="{{ url_for('main.user_dashboard') }}">用户首页</a>
+        {% endif %}
+        <a href="{{ url_for('main.logout') }}">退出登录</a>
+      </aside>
+    {% endif %}
+    <main class="main">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>
+

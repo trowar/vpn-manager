@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>分布式 VPN 平台 V1</h1>
+  <p>已按 PRD 启动全新开发。当前为起步骨架版本。</p>
+  {% if user %}
+    {% if user["role"] == "admin" %}
+      <a href="{{ url_for('main.admin_dashboard') }}">进入管理员后台</a>
+    {% else %}
+      <a href="{{ url_for('main.user_dashboard') }}">进入用户中心</a>
+    {% endif %}
+  {% else %}
+    <a href="{{ url_for('main.login') }}">登录</a>
+  {% endif %}
+</section>
+{% endblock %}
+

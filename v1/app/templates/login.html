@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>登录</h1>
+  <p>V1 起步阶段：当前仅管理员与基础登录可用。</p>
+  <form method="post">
+    <label>邮箱/账号</label>
+    <input name="email" required>
+    <label>密码</label>
+    <input type="password" name="password" required>
+    <button type="submit">登录</button>
+  </form>
+</section>
+{% endblock %}
+
