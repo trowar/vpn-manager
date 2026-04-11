@@ -1385,6 +1385,57 @@ def normalize_deploy_log_text(raw: str) -> str:
     return "\n".join(normalized_lines).strip()
 
 
+def build_structured_deploy_log(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    started_at: datetime,
+    ended_at: datetime,
+    script_text: str,
+    script_executed: bool,
+    exit_code: int | None = None,
+    stdout_text: str = "",
+    stderr_text: str = "",
+    error_text: str = "",
+) -> str:
+    started = started_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    ended = ended_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    host_display = f"{normalize_remote_host(host)}:{normalize_server_port(port, 22)}"
+    user_display = (username or "").strip() or "root"
+    script_line_count = max(1, len((script_text or "").splitlines()))
+    out_clean = normalize_deploy_log_text(stdout_text)
+    err_clean = normalize_deploy_log_text(stderr_text)
+    exc_clean = normalize_deploy_log_text(error_text)
+    lines: list[str] = [
+        "[deploy] 任务信息",
+        f"开始时间: {started}",
+        f"结束时间: {ended}",
+        f"目标主机: {host_display}",
+        f"SSH用户: {user_display}",
+        "远程命令: bash -s (stdin install script)",
+        f"脚本行数: {script_line_count}",
+        "脚本步骤: 升级系统并安装依赖 -> 拉取 GitHub 仓库 -> Docker Compose 启动 vpnmanager-server",
+        f"脚本是否执行: {'是' if script_executed else '否'}",
+        f"退出码: {exit_code if exit_code is not None else '-'}",
+        "",
+        "[deploy] stdout",
+        out_clean if out_clean else "(empty)",
+        "",
+        "[deploy] stderr",
+        err_clean if err_clean else "(empty)",
+    ]
+    if exc_clean:
+        lines.extend(
+            [
+                "",
+                "[deploy] 异常",
+                exc_clean,
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
 def clip_text(raw: str, limit: int = 200000) -> str:
     text = (raw or "").strip()
     if len(text) <= limit:
@@ -3021,6 +3072,9 @@ def deploy_vpn_node_server(
     if not safe_token:
         safe_token = hashlib.sha256(os.urandom(32)).hexdigest()[:48]
 
+    normalized_host = normalize_remote_host(host)
+    normalized_port = normalize_server_port(port, 22)
+    normalized_user = (username or "").strip()
     script = build_vpn_node_deploy_script(
         vpn_api_token=safe_token,
         wg_port=normalize_server_port(wg_port, SERVER_DEPLOY_DEFAULT_WG_PORT),
@@ -3031,11 +3085,12 @@ def deploy_vpn_node_server(
     )
 
     client: paramiko.SSHClient | None = None
+    started_at = datetime.now(timezone.utc)
     try:
         client = open_ssh_client(
-            normalize_remote_host(host),
-            normalize_server_port(port, 22),
-            (username or "").strip(),
+            normalized_host,
+            normalized_port,
+            normalized_user,
             password,
             private_key_text=private_key_text,
             timeout=12,
@@ -3051,12 +3106,41 @@ def deploy_vpn_node_server(
         merged = summarize_text(merged_raw, 1200)
         if not merged:
             merged = "部署脚本执行完成，但未返回可读日志。"
+        structured_log = build_structured_deploy_log(
+            host=normalized_host,
+            port=normalized_port,
+            username=normalized_user,
+            started_at=started_at,
+            ended_at=datetime.now(timezone.utc),
+            script_text=script,
+            script_executed=True,
+            exit_code=code,
+            stdout_text=out,
+            stderr_text=err,
+        )
+        if not merged_log:
+            merged_log = structured_log
+        else:
+            merged_log = f"{structured_log}\n\n[deploy] 汇总\n{merged_log}"
         if code == 0:
             return True, f"部署成功。{merged}", safe_token, merged_log
         return False, f"部署失败（exit={code}）。{merged}", safe_token, merged_log
     except Exception as exc:
         error_text = f"部署异常：{exc}"
-        return False, error_text, safe_token, error_text
+        structured_log = build_structured_deploy_log(
+            host=normalized_host,
+            port=normalized_port,
+            username=normalized_user,
+            started_at=started_at,
+            ended_at=datetime.now(timezone.utc),
+            script_text=script,
+            script_executed=False,
+            exit_code=None,
+            stdout_text="",
+            stderr_text="",
+            error_text=error_text,
+        )
+        return False, error_text, safe_token, structured_log
     finally:
         if client:
             client.close()
@@ -6573,7 +6657,11 @@ def update_server_deploy_result(
     vpn_api_token: str | None = None,
     deploy_log: str | None = None,
 ) -> None:
-    normalized_deploy_log = clip_text(deploy_log or "")
+    normalized_deploy_log = clip_text(normalize_deploy_log_text(deploy_log or ""))
+    if not normalized_deploy_log:
+        normalized_deploy_log = clip_text(
+            normalize_deploy_log_text(message or "部署任务结束，但未生成日志。")
+        )
     params: list[object] = [
         status,
         utcnow_iso(),
@@ -6607,6 +6695,15 @@ def mark_server_deploying(
 ) -> None:
     now_iso = utcnow_iso()
     short_message = summarize_text(message, 1200)
+    deploying_log = "\n".join(
+        [
+            "[deploy] 任务信息",
+            f"开始时间: {now_iso}",
+            "状态: deploying",
+            "脚本是否执行: 等待执行",
+            "说明: 后台正在通过 SSH 执行安装脚本，请稍后刷新部署日志。",
+        ]
+    ).strip()
     db.execute(
         """
         UPDATE vpn_servers
@@ -6621,7 +6718,7 @@ def mark_server_deploying(
         (
             now_iso,
             short_message,
-            clip_text(message),
+            clip_text(deploying_log),
             now_iso,
             server_id,
         ),
