@@ -7514,7 +7514,15 @@ def admin_server_deploy_log(server_id: int):
     db = get_db()
     row = db.execute(
         """
-        SELECT id, server_name, status, last_deploy_at, last_deploy_message, last_deploy_log
+        SELECT
+            id,
+            server_name,
+            status,
+            last_test_at,
+            last_test_message,
+            last_deploy_at,
+            last_deploy_message,
+            last_deploy_log
         FROM vpn_servers
         WHERE id = ?
         LIMIT 1
@@ -7537,7 +7545,16 @@ def admin_server_deploy_log(server_id: int):
         "ok": True,
         "server_id": int(row["id"]),
         "server_name": (row["server_name"] or "").strip(),
+        "last_test_at": row_get(row, "last_test_at", "") or "",
+        "last_test_message": summarize_text(
+            normalize_deploy_log_text(row_get(row, "last_test_message", "") or "") or "-",
+            800,
+        ),
         "last_deploy_at": row["last_deploy_at"] or "",
+        "last_deploy_message": summarize_text(
+            normalize_deploy_log_text(row_get(row, "last_deploy_message", "") or "") or "-",
+            800,
+        ),
         "deploy_log": deploy_log,
     }, 200
 

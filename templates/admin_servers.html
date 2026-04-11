@@ -18,8 +18,6 @@
           <th>地址</th>
           <th>账号</th>
           <th>状态</th>
-          <th>最近测试</th>
-          <th>最近部署</th>
           <th>操作</th>
         </tr>
       </thead>
@@ -41,8 +39,6 @@
                 <span class="tag tag-warn">{{ s["status"] }}</span>
               {% endif %}
             </td>
-            <td class="server-log-snippet">{{ (s["last_test_at"]|fmt_utc) ~ " | " ~ (s["last_test_message"] or "-") }}</td>
-            <td class="server-log-snippet">{{ (s["last_deploy_at"]|fmt_utc) ~ " | " ~ (s["last_deploy_message"] or "-") }}</td>
             <td class="server-actions-cell">
               <div class="subscription-actions">
                 <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
@@ -174,7 +170,7 @@
       <h4 id="server-log-title">部署日志</h4>
       <button type="button" class="btn secondary modal-close-x" id="close-server-log-modal">×</button>
     </div>
-    <p class="helper" id="server-log-meta">加载中...</p>
+    <p class="helper" id="server-log-meta" style="white-space: pre-line;">加载中...</p>
     <pre id="server-log-content" style="max-height:460px; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#0f172a; color:#e5e7eb; padding:12px; border-radius:8px;">加载中...</pre>
   </div>
 </div>
@@ -356,12 +352,21 @@
             return;
           }
           if (logMeta) {
-            var ts = data.last_deploy_at || "-";
-            logMeta.textContent = "最近部署时间： " + ts;
+            var testAt = data.last_test_at || "-";
+            var testMsg = data.last_test_message || "-";
+            var deployAt = data.last_deploy_at || "-";
+            var deployMsg = data.last_deploy_message || "-";
+            logMeta.textContent =
+              "最近测试： " + testAt + " | " + testMsg + "\n" +
+              "最近部署： " + deployAt + " | " + deployMsg;
           }
           if (logContent) {
             var deployLogText = normalizeDeployLogText(data.deploy_log || "");
-            logContent.textContent = deployLogText || "部署任务已创建，日志暂未写入，请稍后刷新。";
+            var infoBlock =
+              "[历史记录]\\n" +
+              "最近测试： " + (data.last_test_at || "-") + " | " + (data.last_test_message || "-") + "\\n" +
+              "最近部署： " + (data.last_deploy_at || "-") + " | " + (data.last_deploy_message || "-");
+            logContent.textContent = infoBlock + "\\n\\n" + (deployLogText || "部署任务已创建，日志暂未写入，请稍后刷新。");
             logContent.scrollTop = logContent.scrollHeight;
           }
         } catch (err) {

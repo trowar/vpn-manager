@@ -10,6 +10,32 @@ wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/i
 curl -fsSL https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/install.sh | bash
 ```
 
+## 手动部署 VPN 服务端（排障优先）
+
+如果 Web 后台“服务器管理 -> 部署”失败，可以先在目标 VPN 服务器手动执行：
+
+```bash
+wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/scripts/manual_deploy_vpn_node.sh | bash
+```
+
+或：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trowar/vpn-manager/main/scripts/manual_deploy_vpn_node.sh | bash
+```
+
+可选参数示例（不传则使用默认端口：WG 51820 / OVPN 1194 / DNS 53）：
+
+```bash
+VPN_API_TOKEN=your_token WG_PUBLIC_PORT=51820 OPENVPN_PUBLIC_PORT=1194 DNS_PUBLIC_PORT=53 bash /path/manual_deploy_vpn_node.sh
+```
+
+建议把执行日志保存下来，便于排障：
+
+```bash
+wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/scripts/manual_deploy_vpn_node.sh | bash | tee /root/vpn-node-manual-deploy.log
+```
+
 安装完成后会启动 Web 控制端服务，并打印访问地址与默认管理员账号密码（`admin / admin`，首次登录需改密）。
 
 本项目已拆分为两个主要容器服务：
@@ -35,7 +61,8 @@ curl -fsSL https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/
 ## 服务器管理
 
 - 管理端新增左侧导航：`服务器管理`
-- 页面按行展示所有已接入服务器（状态、最近测试、最近部署）
+- 页面按行展示所有已接入服务器（基础信息、状态、操作）
+- “最近测试 / 最近部署”统一放到“部署日志”弹窗顶部和日志正文展示
 - 右上角“新增服务器”弹窗支持：
   - 输入 IP/域名、SSH 端口、账号、密码
   - 一键测试连通
