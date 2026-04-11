@@ -17,20 +17,12 @@
 
       <nav class="site-nav">
         {% if current_user["role"] == "admin" %}
-          {% if not admin_setup_completed %}
-            <a class="site-nav-link {% if admin_page == 'onboarding' or (admin_page == 'home' and not admin_setup_completed) %}active{% endif %}" href="{{ url_for('admin_home', onboarding_open='1') }}">继续初始化</a>
-          {% endif %}
-          <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">首页</a>
-          <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_home') }}#system-settings">系统设置</a>
-          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器管理</a>
-          <a class="site-nav-link {% if admin_page == 'cloudflare_accounts' %}active{% endif %}" href="{{ url_for('admin_cloudflare_accounts') }}">Cloudflare账号</a>
-          <a class="site-nav-link {% if admin_page == 'domains' %}active{% endif %}" href="{{ url_for('admin_domains') }}">域名管理</a>
-          <a class="site-nav-link {% if admin_page == 'payment_methods' %}active{% endif %}" href="{{ url_for('admin_payment_methods') }}">付款方式</a>
-          <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐管理</a>
-          <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">待处理订单</a>
-          <a class="site-nav-link {% if admin_page == 'paid_orders' %}active{% endif %}" href="{{ url_for('admin_paid_orders') }}">已支付订单</a>
-          <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户订阅</a>
-          <a class="site-nav-link {% if admin_page == 'change_password' %}active{% endif %}" href="{{ url_for('admin_change_password') }}">修改密码</a>
+          <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">仪表盘</a>
+          <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">订单</a>
+          <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户</a>
+          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器</a>
+          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}#node-status">节点</a>
+          <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_home') }}#system-settings">设置</a>
         {% else %}
           <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
           <a class="site-nav-link {% if dashboard_page == 'plans' %}active{% endif %}" href="{{ url_for('dashboard_plans') }}">套餐</a>

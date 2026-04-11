@@ -193,6 +193,15 @@ SERVER_DEPLOY_DEFAULT_WG_PORT = 51820
 SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 1194
 SERVER_DEPLOY_DEFAULT_DNS_PORT = 53
 SERVER_DEPLOY_DEFAULT_VPN_API_PORT = 8081
+PRD_BLOCKED_ADMIN_ENDPOINT_MARKERS = ("onboarding", "cloudflare", "payment_method")
+PRD_BLOCKED_ADMIN_ENDPOINTS = {
+    "admin_domains",
+    "admin_create_domain",
+    "admin_update_domain",
+    "admin_toggle_domain",
+    "admin_delete_domain",
+    "admin_paid_orders",
+}
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("PORTAL_SECRET_KEY", "change-this-secret")
@@ -3776,7 +3785,6 @@ def user_api_payload(user) -> dict:
 def inject_user():
     db = get_db()
     payment_settings = load_payment_settings(db)
-    onboarding_settings = load_onboarding_settings(db)
     system_settings = load_system_settings(db)
     return {
         "current_user": current_user(),
@@ -3784,7 +3792,6 @@ def inject_user():
         "usdt_default_network": payment_settings["usdt_default_network"],
         "usdt_network_options": USDT_NETWORK_OPTIONS,
         "openvpn_enabled": OPENVPN_ENABLED,
-        "admin_setup_completed": onboarding_settings["setup_completed"],
         "registration_open": bool(system_settings["registration_open"]),
         "telegram_contact": str(system_settings["telegram_contact"]),
     }
@@ -3837,43 +3844,31 @@ def enforce_admin_password_change():
 
 @app.before_request
 def enforce_admin_onboarding():
+    # PRD V1 only mandates default-password forced change for admin.
+    # Onboarding wizard should not block admin routes.
+    return None
+
+
+@app.before_request
+def block_non_prd_admin_features():
     endpoint = request.endpoint or ""
     if endpoint == "static":
         return None
 
+    blocked_by_name = endpoint in PRD_BLOCKED_ADMIN_ENDPOINTS or "domain" in endpoint
+    blocked_by_marker = any(marker in endpoint for marker in PRD_BLOCKED_ADMIN_ENDPOINT_MARKERS)
+    if not (blocked_by_name or blocked_by_marker):
+        return None
+
     user = current_user()
-    if not user or row_get(user, "role") != "admin":
-        return None
-    if admin_must_change_password(user):
-        return None
-    if is_admin_onboarding_completed(get_db()):
-        return None
+    if not user:
+        return redirect(url_for("login"))
+    if row_get(user, "role") != "admin":
+        flash("仅管理员可访问。", "error")
+        return redirect(url_for("dashboard"))
 
-    allowed_endpoints = {
-        "logout",
-        "admin_home",
-        "admin_change_password",
-        "admin_onboarding",
-        "admin_onboarding_step_plan",
-        "admin_onboarding_step_payment",
-        "admin_onboarding_step_cloudflare",
-        "admin_onboarding_step_server",
-        "admin_test_server_connection",
-        "admin_update_system_settings",
-        "static",
-    }
-    if endpoint in allowed_endpoints:
-        return None
-
-    if request.path.startswith("/api/"):
-        return {
-            "ok": False,
-            "error": "admin_onboarding_required",
-            "redirect": url_for("admin_home", onboarding_open="1"),
-        }, 403
-
-    flash("首次登录请先完成初始化向导。", "error")
-    return redirect(url_for("admin_home", onboarding_open="1"))
+    flash("当前版本按 PRD V1 运行，该功能未纳入文档，已禁用。", "error")
+    return redirect(url_for("admin_home"))
 
 
 def login_required(view):
@@ -5794,8 +5789,8 @@ def admin_change_password():
             db.commit()
             refreshed_user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
             login_user_session(refreshed_user)
-            flash("密码修改成功，请继续完成初始化向导。", "success")
-            return redirect(url_for("admin_home", onboarding_open="1"))
+            flash("密码修改成功。", "success")
+            return redirect(url_for("admin_home"))
 
     return render_template(
         "admin_change_password.html",
@@ -7219,11 +7214,9 @@ def admin_servers():
     refresh_server_health_status(db, force=True)
     db.commit()
     servers = load_admin_servers(db)
-    available_domains = load_available_managed_domains(db)
     return render_template(
         "admin_servers.html",
         servers=servers,
-        available_domains=available_domains,
         admin_page="servers",
     )
 
@@ -7257,7 +7250,6 @@ def admin_create_server():
     username = (request.form.get("username", "") or "").strip()
     password = request.form.get("password", "") or ""
     ssh_private_key = request.form.get("ssh_private_key", "") or ""
-    preferred_domain = normalize_fqdn(request.form.get("domain", ""))
     wg_port = normalize_server_port(
         request.form.get("wg_port", str(SERVER_DEPLOY_DEFAULT_WG_PORT)),
         SERVER_DEPLOY_DEFAULT_WG_PORT,
@@ -7322,23 +7314,10 @@ def admin_create_server():
         vpn_api_token=final_token,
         deploy_log=deploy_log,
     )
-    domain_ok = False
-    domain_message = ""
-    if deploy_ok:
-        try:
-            domain_ok, domain_message = assign_managed_domain_to_server(
-                db,
-                server_id,
-                preferred_domain=preferred_domain,
-            )
-        except Exception as exc:
-            domain_message = str(exc)
     db.commit()
 
     if deploy_ok:
         flash("服务器已保存并完成 VPN 服务部署。", "success")
-        if domain_message:
-            flash(domain_message, "success" if domain_ok else "error")
     else:
         flash(f"服务器已保存，但部署失败：{deploy_message}", "error")
     return redirect(url_for("admin_servers"))
@@ -7428,7 +7407,6 @@ def admin_update_saved_server(server_id: int):
         request.form.get("dns_port", str(row_get(row, "dns_port", SERVER_DEPLOY_DEFAULT_DNS_PORT))),
         SERVER_DEPLOY_DEFAULT_DNS_PORT,
     )
-    preferred_domain = normalize_fqdn(request.form.get("domain", ""))
 
     if not host or not username:
         flash("服务器地址和账号不能为空。", "error")
@@ -7436,9 +7414,6 @@ def admin_update_saved_server(server_id: int):
     if not server_name:
         server_name = host
 
-    old_host = normalize_remote_host(row_get(row, "host", ""))
-    old_domain = normalize_fqdn(row_get(row, "domain", ""))
-    host_changed = host != old_host
     password_to_save = password_raw if password_raw else (row_get(row, "password", "") or "")
     private_key_to_save = (
         private_key_raw.strip()
@@ -7476,27 +7451,8 @@ def admin_update_saved_server(server_id: int):
         ),
     )
 
-    domain_message = ""
-    domain_ok = False
-    if not preferred_domain:
-        if old_domain:
-            release_server_domain_bindings(db, server_id)
-            domain_message = "已清空该服务器域名绑定。"
-            domain_ok = True
-    elif preferred_domain != old_domain or host_changed:
-        try:
-            domain_ok, domain_message = assign_managed_domain_to_server(
-                db,
-                server_id,
-                preferred_domain=preferred_domain,
-            )
-        except Exception as exc:
-            domain_message = str(exc)
-
     db.commit()
     flash("服务器信息已更新。", "success")
-    if domain_message:
-        flash(domain_message, "success" if domain_ok else "error")
     return redirect(url_for("admin_servers"))
 
 
@@ -7554,22 +7510,8 @@ def admin_deploy_saved_server(server_id: int):
         vpn_api_token=final_token,
         deploy_log=deploy_log,
     )
-    domain_ok = False
-    domain_message = ""
-    if deploy_ok:
-        preferred_domain = normalize_fqdn(row_get(row, "domain", ""))
-        try:
-            domain_ok, domain_message = assign_managed_domain_to_server(
-                db,
-                server_id,
-                preferred_domain=preferred_domain,
-            )
-        except Exception as exc:
-            domain_message = str(exc)
     db.commit()
     flash(deploy_message, "success" if deploy_ok else "error")
-    if deploy_ok and domain_message:
-        flash(domain_message, "success" if domain_ok else "error")
     return redirect(url_for("admin_servers"))
 
 
@@ -7579,86 +7521,9 @@ def admin_deploy_saved_server(server_id: int):
 def admin_home():
     db = get_db()
     reconcile_expired_subscriptions(db)
-    admin_session_user = current_user()
-    admin_user = db.execute(
-        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
-        (admin_session_user["id"],),
-    ).fetchone()
-    admin_self_error = ""
-    if admin_user is not None:
-        admin_has_keys = bool(
-            (row_get(admin_user, "client_private_key", "") or "").strip()
-            and (row_get(admin_user, "client_public_key", "") or "").strip()
-            and (row_get(admin_user, "client_psk", "") or "").strip()
-        )
-        admin_enabled = int(row_get(admin_user, "wg_enabled", 0) or 0) == 1
-        if not admin_has_keys or not admin_enabled:
-            try:
-                admin_user = ensure_admin_self_vpn_ready(db, admin_user)
-            except Exception as exc:
-                admin_self_error = summarize_text(str(exc), 240)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                admin_user = db.execute(
-                    "SELECT * FROM users WHERE id = ? AND role = 'admin'",
-                    (admin_session_user["id"],),
-                ).fetchone()
-    admin_traffic_stats = (
-        get_user_traffic_stats(admin_user) if admin_user is not None else get_user_traffic_stats(admin_session_user)
-    )
-    admin_self_ready = bool(
-        admin_user
-        and int(row_get(admin_user, "wg_enabled", 0) or 0) == 1
-        and (row_get(admin_user, "client_public_key", "") or "").strip()
-    )
-    if not admin_self_ready:
-        admin_assigned_ip_display = "待生成"
-    elif is_dynamic_ip_assignment_mode():
-        admin_assigned_ip_display = "DHCP 动态分配（按连接分配）"
-    else:
-        admin_assigned_ip_display = (
-            (row_get(admin_user, "assigned_ip", "") or "").strip() or "尚未生成配置"
-        )
-
-    onboarding_settings = load_onboarding_settings(db)
-    onboarding_step_status, onboarding_default_step = get_admin_onboarding_step_status(db)
-    onboarding_current_step = onboarding_default_step
-    requested_step_raw = (request.args.get("onboarding_step", "") or "").strip()
-    if requested_step_raw.isdigit():
-        candidate_step = int(requested_step_raw)
-        if 1 <= candidate_step <= 4:
-            onboarding_current_step = candidate_step
-    onboarding_force_open = (
-        (request.args.get("onboarding_open", "") or "").strip() == "1"
-        or "onboarding_step" in request.args
-    )
-    first_plan = load_first_plan_for_onboarding(db)
-    payment_settings = load_payment_settings(db)
     system_settings = load_system_settings(db)
-    onboarding_server_draft = load_onboarding_server_draft(db)
-    cloudflare_accounts = load_cloudflare_accounts(db, active_only=False)
-    first_cloudflare_account = cloudflare_accounts[0] if cloudflare_accounts else None
-    onboarding_cloudflare_default = {
-        "account_name": (
-            (first_cloudflare_account["account_name"] if first_cloudflare_account else "")
-            or str(onboarding_settings.get("cloudflare_account") or "").strip()
-        ),
-        "zone_name": (
-            (first_cloudflare_account["zone_name"] if first_cloudflare_account else "")
-            or guess_zone_name_from_domain(str(onboarding_settings.get("portal_domain") or ""))
-        ),
-    }
-
     pending_count = db.execute(
         "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'pending'"
-    ).fetchone()["cnt"]
-    paid_count = db.execute(
-        "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'paid'"
-    ).fetchone()["cnt"]
-    active_subscriptions = db.execute(
-        "SELECT COUNT(*) AS cnt FROM users WHERE role='user' AND wg_enabled = 1"
     ).fetchone()["cnt"]
     total_users = db.execute(
         "SELECT COUNT(*) AS cnt FROM users WHERE role='user'"
@@ -7699,30 +7564,11 @@ def admin_home():
     return render_template(
         "admin_home.html",
         pending_count=pending_count,
-        paid_count=paid_count,
-        active_subscriptions=active_subscriptions,
         total_users=total_users,
-        server_total_count=server_overview["total"],
-        online_server_count=server_overview["online"],
         abnormal_server_count=server_overview["abnormal"],
         abnormal_servers=abnormal_servers[:8],
         expiring_subscriptions=expiring_subscriptions[:8],
-        webhook_enabled=bool(PAYMENT_WEBHOOK_SECRET),
-        webhook_min_confirmations=PAYMENT_MIN_CONFIRMATIONS,
-        onboarding_settings=onboarding_settings,
-        onboarding_step_status=onboarding_step_status,
-        onboarding_default_step=onboarding_default_step,
-        onboarding_current_step=onboarding_current_step,
-        onboarding_force_open=onboarding_force_open,
-        first_plan=first_plan,
-        payment_settings=payment_settings,
         system_settings=system_settings,
-        onboarding_server_draft=onboarding_server_draft,
-        onboarding_cloudflare_default=onboarding_cloudflare_default,
-        admin_self_ready=admin_self_ready,
-        admin_assigned_ip_display=admin_assigned_ip_display,
-        admin_traffic_stats=admin_traffic_stats,
-        admin_self_error=admin_self_error,
         admin_page="home",
     )
 

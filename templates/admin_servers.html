@@ -4,7 +4,7 @@
   <h2>服务器管理</h2>
   <p class="helper">按行管理已接入服务器。新增服务器时可先测试 SSH 连通，再保存并自动部署 VPN 服务端。</p>
 
-  <div class="section-title-row">
+  <div class="section-title-row" id="node-status">
     <h3>服务器列表</h3>
     <button type="button" id="open-server-modal">新增服务器</button>
   </div>
@@ -18,7 +18,6 @@
           <th>名称</th>
           <th>地址</th>
           <th>账号</th>
-          <th>域名</th>
           <th>状态</th>
           <th>最近测试</th>
           <th>最近部署</th>
@@ -41,7 +40,6 @@
                 <div class="helper">私钥已配置</div>
               {% endif %}
             </td>
-            <td>{{ s["domain"] or "-" }}</td>
             <td>
               {% if s["status"] == "online" %}
                 <span class="tag tag-ok">在线</span>
@@ -86,7 +84,6 @@
                   data-wg-port="{{ s['wg_port'] }}"
                   data-openvpn-port="{{ s['openvpn_port'] }}"
                   data-dns-port="{{ s['dns_port'] }}"
-                  data-domain="{{ s['domain'] }}"
                 >修改</button>
                 <button
                   type="button"
@@ -132,15 +129,6 @@
       <label>SSH 私钥（可选）
         <textarea name="ssh_private_key" id="server-key-input" rows="6" placeholder="粘贴私钥内容（-----BEGIN ... PRIVATE KEY-----）"></textarea>
       </label>
-      <label>优先域名（可选）
-        <select name="domain" id="server-domain-input">
-          <option value="">自动分配可用域名</option>
-          {% for d in available_domains %}
-            <option value="{{ d['domain_name'] }}">{{ d['domain_name'] }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <p class="helper">留空时会在“域名管理”中自动选择一个可用域名并同步到 Cloudflare。</p>
       <label>WireGuard 端口
         <input type="number" name="wg_port" min="1" max="65535" value="51820" required>
       </label>
@@ -185,9 +173,6 @@
       </label>
       <label>SSH 私钥（可选，留空则保持不变）
         <textarea name="ssh_private_key" id="server-edit-key" rows="6" placeholder="需改为私钥登录时粘贴完整私钥"></textarea>
-      </label>
-      <label>绑定域名（可选，留空将清空绑定）
-        <input type="text" name="domain" id="server-edit-domain" placeholder="例如：hk1.network000.com">
       </label>
       <label>WireGuard 端口
         <input type="number" name="wg_port" id="server-edit-wg-port" min="1" max="65535" required>
@@ -248,7 +233,6 @@
     var editUser = document.getElementById("server-edit-username");
     var editPass = document.getElementById("server-edit-password");
     var editKey = document.getElementById("server-edit-key");
-    var editDomain = document.getElementById("server-edit-domain");
     var editWgPort = document.getElementById("server-edit-wg-port");
     var editOpenvpnPort = document.getElementById("server-edit-openvpn-port");
     var editDnsPort = document.getElementById("server-edit-dns-port");
@@ -354,7 +338,6 @@
         if (editUser) editUser.value = btn.dataset.username || "root";
         if (editPass) editPass.value = "";
         if (editKey) editKey.value = "";
-        if (editDomain) editDomain.value = btn.dataset.domain || "";
         if (editWgPort) editWgPort.value = btn.dataset.wgPort || "51820";
         if (editOpenvpnPort) editOpenvpnPort.value = btn.dataset.openvpnPort || "1194";
         if (editDnsPort) editDnsPort.value = btn.dataset.dnsPort || "53";
