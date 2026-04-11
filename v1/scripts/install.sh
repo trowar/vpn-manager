@@ -221,6 +221,8 @@ prepare_env() {
 start_web() {
   cd "${APP_DIR}"
   log "Starting web container"
+  docker rm -f vpn-web >/dev/null 2>&1 || true
+  compose_cmd down --remove-orphans >/dev/null 2>&1 || true
   compose_cmd up -d --build web
 }
 
