@@ -41,7 +41,6 @@ setup_app() {
   . .venv/bin/activate
   pip install --upgrade pip
   pip install -r requirements.txt
-  flask --app app init-db
 }
 
 write_service() {
@@ -53,7 +52,9 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${APP_DIR}/v1
-Environment=APP_SECRET_KEY=$(openssl rand -hex 24 || echo dev-secret)
+Environment=PORTAL_SECRET_KEY=$(openssl rand -hex 24 || echo dev-secret)
+Environment=PORTAL_DATA_DIR=${APP_DIR}/data
+Environment=PORTAL_DB_PATH=${APP_DIR}/data/portal.db
 ExecStart=${APP_DIR}/v1/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${APP_PORT} wsgi:app
 Restart=always
 RestartSec=2
@@ -91,4 +92,3 @@ main() {
 }
 
 main "$@"
-

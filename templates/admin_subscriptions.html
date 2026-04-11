@@ -22,71 +22,74 @@
   </form>
 
   {% if subscriptions %}
-    <table class="subscriptions-table">
-      <thead>
-        <tr>
-          <th>用户</th>
-          <th>邮箱</th>
-          <th>IP</th>
-          <th>到期时间</th>
-          <th>VPN 状态</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for u in subscriptions %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
           <tr>
-            <td>{{ u["username"] }}</td>
-            <td>{{ u["email"] }}</td>
-            <td>{{ u["assigned_ip"] or "-" }}</td>
-            <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
-            <td>
-              {% if u["wg_enabled"] == 1 %}
-                <span class="tag tag-ok">已启用</span>
-              {% else %}
-                <span class="tag tag-warn">已停用</span>
-              {% endif %}
-            </td>
-            <td>
-              <div class="subscription-actions">
-                <form
-                  method="post"
-                  action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
-                  class="expiry-form"
-                >
-                  <input type="hidden" name="q" value="{{ search_email or '' }}">
-                  <input
-                    type="datetime-local"
-                    name="expires_at_local"
-                    value="{{ u['subscription_expires_at']|fmt_local_input }}"
-                    required
-                  >
-                  <button type="submit">保存期限</button>
-                </form>
-                <form
-                  method="post"
-                  action="{{ url_for('admin_disable_user', user_id=u['id']) }}"
-                  class="inline-form"
-                  onsubmit="return confirm('确定停用该用户吗？停用后将立刻断开 VPN。');"
-                >
-                  <input type="hidden" name="q" value="{{ search_email or '' }}">
-                  <button type="submit">停用用户</button>
-                </form>
-                <form
-                  method="post"
-                  action="{{ url_for('admin_delete_user', user_id=u['id']) }}"
-                  class="inline-form"
-                  onsubmit="return confirm('确定删除该用户吗？删除后订单与配置将一并清理，且不可恢复。');"
-                >
-                  <input type="hidden" name="q" value="{{ search_email or '' }}">
-                  <button type="submit" class="danger">删除用户</button>
-                </form>
-              </div>
-            </td>
+            <th>用户</th>
+            <th>邮箱</th>
+            <th>IP</th>
+            <th>到期时间</th>
+            <th>VPN 状态</th>
+            <th>操作</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for u in subscriptions %}
+            <tr>
+              <td>{{ u["username"] }}</td>
+              <td>{{ u["email"] }}</td>
+              <td>{{ u["assigned_ip"] or "-" }}</td>
+              <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
+              <td>
+                {% if u["wg_enabled"] == 1 %}
+                  <span class="tag tag-ok">已启用</span>
+                {% else %}
+                  <span class="tag tag-warn">已停用</span>
+                {% endif %}
+              </td>
+              <td>
+                <div class="subscription-actions">
+                  <form
+                    method="post"
+                    action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
+                    class="expiry-form"
+                  >
+                    <input type="hidden" name="q" value="{{ search_email or '' }}">
+                    <input
+                      type="datetime-local"
+                      name="expires_at_local"
+                      value="{{ u['subscription_expires_at']|fmt_local_input }}"
+                      required
+                    >
+                    <button type="submit">保存期限</button>
+                  </form>
+                  <form
+                    method="post"
+                    action="{{ url_for('admin_disable_user', user_id=u['id']) }}"
+                    class="inline-form"
+                    onsubmit="return confirm('确定停用该用户吗？停用后将立刻断开 VPN。');"
+                  >
+                    <input type="hidden" name="q" value="{{ search_email or '' }}">
+                    <button type="submit">停用用户</button>
+                  </form>
+                  <form
+                    method="post"
+                    action="{{ url_for('admin_delete_user', user_id=u['id']) }}"
+                    class="inline-form delete-user-form"
+                    data-user-email="{{ u['email'] }}"
+                  >
+                    <input type="hidden" name="q" value="{{ search_email or '' }}">
+                    <input type="hidden" name="confirm_email" value="">
+                    <button type="submit" class="danger">删除用户</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
     <p class="helper">
       {% if search_email %}
@@ -97,4 +100,30 @@
     </p>
   {% endif %}
 </section>
+
+<script>
+  (function () {
+    var forms = document.querySelectorAll(".delete-user-form");
+    forms.forEach(function (form) {
+      form.addEventListener("submit", function (event) {
+        var expected = (form.dataset.userEmail || "").trim();
+        var entered = window.prompt("请输入该用户邮箱以确认删除：", "");
+        if (!entered) {
+          event.preventDefault();
+          return;
+        }
+        var normalized = entered.trim().toLowerCase();
+        if (normalized !== expected.toLowerCase()) {
+          event.preventDefault();
+          window.alert("邮箱不匹配，已取消删除。");
+          return;
+        }
+        var hidden = form.querySelector("input[name='confirm_email']");
+        if (hidden) {
+          hidden.value = entered.trim();
+        }
+      });
+    });
+  })();
+</script>
 {% endblock %}

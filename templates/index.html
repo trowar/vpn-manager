@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="guest-topbar">
-  <a class="btn" href="{{ url_for('register') }}">注册账号</a>
+  {% if registration_open %}
+    <a class="btn" href="{{ url_for('register') }}">注册账号</a>
+  {% else %}
+    <span class="tag tag-warn">当前暂停开放注册</span>
+  {% endif %}
   <a class="btn secondary" href="{{ url_for('login') }}">登录</a>
 </div>
 
@@ -87,5 +91,8 @@
       <figcaption>OpenVPN 导入步骤 2：选择下载的 `.ovpn` 配置文件并打开完成导入。</figcaption>
     </figure>
   </div>
+  {% if telegram_contact %}
+    <p class="helper">技术支持（Telegram）：{{ telegram_contact }}</p>
+  {% endif %}
 </section>
 {% endblock %}

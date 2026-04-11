@@ -10,67 +10,69 @@
   </div>
 
   {% if cloudflare_accounts %}
-    <table class="subscriptions-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>邮箱</th>
-          <th>Zone 域名</th>
-          <th>Zone ID</th>
-          <th>Global API Key</th>
-          <th>状态</th>
-          <th>排序</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for a in cloudflare_accounts %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
           <tr>
-            <td>{{ a["id"] }}</td>
-            <td>{{ a["account_name"] }}</td>
-            <td>{{ a["zone_name"] }}</td>
-            <td><code>{{ a["zone_id"] or "-" }}</code></td>
-            <td><code>{{ a["api_token_masked"] }}</code></td>
-            <td>
-              {% if a["is_active"] == 1 %}
-                <span class="tag tag-ok">启用中</span>
-              {% else %}
-                <span class="tag tag-warn">已停用</span>
-              {% endif %}
-            </td>
-            <td>{{ a["sort_order"] }}</td>
-            <td>
-              <div class="subscription-actions">
-                <form method="post" action="{{ url_for('admin_refresh_cloudflare_domains', account_id=a['id']) }}" class="inline-form">
-                  <button type="submit" class="btn secondary">刷新域名</button>
-                </form>
-                <form method="post" action="{{ url_for('admin_toggle_cloudflare_account', account_id=a['id']) }}" class="inline-form">
-                  {% if a["is_active"] == 1 %}
-                    <button type="submit">停用</button>
-                  {% else %}
-                    <button type="submit">启用</button>
-                  {% endif %}
-                </form>
-                <button
-                  type="button"
-                  class="btn secondary open-cf-edit-modal"
-                  data-update-url="{{ url_for('admin_update_cloudflare_account', account_id=a['id']) }}"
-                  data-account-name="{{ a['account_name'] }}"
-                  data-zone-name="{{ a['zone_name'] }}"
-                  data-sort-order="{{ a['sort_order'] }}"
-                >编辑</button>
-                <button
-                  type="button"
-                  class="danger open-cf-delete-modal"
-                  data-delete-url="{{ url_for('admin_delete_cloudflare_account', account_id=a['id']) }}"
-                  data-account-name="{{ a['account_name'] }}"
-                >删除</button>
-              </div>
-            </td>
+            <th>ID</th>
+            <th>邮箱</th>
+            <th>Zone 域名</th>
+            <th>Zone ID</th>
+            <th>Global API Key</th>
+            <th>状态</th>
+            <th>排序</th>
+            <th>操作</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for a in cloudflare_accounts %}
+            <tr>
+              <td>{{ a["id"] }}</td>
+              <td>{{ a["account_name"] }}</td>
+              <td>{{ a["zone_name"] }}</td>
+              <td><code>{{ a["zone_id"] or "-" }}</code></td>
+              <td><code>{{ a["api_token_masked"] }}</code></td>
+              <td>
+                {% if a["is_active"] == 1 %}
+                  <span class="tag tag-ok">启用中</span>
+                {% else %}
+                  <span class="tag tag-warn">已停用</span>
+                {% endif %}
+              </td>
+              <td>{{ a["sort_order"] }}</td>
+              <td>
+                <div class="subscription-actions">
+                  <form method="post" action="{{ url_for('admin_refresh_cloudflare_domains', account_id=a['id']) }}" class="inline-form">
+                    <button type="submit" class="btn secondary">刷新域名</button>
+                  </form>
+                  <form method="post" action="{{ url_for('admin_toggle_cloudflare_account', account_id=a['id']) }}" class="inline-form">
+                    {% if a["is_active"] == 1 %}
+                      <button type="submit">停用</button>
+                    {% else %}
+                      <button type="submit">启用</button>
+                    {% endif %}
+                  </form>
+                  <button
+                    type="button"
+                    class="btn secondary open-cf-edit-modal"
+                    data-update-url="{{ url_for('admin_update_cloudflare_account', account_id=a['id']) }}"
+                    data-account-name="{{ a['account_name'] }}"
+                    data-zone-name="{{ a['zone_name'] }}"
+                    data-sort-order="{{ a['sort_order'] }}"
+                  >编辑</button>
+                  <button
+                    type="button"
+                    class="danger open-cf-delete-modal"
+                    data-delete-url="{{ url_for('admin_delete_cloudflare_account', account_id=a['id']) }}"
+                    data-account-name="{{ a['account_name'] }}"
+                  >删除</button>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
     <p class="helper">暂无 Cloudflare 账号，请先添加。</p>
   {% endif %}

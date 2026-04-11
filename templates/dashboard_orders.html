@@ -101,6 +101,7 @@
             <th>订单号</th>
             <th>套餐</th>
             <th>金额</th>
+            <th>过期时间</th>
             <th>网络</th>
             <th>收款地址</th>
             <th>TxHash</th>
@@ -113,6 +114,7 @@
               <td>{{ o["id"] }}</td>
               <td>{{ o|fmt_order_plan }}</td>
               <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+              <td>{{ o["expires_at"]|fmt_utc }}</td>
               <td>{{ o["usdt_network"] }}</td>
               <td><code>{{ o["pay_to_address"] }}</code></td>
               <td>

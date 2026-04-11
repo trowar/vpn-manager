@@ -3,6 +3,9 @@
 <div class="dashboard-main">
   <section class="card">
     <h2>用户首页</h2>
+    {% if node_alert_text %}
+      <div class="alert alert-error">{{ node_alert_text }}</div>
+    {% endif %}
     <p><strong>账号：</strong>{{ user["username"] }}</p>
     <p><strong>分配 IP：</strong>{{ assigned_ip_display }}</p>
     <p>
@@ -63,6 +66,9 @@
         <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">下载 WireGuard 客户端（官方安装）</a>
         <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">下载 OpenVPN 客户端（官方安装）</a>
       </div>
+    {% endif %}
+    {% if telegram_contact %}
+      <p class="helper">技术支持（Telegram）：{{ telegram_contact }}</p>
     {% endif %}
   </section>
 </div>

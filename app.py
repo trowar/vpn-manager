@@ -4,14 +4,18 @@ import hmac
 import ipaddress
 import json
 import os
+import random
 import re
+import smtplib
 import socket
 import sqlite3
+import string
 import subprocess
 import tempfile
 import textwrap
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
 from urllib import error as urllib_error
@@ -139,6 +143,21 @@ PAYMENT_METHOD_USDT = "usdt"
 PAYMENT_METHOD_CHOICES = (PAYMENT_METHOD_USDT,)
 BYTES_PER_GB = 1024 * 1024 * 1024
 REGISTER_COOLDOWN_SECONDS = 5 * 60
+EMAIL_CODE_TTL_MINUTES = 10
+EMAIL_CODE_RESEND_SECONDS = 60
+EMAIL_CODE_DAILY_LIMIT = 10
+UNVERIFIED_USER_RETENTION_HOURS = 24
+CAPTCHA_TTL_MINUTES = 5
+CAPTCHA_SCENE_DEFAULT = "default"
+CAPTCHA_SCENES = ("login", "register", "recover")
+EMAIL_CODE_PURPOSE_REGISTER = "register"
+EMAIL_CODE_PURPOSE_RECOVER = "recover"
+SETTING_REGISTRATION_OPEN = "registration_open"
+SETTING_ORDER_EXPIRE_HOURS = "order_expire_hours"
+SETTING_GIFT_DURATION_MONTHS = "gift_duration_months"
+SETTING_GIFT_TRAFFIC_GB = "gift_traffic_gb"
+SETTING_TELEGRAM_CONTACT = "telegram_contact"
+NODE_HEARTBEAT_TIMEOUT_SECONDS = 60
 ADMIN_UI_TZ = timezone(timedelta(hours=8))
 ADMIN_UI_TZ_NAME = "北京时间 (UTC+8)"
 DEFAULT_ADMIN_USERNAME = "admin"
@@ -701,6 +720,65 @@ def parse_bool_setting(raw: str | None, default: bool = False) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def parse_int_setting(raw: str | None, default: int, *, min_value: int = 0) -> int:
+    try:
+        value = int((raw or "").strip())
+    except Exception:
+        value = default
+    if value < min_value:
+        return min_value
+    return value
+
+
+def ensure_default_system_settings(db: sqlite3.Connection) -> None:
+    defaults = {
+        SETTING_REGISTRATION_OPEN: "1",
+        SETTING_ORDER_EXPIRE_HOURS: "24",
+        SETTING_GIFT_DURATION_MONTHS: "0",
+        SETTING_GIFT_TRAFFIC_GB: "0",
+        SETTING_TELEGRAM_CONTACT: "",
+    }
+    for key, value in defaults.items():
+        current = get_app_setting(db, key, "")
+        if current == "":
+            upsert_app_setting(db, key, value)
+
+
+def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
+    registration_open_raw = get_app_setting(db, SETTING_REGISTRATION_OPEN, "1")
+    order_expire_hours_raw = get_app_setting(db, SETTING_ORDER_EXPIRE_HOURS, "24")
+    gift_duration_months_raw = get_app_setting(db, SETTING_GIFT_DURATION_MONTHS, "0")
+    gift_traffic_gb_raw = get_app_setting(db, SETTING_GIFT_TRAFFIC_GB, "0")
+    telegram_contact = get_app_setting(db, SETTING_TELEGRAM_CONTACT, "")
+    order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
+    return {
+        "registration_open": parse_bool_setting(registration_open_raw, True),
+        "order_expire_hours": order_expire_hours,
+        "gift_duration_months": parse_int_setting(gift_duration_months_raw, 0, min_value=0),
+        "gift_traffic_gb": parse_int_setting(gift_traffic_gb_raw, 0, min_value=0),
+        "telegram_contact": (telegram_contact or "").strip(),
+    }
+
+
+def is_registration_open(db: sqlite3.Connection | None = None) -> bool:
+    use_db = db or get_db()
+    return bool(load_system_settings(use_db)["registration_open"])
+
+
+def get_order_expire_hours(db: sqlite3.Connection | None = None) -> int:
+    use_db = db or get_db()
+    return int(load_system_settings(use_db)["order_expire_hours"])
+
+
+def get_gift_settings(db: sqlite3.Connection | None = None) -> tuple[int, int]:
+    use_db = db or get_db()
+    settings = load_system_settings(use_db)
+    return (
+        int(settings["gift_duration_months"]),
+        int(settings["gift_traffic_gb"]),
+    )
 
 
 def ensure_default_onboarding_settings(db: sqlite3.Connection) -> None:
@@ -2254,6 +2332,128 @@ def test_server_connectivity(
             client.close()
 
 
+def test_server_vpn_api_health(host: str, vpn_api_token: str) -> tuple[bool, str]:
+    safe_host = normalize_remote_host(host)
+    if not safe_host:
+        return False, "节点地址为空。"
+    host_url = host_for_http_url(safe_host)
+    url = f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}/healthz"
+    headers = {"Accept": "application/json"}
+    token = (vpn_api_token or "").strip()
+    if token:
+        headers["X-VPN-Token"] = token
+    req = urllib_request.Request(url=url, headers=headers, method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=2) as response:
+            body = response.read().decode("utf-8", errors="ignore")
+        payload = json.loads(body) if body else {}
+        if isinstance(payload, dict) and payload.get("ok", False):
+            return True, "节点健康检查通过。"
+        return False, "节点健康检查返回异常内容。"
+    except urllib_error.HTTPError as exc:
+        detail = ""
+        try:
+            raw = exc.read().decode("utf-8", errors="ignore")
+            parsed = json.loads(raw) if raw else {}
+            detail = str(parsed.get("error") or parsed.get("message") or raw).strip()
+        except Exception:
+            detail = ""
+        if detail:
+            return False, f"节点健康检查失败：HTTP {exc.code}，{summarize_text(detail, 140)}"
+        return False, f"节点健康检查失败：HTTP {exc.code}"
+    except Exception as exc:
+        return False, f"节点健康检查失败：{exc}"
+
+
+def refresh_server_health_status(
+    db: sqlite3.Connection, *, force: bool = False
+) -> dict[str, int]:
+    now = utcnow()
+    if not force:
+        last_refresh = parse_iso(get_app_setting(db, "server_health_last_check_at", ""))
+        if last_refresh and (now - last_refresh) < timedelta(seconds=30):
+            counts_row = db.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online_count
+                FROM vpn_servers
+                """
+            ).fetchone()
+            total_count = int(row_get(counts_row, "total_count", 0) or 0)
+            online_count = int(row_get(counts_row, "online_count", 0) or 0)
+            abnormal_count = max(0, total_count - online_count)
+            return {
+                "total": total_count,
+                "online": online_count,
+                "abnormal": abnormal_count,
+                "checked": 0,
+            }
+
+    rows = db.execute(
+        """
+        SELECT id, host, vpn_api_token, status, last_test_at, last_test_ok, last_test_message
+        FROM vpn_servers
+        ORDER BY id DESC
+        """
+    ).fetchall()
+    timeout_delta = timedelta(seconds=NODE_HEARTBEAT_TIMEOUT_SECONDS)
+    checked = 0
+    for row in rows:
+        current_status = (row_get(row, "status", "") or "").strip().lower()
+        if current_status in {"deploying", "deploy_failed"}:
+            continue
+
+        last_test_at = parse_iso(row_get(row, "last_test_at", ""))
+        need_check = force or not last_test_at or (now - last_test_at) >= timeout_delta
+        if not need_check:
+            continue
+
+        ok, message = test_server_vpn_api_health(
+            row_get(row, "host", ""),
+            row_get(row, "vpn_api_token", ""),
+        )
+        checked += 1
+        db.execute(
+            """
+            UPDATE vpn_servers
+            SET status = ?,
+                last_test_at = ?,
+                last_test_ok = ?,
+                last_test_message = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                "online" if ok else "offline",
+                now.isoformat(),
+                1 if ok else 0,
+                summarize_text(message, 220),
+                now.isoformat(),
+                int(row["id"]),
+            ),
+        )
+    upsert_app_setting(db, "server_health_last_check_at", now.isoformat())
+
+    counts_row = db.execute(
+        """
+        SELECT
+            COUNT(*) AS total_count,
+            SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online_count
+        FROM vpn_servers
+        """
+    ).fetchone()
+    total_count = int(row_get(counts_row, "total_count", 0) or 0)
+    online_count = int(row_get(counts_row, "online_count", 0) or 0)
+    abnormal_count = max(0, total_count - online_count)
+    return {
+        "total": total_count,
+        "online": online_count,
+        "abnormal": abnormal_count,
+        "checked": checked,
+    }
+
+
 def build_vpn_node_deploy_script(
     *,
     vpn_api_token: str,
@@ -2323,7 +2523,7 @@ def build_vpn_node_deploy_script(
         }}
 
         pkg_upgrade
-        pkg_install ca-certificates curl git
+        pkg_install ca-certificates curl git openssl
 
         if ! command -v ip >/dev/null 2>&1; then
           pkg_install iproute2 || pkg_install iproute || true
@@ -2441,6 +2641,46 @@ EOF
           cp docker/vpn/openvpn/server.conf.example docker/vpn/openvpn/server.conf
         fi
 
+        if [ ! -f docker/vpn/openvpn/ca.crt ] || [ ! -f docker/vpn/openvpn/server.crt ] || [ ! -f docker/vpn/openvpn/server.key ]; then
+          log "生成 OpenVPN 证书材料"
+          OVPN_DIR="docker/vpn/openvpn"
+          mkdir -p "$OVPN_DIR"
+
+          if [ ! -f "$OVPN_DIR/ca.key" ]; then
+            openssl genrsa -out "$OVPN_DIR/ca.key" 4096 >/dev/null 2>&1
+          fi
+          if [ ! -f "$OVPN_DIR/ca.crt" ]; then
+            openssl req -x509 -new -nodes -key "$OVPN_DIR/ca.key" -sha256 -days 3650 \
+              -subj "/CN=vpnmanager-ca" -out "$OVPN_DIR/ca.crt" >/dev/null 2>&1
+          fi
+          if [ ! -f "$OVPN_DIR/server.key" ]; then
+            openssl genrsa -out "$OVPN_DIR/server.key" 4096 >/dev/null 2>&1
+          fi
+          if [ ! -f "$OVPN_DIR/server.csr" ]; then
+            openssl req -new -key "$OVPN_DIR/server.key" -subj "/CN=vpnmanager-server" \
+              -out "$OVPN_DIR/server.csr" >/dev/null 2>&1
+          fi
+
+          cat > "$OVPN_DIR/server_ext.cnf" <<EOF
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+
+          openssl x509 -req -in "$OVPN_DIR/server.csr" -CA "$OVPN_DIR/ca.crt" -CAkey "$OVPN_DIR/ca.key" \
+            -CAcreateserial -out "$OVPN_DIR/server.crt" -days 1825 -sha256 \
+            -extfile "$OVPN_DIR/server_ext.cnf" >/dev/null 2>&1
+          chmod 600 "$OVPN_DIR/ca.key" "$OVPN_DIR/server.key"
+        fi
+
+        if [ ! -f docker/vpn/openvpn/tls-crypt.key ]; then
+          openvpn --genkey secret docker/vpn/openvpn/tls-crypt.key >/dev/null 2>&1 || \
+          openvpn --genkey --secret docker/vpn/openvpn/tls-crypt.key >/dev/null 2>&1
+          chmod 600 docker/vpn/openvpn/tls-crypt.key
+        fi
+
         PORT_IN_USE=0
         ACTUAL_DNS_PORT={dns_port}
         if command -v ss >/dev/null 2>&1; then
@@ -2470,7 +2710,7 @@ DNS_PUBLIC_PORT=$ACTUAL_DNS_PORT
 VPN_API_PUBLIC_PORT={SERVER_DEPLOY_DEFAULT_VPN_API_PORT}
 VPN_ENABLE_WIREGUARD=1
 VPN_ENABLE_DNSMASQ=1
-VPN_ENABLE_OPENVPN=0
+VPN_ENABLE_OPENVPN=1
 EOF
 
         compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpnmanager-server >/dev/null
@@ -2567,6 +2807,7 @@ def init_db() -> None:
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'user',
             status TEXT NOT NULL DEFAULT 'approved',
+            email_verified INTEGER NOT NULL DEFAULT 1,
             assigned_ip TEXT,
             client_private_key TEXT,
             client_public_key TEXT,
@@ -2580,7 +2821,8 @@ def init_db() -> None:
             traffic_quota_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_used_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0,
-            force_password_change INTEGER NOT NULL DEFAULT 0
+            force_password_change INTEGER NOT NULL DEFAULT 0,
+            session_version INTEGER NOT NULL DEFAULT 1
         )
         """
     )
@@ -2601,6 +2843,7 @@ def init_db() -> None:
             pay_to_address TEXT,
             tx_hash TEXT,
             tx_submitted_at TEXT,
+            expires_at TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
             paid_at TEXT,
@@ -2654,6 +2897,21 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS registration_limits (
             ip_address TEXT PRIMARY KEY,
             last_register_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_verifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            code TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            ip_address TEXT,
+            expire_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            used_at TEXT
         )
         """
     )
@@ -2721,6 +2979,7 @@ def init_db() -> None:
     migrate_schema(db)
     ensure_default_payment_settings(db)
     ensure_default_onboarding_settings(db)
+    ensure_default_system_settings(db)
     ensure_default_payment_methods(db)
     onboarding_settings = load_onboarding_settings(db)
     default_cf_account_id = None
@@ -2768,6 +3027,9 @@ def init_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_orders_status_created ON payment_orders(status, created_at)"
     )
     db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_orders_status_expire ON payment_orders(status, expires_at)"
+    )
+    db.execute(
         "CREATE INDEX IF NOT EXISTS idx_orders_tx_hash ON payment_orders(tx_hash)"
     )
     db.execute(
@@ -2795,6 +3057,9 @@ def init_db() -> None:
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_managed_domains_assigned_server ON managed_domains(assigned_server_id)"
     )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_email_verifications_lookup ON email_verifications(email, purpose, status, created_at)"
+    )
     db.commit()
 
 
@@ -2819,6 +3084,10 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute(
             "ALTER TABLE users ADD COLUMN force_password_change INTEGER NOT NULL DEFAULT 0"
         )
+    if "email_verified" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1")
+    if "session_version" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
 
     order_columns = {
         row["name"]: row
@@ -2852,6 +3121,8 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE payment_orders ADD COLUMN tx_hash TEXT")
     if "tx_submitted_at" not in order_columns:
         db.execute("ALTER TABLE payment_orders ADD COLUMN tx_submitted_at TEXT")
+    if "expires_at" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN expires_at TEXT")
 
     db.execute(
         """
@@ -2914,6 +3185,33 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_verifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            code TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            ip_address TEXT,
+            expire_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            used_at TEXT
+        )
+        """
+    )
+    email_verification_columns = {
+        row["name"]: row
+        for row in db.execute("PRAGMA table_info(email_verifications)").fetchall()
+    }
+    if "purpose" not in email_verification_columns:
+        db.execute(
+            "ALTER TABLE email_verifications ADD COLUMN purpose TEXT NOT NULL DEFAULT 'register'"
+        )
+    if "ip_address" not in email_verification_columns:
+        db.execute("ALTER TABLE email_verifications ADD COLUMN ip_address TEXT")
+    if "used_at" not in email_verification_columns:
+        db.execute("ALTER TABLE email_verifications ADD COLUMN used_at TEXT")
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS vpn_servers (
@@ -3119,11 +3417,13 @@ def ensure_admin_user() -> None:
                 password_hash,
                 role,
                 status,
+                email_verified,
                 created_at,
                 approved_at,
-                force_password_change
+                force_password_change,
+                session_version
             )
-            VALUES (?, ?, ?, 'admin', 'approved', ?, ?, 1)
+            VALUES (?, ?, ?, 'admin', 'approved', 1, ?, ?, 1, 1)
             """,
             (
                 admin_username,
@@ -3142,7 +3442,16 @@ def current_user():
     user_id = session.get("user_id")
     if not user_id:
         return None
-    return get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        session.clear()
+        return None
+    current_version = int(row_get(user, "session_version", 1) or 1)
+    session_version = session.get("session_version")
+    if session_version is None or int(session_version) != current_version:
+        session.clear()
+        return None
+    return user
 
 
 def admin_must_change_password(user) -> bool:
@@ -3171,6 +3480,7 @@ def authenticate_user(identity: str, password: str):
 def login_user_session(user) -> None:
     session.clear()
     session["user_id"] = user["id"]
+    session["session_version"] = int(row_get(user, "session_version", 1) or 1)
 
 
 def user_api_payload(user) -> dict:
@@ -3190,6 +3500,7 @@ def inject_user():
     db = get_db()
     payment_settings = load_payment_settings(db)
     onboarding_settings = load_onboarding_settings(db)
+    system_settings = load_system_settings(db)
     return {
         "current_user": current_user(),
         "usdt_receive_address": payment_settings["usdt_receive_address"],
@@ -3197,6 +3508,8 @@ def inject_user():
         "usdt_network_options": USDT_NETWORK_OPTIONS,
         "openvpn_enabled": OPENVPN_ENABLED,
         "admin_setup_completed": onboarding_settings["setup_completed"],
+        "registration_open": bool(system_settings["registration_open"]),
+        "telegram_contact": str(system_settings["telegram_contact"]),
     }
 
 
@@ -3206,12 +3519,15 @@ def auto_reconcile_subscriptions():
         return None
     try:
         db = get_db()
+        cleanup_verification_records(db)
+        expire_pending_orders(db)
         reconcile_expired_subscriptions(db)
         user_id = session.get("user_id")
         if user_id:
             user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if user and user["role"] == "user":
                 sync_user_traffic_usage(db, user)
+        db.commit()
     except Exception:
         app.logger.exception("Failed to reconcile expired subscriptions")
     return None
@@ -3266,6 +3582,7 @@ def enforce_admin_onboarding():
         "admin_onboarding_step_cloudflare",
         "admin_onboarding_step_server",
         "admin_test_server_connection",
+        "admin_update_system_settings",
         "static",
     }
     if endpoint in allowed_endpoints:
@@ -4230,24 +4547,454 @@ def openvpn_download_redirect(platform: str):
     return redirect(target_url, code=302)
 
 
+def captcha_session_key(scene: str) -> str:
+    safe_scene = (scene or "").strip().lower()
+    if safe_scene not in CAPTCHA_SCENES:
+        safe_scene = CAPTCHA_SCENE_DEFAULT
+    return f"captcha_{safe_scene}"
+
+
+def generate_captcha_text(length: int = 5) -> str:
+    chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(random.choice(chars) for _ in range(length))
+
+
+def validate_captcha_input(scene: str, value: str) -> bool:
+    payload = session.get(captcha_session_key(scene))
+    if not payload:
+        return False
+    expire_at_raw = payload.get("expire_at")
+    if not expire_at_raw:
+        return False
+    try:
+        expire_at = parse_iso(expire_at_raw)
+    except Exception:
+        return False
+    if not expire_at or expire_at < utcnow():
+        return False
+    input_value = (value or "").strip().upper()
+    expected = str(payload.get("text") or "").strip().upper()
+    if not input_value or input_value != expected:
+        return False
+    session.pop(captcha_session_key(scene), None)
+    return True
+
+
+def can_send_email_code(
+    db: sqlite3.Connection,
+    email: str,
+    purpose: str,
+) -> tuple[bool, str]:
+    now = utcnow()
+    resend_cutoff = (now - timedelta(seconds=EMAIL_CODE_RESEND_SECONDS)).isoformat()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    latest = db.execute(
+        """
+        SELECT created_at
+        FROM email_verifications
+        WHERE email = ? AND purpose = ? AND created_at >= ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (email, purpose, resend_cutoff),
+    ).fetchone()
+    if latest:
+        latest_dt = parse_iso(latest["created_at"])
+        if latest_dt:
+            wait_seconds = max(
+                1, EMAIL_CODE_RESEND_SECONDS - int((now - latest_dt).total_seconds())
+            )
+        else:
+            wait_seconds = EMAIL_CODE_RESEND_SECONDS
+        return False, f"发送过于频繁，请在 {wait_seconds} 秒后重试。"
+
+    sent_count = db.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM email_verifications
+        WHERE email = ? AND created_at >= ?
+        """,
+        (email, today_start),
+    ).fetchone()
+    if int(sent_count["cnt"] or 0) >= EMAIL_CODE_DAILY_LIMIT:
+        return False, f"该邮箱今日最多可发送 {EMAIL_CODE_DAILY_LIMIT} 次验证码。"
+    return True, ""
+
+
+def create_email_verification_code(
+    db: sqlite3.Connection,
+    *,
+    email: str,
+    purpose: str,
+    code: str,
+    ip_address: str,
+) -> None:
+    created_at = utcnow_iso()
+    expire_at = (utcnow() + timedelta(minutes=EMAIL_CODE_TTL_MINUTES)).isoformat()
+    db.execute(
+        """
+        INSERT INTO email_verifications (
+            email, purpose, code, status, ip_address, expire_at, created_at
+        )
+        VALUES (?, ?, ?, 'pending', ?, ?, ?)
+        """,
+        (email, purpose, code, ip_address, expire_at, created_at),
+    )
+
+
+def consume_email_verification_code(
+    db: sqlite3.Connection,
+    *,
+    email: str,
+    purpose: str,
+    code: str,
+) -> bool:
+    now_iso = utcnow_iso()
+    row = db.execute(
+        """
+        SELECT id
+        FROM email_verifications
+        WHERE email = ?
+          AND purpose = ?
+          AND code = ?
+          AND status = 'pending'
+          AND expire_at >= ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (email, purpose, (code or "").strip(), now_iso),
+    ).fetchone()
+    if not row:
+        return False
+    db.execute(
+        """
+        UPDATE email_verifications
+        SET status = 'used', used_at = ?
+        WHERE id = ?
+        """,
+        (now_iso, int(row["id"])),
+    )
+    return True
+
+
+def send_verification_email(email: str, purpose_label: str, code: str) -> tuple[bool, str]:
+    smtp_host = (os.environ.get("SMTP_HOST") or "").strip()
+    smtp_user = (os.environ.get("SMTP_USER") or "").strip()
+    smtp_pass = (os.environ.get("SMTP_PASS") or "").strip()
+    smtp_from = (os.environ.get("SMTP_FROM") or smtp_user).strip()
+    smtp_port = parse_int_setting(os.environ.get("SMTP_PORT", "587"), 587, min_value=1)
+    use_tls = (os.environ.get("SMTP_USE_TLS", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+    if not smtp_host or not smtp_from:
+        app.logger.warning(
+            "SMTP 未配置，验证码仅记录日志。email=%s purpose=%s code=%s",
+            email,
+            purpose_label,
+            code,
+        )
+        return True, f"测试环境验证码：{code}（未配置 SMTP，已记录日志）"
+
+    message = EmailMessage()
+    message["Subject"] = "VPN 门户邮箱验证码"
+    message["From"] = smtp_from
+    message["To"] = email
+    message.set_content(
+        "\n".join(
+            [
+                "您好，",
+                "",
+                f"本次操作：{purpose_label}",
+                f"验证码：{code}",
+                f"有效期：{EMAIL_CODE_TTL_MINUTES} 分钟",
+                "",
+                "如非本人操作，请忽略本邮件。",
+            ]
+        )
+    )
+    try:
+        if use_tls:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+                server.starttls()
+                if smtp_user and smtp_pass:
+                    server.login(smtp_user, smtp_pass)
+                server.send_message(message)
+        else:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15) as server:
+                if smtp_user and smtp_pass:
+                    server.login(smtp_user, smtp_pass)
+                server.send_message(message)
+    except Exception as exc:
+        app.logger.exception("验证码邮件发送失败：%s", exc)
+        return False, "验证码邮件发送失败，请稍后重试。"
+    return True, "验证码已发送，请检查邮箱。"
+
+
+def expire_pending_orders(db: sqlite3.Connection) -> int:
+    now_iso = utcnow_iso()
+    rows = db.execute(
+        """
+        SELECT id, note
+        FROM payment_orders
+        WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?
+        """,
+        (now_iso,),
+    ).fetchall()
+    for row in rows:
+        expired_note = f"[系统自动过期] {now_iso}"
+        merged_note = expired_note if not row["note"] else f"{row['note']}\n{expired_note}"
+        db.execute(
+            """
+            UPDATE payment_orders
+            SET status = 'cancelled',
+                note = ?
+            WHERE id = ?
+            """,
+            (merged_note, int(row["id"])),
+        )
+    return len(rows)
+
+
+def cleanup_verification_records(db: sqlite3.Connection) -> None:
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        UPDATE email_verifications
+        SET status = 'expired'
+        WHERE status = 'pending' AND expire_at < ?
+        """,
+        (now_iso,),
+    )
+    cutoff_iso = (utcnow() - timedelta(hours=UNVERIFIED_USER_RETENTION_HOURS)).isoformat()
+    db.execute(
+        """
+        DELETE FROM users
+        WHERE role = 'user'
+          AND email_verified = 0
+          AND created_at < ?
+        """,
+        (cutoff_iso,),
+    )
+
+
+def rotate_user_wireguard_credentials(db: sqlite3.Connection, user: sqlite3.Row) -> sqlite3.Row:
+    old_public_key = (row_get(user, "client_public_key", "") or "").strip()
+    if old_public_key:
+        remove_wireguard_peer(old_public_key)
+
+    assigned_ip = row_get(user, "assigned_ip")
+    if is_dynamic_ip_assignment_mode() or not assigned_ip:
+        assigned_ip = next_available_ip(db, exclude_user_id=int(user["id"]))
+    bundle = generate_wireguard_bundle(user["username"], int(user["id"]), str(assigned_ip))
+    db.execute(
+        """
+        UPDATE users
+        SET assigned_ip = ?,
+            client_private_key = ?,
+            client_public_key = ?,
+            client_psk = ?,
+            config_path = ?,
+            qr_path = ?,
+            wg_enabled = ?
+        WHERE id = ?
+        """,
+        (
+            bundle["assigned_ip"],
+            bundle["client_private_key"],
+            bundle["client_public_key"],
+            bundle["client_psk"],
+            bundle["config_path"],
+            bundle["qr_path"],
+            int(row_get(user, "wg_enabled", 0) or 0),
+            int(user["id"]),
+        ),
+    )
+    return db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+
+
+def apply_password_change(
+    db: sqlite3.Connection,
+    user: sqlite3.Row,
+    *,
+    new_password: str,
+    clear_force_change: bool = False,
+    rotate_vpn: bool = True,
+) -> None:
+    update_fields = [
+        "password_hash = ?",
+        "session_version = session_version + 1",
+    ]
+    params: list[object] = [generate_password_hash(new_password)]
+    if clear_force_change:
+        update_fields.append("force_password_change = 0")
+    params.append(int(user["id"]))
+    db.execute(
+        f"UPDATE users SET {', '.join(update_fields)} WHERE id = ?",
+        params,
+    )
+    refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+    if rotate_vpn and refreshed and (row_get(refreshed, "client_public_key", "") or "").strip():
+        rotate_user_wireguard_credentials(db, refreshed)
+
+
+def grant_new_user_welcome_entitlement(db: sqlite3.Connection, user_id: int) -> None:
+    duration_months, traffic_gb = get_gift_settings(db)
+    if duration_months <= 0 and traffic_gb <= 0:
+        return
+
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return
+
+    subscription_expires_at = row_get(user, "subscription_expires_at")
+    if duration_months > 0:
+        subscription_expires_at = calculate_new_expiry(subscription_expires_at, duration_months)
+
+    quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
+    if traffic_gb > 0:
+        quota_bytes += traffic_gb * BYTES_PER_GB
+
+    if duration_months > 0 or traffic_gb > 0:
+        vpn_data = ensure_user_vpn_ready(db, user)
+        db.execute(
+            """
+            UPDATE users
+            SET assigned_ip = ?,
+                client_private_key = ?,
+                client_public_key = ?,
+                client_psk = ?,
+                config_path = ?,
+                qr_path = ?,
+                approved_at = ?,
+                subscription_expires_at = ?,
+                traffic_quota_bytes = ?,
+                wg_enabled = 1
+            WHERE id = ?
+            """,
+            (
+                vpn_data["assigned_ip"],
+                vpn_data["client_private_key"],
+                vpn_data["client_public_key"],
+                vpn_data["client_psk"],
+                vpn_data["config_path"],
+                vpn_data["qr_path"],
+                utcnow_iso(),
+                subscription_expires_at,
+                quota_bytes,
+                user_id,
+            ),
+        )
+
+
+@app.route("/captcha.svg")
+def captcha_svg():
+    scene = (request.args.get("scene") or CAPTCHA_SCENE_DEFAULT).strip().lower()
+    if scene not in CAPTCHA_SCENES:
+        scene = CAPTCHA_SCENE_DEFAULT
+
+    text = generate_captcha_text()
+    session[captcha_session_key(scene)] = {
+        "text": text,
+        "expire_at": (utcnow() + timedelta(minutes=CAPTCHA_TTL_MINUTES)).isoformat(),
+    }
+
+    chars: list[str] = []
+    for idx, char in enumerate(text):
+        x = 14 + idx * 22
+        y = 32 + random.randint(-3, 3)
+        rotate = random.randint(-16, 16)
+        chars.append(
+            f'<text x="{x}" y="{y}" transform="rotate({rotate} {x} {y})">{char}</text>'
+        )
+    lines: list[str] = []
+    for _ in range(4):
+        x1, y1 = random.randint(0, 124), random.randint(0, 40)
+        x2, y2 = random.randint(0, 124), random.randint(0, 40)
+        lines.append(
+            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#a7b8d8" stroke-width="1" />'
+        )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="124" height="40" viewBox="0 0 124 40">'
+        '<rect width="124" height="40" rx="6" ry="6" fill="#edf2fb" />'
+        + "".join(lines)
+        + '<g font-family="Verdana,sans-serif" font-size="23" font-weight="700" fill="#0f2748">'
+        + "".join(chars)
+        + "</g></svg>"
+    )
+    return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
 @app.route("/")
 def index():
     if session.get("user_id"):
         return redirect(url_for("dashboard"))
     db = get_db()
     landing_plans = load_subscription_plans(db, active_only=True)
+    registration_open = is_registration_open(db)
     return render_template(
         "index.html",
         landing_plans=landing_plans,
+        registration_open=registration_open,
     )
+
+
+@app.route("/register/send-code", methods=["POST"])
+def register_send_code():
+    db = get_db()
+    if not is_registration_open(db):
+        return "", 404
+
+    email = request.form.get("email", "").strip().lower()
+    captcha = request.form.get("captcha", "")
+    if not looks_like_email(email):
+        flash("邮箱格式不正确。", "error")
+        return redirect(url_for("register", email=email))
+    if not validate_captcha_input("register", captcha):
+        flash("图片验证码错误或已过期。", "error")
+        return redirect(url_for("register", email=email))
+
+    existing_user = db.execute("SELECT id FROM users WHERE email = ? LIMIT 1", (email,)).fetchone()
+    if existing_user:
+        flash("该邮箱已注册，请直接登录。", "error")
+        return redirect(url_for("register", email=email))
+
+    allowed, message = can_send_email_code(db, email, EMAIL_CODE_PURPOSE_REGISTER)
+    if not allowed:
+        flash(message, "error")
+        return redirect(url_for("register", email=email))
+
+    code = "".join(random.choice(string.digits) for _ in range(6))
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        create_email_verification_code(
+            db,
+            email=email,
+            purpose=EMAIL_CODE_PURPOSE_REGISTER,
+            code=code,
+            ip_address=get_client_ip(),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    ok, message = send_verification_email(email, "注册", code)
+    flash(message, "success" if ok else "error")
+    return redirect(url_for("register", email=email))
 
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    client_ip = get_client_ip()
     db = get_db()
+    if not is_registration_open(db):
+        return "", 404
+
+    client_ip = get_client_ip()
     cooldown_seconds = get_registration_cooldown_seconds(db, client_ip)
     register_limit_minutes = REGISTER_COOLDOWN_SECONDS // 60
+    email_prefill = request.values.get("email", "").strip().lower()
 
     def render_register():
         return render_template(
@@ -4256,6 +5003,7 @@ def register():
             client_ip=client_ip,
             register_limit_seconds=REGISTER_COOLDOWN_SECONDS,
             register_limit_minutes=register_limit_minutes,
+            email_prefill=email_prefill,
         )
 
     if request.method == "POST":
@@ -4268,12 +5016,25 @@ def register():
 
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        email_code = request.form.get("email_code", "").strip()
+        captcha = request.form.get("captcha", "")
+        email_prefill = email
 
-        if "@" not in email or len(email) < 5:
+        if not validate_captcha_input("register", captcha):
+            flash("图片验证码错误或已过期。", "error")
+            return render_register()
+        if not looks_like_email(email):
             flash("邮箱格式不正确。", "error")
             return render_register()
         if len(password) < 8:
             flash("密码长度至少需要 8 位。", "error")
+            return render_register()
+        if password != confirm_password:
+            flash("两次输入密码不一致。", "error")
+            return render_register()
+        if not re.fullmatch(r"\d{6}", email_code):
+            flash("邮箱验证码格式不正确。", "error")
             return render_register()
 
         username = email
@@ -4288,14 +5049,28 @@ def register():
                     "error",
                 )
                 return render_register()
+            if not consume_email_verification_code(
+                db,
+                email=email,
+                purpose=EMAIL_CODE_PURPOSE_REGISTER,
+                code=email_code,
+            ):
+                db.rollback()
+                flash("邮箱验证码无效或已过期。", "error")
+                return render_register()
             db.execute(
                 """
-                INSERT INTO users (username, email, password_hash, role, status, created_at, approved_at)
-                VALUES (?, ?, ?, 'user', 'approved', ?, ?)
+                INSERT INTO users (
+                    username, email, password_hash, role, status,
+                    email_verified, created_at, approved_at, session_version
+                )
+                VALUES (?, ?, ?, 'user', 'approved', 1, ?, ?, 1)
                 """,
                 (username, email, generate_password_hash(password), now_iso, now_iso),
             )
+            user_id = int(db.execute("SELECT last_insert_rowid() AS lid").fetchone()["lid"])
             mark_registration_success(db, client_ip, now_iso)
+            grant_new_user_welcome_entitlement(db, user_id)
             db.commit()
             flash("注册成功，请登录后创建订阅订单。", "success")
             return redirect(url_for("login"))
@@ -4314,14 +5089,23 @@ def register():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    registration_open = is_registration_open(get_db())
     if request.method == "POST":
         identity = request.form.get("identity", "").strip()
         password = request.form.get("password", "")
+        captcha = request.form.get("captcha", "")
+
+        if not validate_captcha_input("login", captcha):
+            flash("图片验证码错误或已过期。", "error")
+            return render_template("login.html", registration_open=registration_open)
 
         user = authenticate_user(identity, password)
         if not user:
             flash("用户名/邮箱或密码错误。", "error")
-            return render_template("login.html")
+            return render_template("login.html", registration_open=registration_open)
+        if row_get(user, "role") == "user" and int(row_get(user, "email_verified", 0) or 0) != 1:
+            flash("邮箱尚未验证，暂时无法登录。", "error")
+            return render_template("login.html", registration_open=registration_open)
 
         login_user_session(user)
         if admin_must_change_password(user):
@@ -4329,7 +5113,7 @@ def login():
             return redirect(url_for("admin_change_password"))
         flash("登录成功。", "success")
         return redirect(url_for("dashboard"))
-    return render_template("login.html")
+    return render_template("login.html", registration_open=registration_open)
 
 
 @app.route("/api/login", methods=["POST"])
@@ -4350,6 +5134,11 @@ def api_login():
             "ok": False,
             "error": "用户名/邮箱或密码错误",
         }, 401
+    if row_get(user, "role") == "user" and int(row_get(user, "email_verified", 0) or 0) != 1:
+        return {
+            "ok": False,
+            "error": "邮箱尚未验证",
+        }, 403
 
     login_user_session(user)
     redirect_url = url_for("dashboard")
@@ -4363,6 +5152,116 @@ def api_login():
         "redirect": redirect_url,
         "require_password_change": require_password_change,
     }, 200
+
+
+@app.route("/password-recover/send-code", methods=["POST"])
+def password_recover_send_code():
+    db = get_db()
+    email = request.form.get("email", "").strip().lower()
+    captcha = request.form.get("captcha", "")
+    if not looks_like_email(email):
+        flash("邮箱格式不正确。", "error")
+        return redirect(url_for("password_recover", email=email))
+    if not validate_captcha_input("recover", captcha):
+        flash("图片验证码错误或已过期。", "error")
+        return redirect(url_for("password_recover", email=email))
+
+    user = db.execute(
+        "SELECT id FROM users WHERE email = ? AND role = 'user' LIMIT 1",
+        (email,),
+    ).fetchone()
+    if not user:
+        flash("该邮箱未注册。", "error")
+        return redirect(url_for("password_recover", email=email))
+
+    allowed, message = can_send_email_code(db, email, EMAIL_CODE_PURPOSE_RECOVER)
+    if not allowed:
+        flash(message, "error")
+        return redirect(url_for("password_recover", email=email))
+
+    code = "".join(random.choice(string.digits) for _ in range(6))
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        create_email_verification_code(
+            db,
+            email=email,
+            purpose=EMAIL_CODE_PURPOSE_RECOVER,
+            code=code,
+            ip_address=get_client_ip(),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    ok, message = send_verification_email(email, "找回密码", code)
+    flash(message, "success" if ok else "error")
+    return redirect(url_for("password_recover", email=email))
+
+
+@app.route("/password-recover", methods=["GET", "POST"])
+def password_recover():
+    email_prefill = request.values.get("email", "").strip().lower()
+    if request.method == "POST":
+        db = get_db()
+        email = request.form.get("email", "").strip().lower()
+        email_prefill = email
+        email_code = request.form.get("email_code", "").strip()
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        captcha = request.form.get("captcha", "")
+
+        if not validate_captcha_input("recover", captcha):
+            flash("图片验证码错误或已过期。", "error")
+            return render_template("password_recover.html", email_prefill=email_prefill)
+        if not looks_like_email(email):
+            flash("邮箱格式不正确。", "error")
+            return render_template("password_recover.html", email_prefill=email_prefill)
+        if len(new_password) < 8:
+            flash("新密码长度至少需要 8 位。", "error")
+            return render_template("password_recover.html", email_prefill=email_prefill)
+        if new_password != confirm_password:
+            flash("两次输入的新密码不一致。", "error")
+            return render_template("password_recover.html", email_prefill=email_prefill)
+        if not re.fullmatch(r"\d{6}", email_code):
+            flash("邮箱验证码格式不正确。", "error")
+            return render_template("password_recover.html", email_prefill=email_prefill)
+
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            user = db.execute(
+                "SELECT * FROM users WHERE email = ? AND role = 'user' LIMIT 1",
+                (email,),
+            ).fetchone()
+            if not user:
+                db.rollback()
+                flash("该邮箱未注册。", "error")
+                return render_template("password_recover.html", email_prefill=email_prefill)
+            if not consume_email_verification_code(
+                db,
+                email=email,
+                purpose=EMAIL_CODE_PURPOSE_RECOVER,
+                code=email_code,
+            ):
+                db.rollback()
+                flash("邮箱验证码无效或已过期。", "error")
+                return render_template("password_recover.html", email_prefill=email_prefill)
+            apply_password_change(
+                db,
+                user,
+                new_password=new_password,
+                clear_force_change=False,
+                rotate_vpn=True,
+            )
+            db.commit()
+            session.clear()
+            flash("密码已重置，请使用新密码登录。", "success")
+            return redirect(url_for("login"))
+        except Exception:
+            db.rollback()
+            raise
+
+    return render_template("password_recover.html", email_prefill=email_prefill)
 
 
 
@@ -4400,16 +5299,16 @@ def admin_change_password():
             flash("新密码不能与当前密码相同。", "error")
         else:
             db = get_db()
-            db.execute(
-                """
-                UPDATE users
-                SET password_hash = ?,
-                    force_password_change = 0
-                WHERE id = ?
-                """,
-                (generate_password_hash(new_password), user["id"]),
+            apply_password_change(
+                db,
+                user,
+                new_password=new_password,
+                clear_force_change=True,
+                rotate_vpn=True,
             )
             db.commit()
+            refreshed_user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+            login_user_session(refreshed_user)
             flash("密码修改成功，请继续完成初始化向导。", "success")
             return redirect(url_for("admin_home", onboarding_open="1"))
 
@@ -4438,6 +5337,8 @@ def dashboard_home():
 
     db = get_db()
     reconcile_expired_subscriptions(db)
+    health_overview = refresh_server_health_status(db)
+    db.commit()
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
     user = sync_user_traffic_usage(db, user)
     traffic_stats = get_user_traffic_stats(user)
@@ -4451,6 +5352,11 @@ def dashboard_home():
         assigned_ip_display = "DHCP 动态分配"
     else:
         assigned_ip_display = user["assigned_ip"] or "暂未分配"
+    node_alert_text = ""
+    if health_overview["total"] > 0 and health_overview["online"] == 0:
+        node_alert_text = "当前节点异常，VPN 服务暂不可用，系统正在恢复。"
+    elif health_overview["abnormal"] > 0:
+        node_alert_text = "当前节点异常，系统正在切换。"
 
     return render_template(
         "dashboard_home.html",
@@ -4459,6 +5365,7 @@ def dashboard_home():
         traffic_stats=traffic_stats,
         subscription_expiry_display=subscription_expiry_display,
         assigned_ip_display=assigned_ip_display,
+        node_alert_text=node_alert_text,
         dashboard_page="home",
     )
 
@@ -4473,6 +5380,67 @@ def dashboard_guide():
         "dashboard_guide.html",
         dashboard_page="guide",
     )
+
+
+@app.route("/dashboard/profile", methods=["GET", "POST"])
+@login_required
+def dashboard_profile():
+    user = current_user()
+    if user["role"] == "admin":
+        return redirect(url_for("admin_home"))
+
+    if request.method == "POST":
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not current_password or not new_password or not confirm_password:
+            flash("请完整填写当前密码和新密码。", "error")
+            return render_template("dashboard_profile.html", dashboard_page="profile")
+        if len(new_password) < 8:
+            flash("新密码长度至少需要 8 位。", "error")
+            return render_template("dashboard_profile.html", dashboard_page="profile")
+        if new_password != confirm_password:
+            flash("两次输入的新密码不一致。", "error")
+            return render_template("dashboard_profile.html", dashboard_page="profile")
+
+        db = get_db()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            latest_user = db.execute(
+                "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+                (user["id"],),
+            ).fetchone()
+            if not latest_user:
+                db.rollback()
+                session.clear()
+                flash("用户不存在，请重新登录。", "error")
+                return redirect(url_for("login"))
+            if not check_password_hash(latest_user["password_hash"], current_password):
+                db.rollback()
+                flash("当前密码不正确。", "error")
+                return render_template("dashboard_profile.html", dashboard_page="profile")
+            if check_password_hash(latest_user["password_hash"], new_password):
+                db.rollback()
+                flash("新密码不能与当前密码相同。", "error")
+                return render_template("dashboard_profile.html", dashboard_page="profile")
+
+            apply_password_change(
+                db,
+                latest_user,
+                new_password=new_password,
+                clear_force_change=False,
+                rotate_vpn=True,
+            )
+            db.commit()
+            session.clear()
+            flash("密码修改成功，请重新登录。", "success")
+            return redirect(url_for("login"))
+        except Exception:
+            db.rollback()
+            raise
+
+    return render_template("dashboard_profile.html", dashboard_page="profile")
 
 
 @app.route("/dashboard/orders")
@@ -4491,7 +5459,7 @@ def dashboard_orders():
     pending_orders = db.execute(
         """
         SELECT id, plan_months, plan_name, plan_mode, plan_duration_months, plan_traffic_gb, status, created_at,
-               payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at
+               payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at, expires_at
         FROM payment_orders
         WHERE user_id = ? AND status = 'pending'
         ORDER BY created_at DESC
@@ -4589,13 +5557,14 @@ def create_subscription_order():
     plan_display = format_plan_display_name(
         plan["plan_name"], plan_mode, duration_months, traffic_gb
     )
+    order_expire_at = (utcnow() + timedelta(hours=get_order_expire_hours(db))).isoformat()
     db.execute(
         """
         INSERT INTO payment_orders (
             user_id, plan_months, plan_id, plan_name, plan_mode, plan_duration_months, plan_traffic_gb,
-            payment_method, usdt_network, usdt_amount, pay_to_address, status, created_at
+            payment_method, usdt_network, usdt_amount, pay_to_address, expires_at, status, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """,
         (
             user["id"],
@@ -4609,12 +5578,16 @@ def create_subscription_order():
             network,
             format_usdt(usdt_amount),
             receive_address,
+            order_expire_at,
             utcnow_iso(),
         ),
     )
     db.commit()
     flash(
-        f"USDT 订单已创建：{plan_display} / {format_usdt(usdt_amount)} USDT。请完成支付后提交 TxHash。",
+        (
+            f"USDT 订单已创建：{plan_display} / {format_usdt(usdt_amount)} USDT。"
+            f" 订单将在 {format_utc(order_expire_at)} 自动过期。请完成支付后提交 TxHash。"
+        ),
         "success",
     )
     return redirect(url_for("dashboard_orders"))
@@ -4728,6 +5701,7 @@ def load_admin_pending_orders(db: sqlite3.Connection):
             o.tx_hash,
             o.tx_submitted_at,
             o.created_at,
+            o.expires_at,
             u.username,
             u.email,
             u.subscription_expires_at
@@ -5665,6 +6639,8 @@ def admin_onboarding():
 @admin_required
 def admin_servers():
     db = get_db()
+    refresh_server_health_status(db, force=True)
+    db.commit()
     servers = load_admin_servers(db)
     available_domains = load_available_managed_domains(db)
     return render_template(
@@ -6065,6 +7041,7 @@ def admin_home():
     )
     first_plan = load_first_plan_for_onboarding(db)
     payment_settings = load_payment_settings(db)
+    system_settings = load_system_settings(db)
     onboarding_server_draft = load_onboarding_server_draft(db)
     cloudflare_accounts = load_cloudflare_accounts(db, active_only=False)
     first_cloudflare_account = cloudflare_accounts[0] if cloudflare_accounts else None
@@ -6091,6 +7068,38 @@ def admin_home():
     total_users = db.execute(
         "SELECT COUNT(*) AS cnt FROM users WHERE role='user'"
     ).fetchone()["cnt"]
+    server_overview = refresh_server_health_status(db)
+    servers = load_admin_servers(db)
+    abnormal_servers = [s for s in servers if (s.get("status") or "").strip().lower() != "online"]
+    expiring_subscriptions: list[dict] = []
+    now_dt = utcnow()
+    expire_before = now_dt + timedelta(days=7)
+    expiring_rows = db.execute(
+        """
+        SELECT id, username, email, subscription_expires_at
+        FROM users
+        WHERE role = 'user'
+          AND wg_enabled = 1
+          AND subscription_expires_at IS NOT NULL
+        ORDER BY subscription_expires_at ASC
+        LIMIT 20
+        """
+    ).fetchall()
+    for row in expiring_rows:
+        expires_at = parse_iso(row_get(row, "subscription_expires_at", ""))
+        if not expires_at:
+            continue
+        if expires_at < now_dt or expires_at > expire_before:
+            continue
+        expiring_subscriptions.append(
+            {
+                "id": int(row["id"]),
+                "username": (row["username"] or "").strip(),
+                "email": (row["email"] or "").strip(),
+                "subscription_expires_at": row["subscription_expires_at"],
+            }
+        )
+    db.commit()
 
     return render_template(
         "admin_home.html",
@@ -6098,6 +7107,11 @@ def admin_home():
         paid_count=paid_count,
         active_subscriptions=active_subscriptions,
         total_users=total_users,
+        server_total_count=server_overview["total"],
+        online_server_count=server_overview["online"],
+        abnormal_server_count=server_overview["abnormal"],
+        abnormal_servers=abnormal_servers[:8],
+        expiring_subscriptions=expiring_subscriptions[:8],
         webhook_enabled=bool(PAYMENT_WEBHOOK_SECRET),
         webhook_min_confirmations=PAYMENT_MIN_CONFIRMATIONS,
         onboarding_settings=onboarding_settings,
@@ -6107,6 +7121,7 @@ def admin_home():
         onboarding_force_open=onboarding_force_open,
         first_plan=first_plan,
         payment_settings=payment_settings,
+        system_settings=system_settings,
         onboarding_server_draft=onboarding_server_draft,
         onboarding_cloudflare_default=onboarding_cloudflare_default,
         admin_self_ready=admin_self_ready,
@@ -6661,6 +7676,39 @@ def redirect_admin_subscriptions():
     return redirect(url_for("admin_subscriptions"))
 
 
+@app.route("/admin/settings/system", methods=["POST"])
+@login_required
+@admin_required
+def admin_update_system_settings():
+    db = get_db()
+    registration_open = request.form.get("registration_open", "1").strip() == "1"
+    order_expire_hours_raw = request.form.get("order_expire_hours", "").strip()
+    gift_duration_raw = request.form.get("gift_duration_months", "").strip()
+    gift_traffic_raw = request.form.get("gift_traffic_gb", "").strip()
+    telegram_contact = request.form.get("telegram_contact", "").strip()
+
+    try:
+        order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
+        gift_duration_months = parse_int_setting(gift_duration_raw, 0, min_value=0)
+        gift_traffic_gb = parse_int_setting(gift_traffic_raw, 0, min_value=0)
+    except Exception:
+        flash("系统设置参数无效。", "error")
+        return redirect(url_for("admin_home"))
+
+    if order_expire_hours <= 0:
+        flash("订单过期小时数必须大于 0。", "error")
+        return redirect(url_for("admin_home"))
+
+    upsert_app_setting(db, SETTING_REGISTRATION_OPEN, "1" if registration_open else "0")
+    upsert_app_setting(db, SETTING_ORDER_EXPIRE_HOURS, str(order_expire_hours))
+    upsert_app_setting(db, SETTING_GIFT_DURATION_MONTHS, str(gift_duration_months))
+    upsert_app_setting(db, SETTING_GIFT_TRAFFIC_GB, str(gift_traffic_gb))
+    upsert_app_setting(db, SETTING_TELEGRAM_CONTACT, telegram_contact[:160])
+    db.commit()
+    flash("系统设置已更新。", "success")
+    return redirect(url_for("admin_home"))
+
+
 @app.route("/admin/settings/payment", methods=["POST"])
 @login_required
 @admin_required
@@ -7196,7 +8244,7 @@ def admin_delete_user(user_id: int):
     db = get_db()
     user = db.execute(
         """
-        SELECT id, username, role, client_public_key, config_path, qr_path
+        SELECT id, username, email, role, client_public_key, config_path, qr_path
         FROM users
         WHERE id = ? AND role = 'user'
         LIMIT 1
@@ -7205,6 +8253,11 @@ def admin_delete_user(user_id: int):
     ).fetchone()
     if not user:
         flash("用户不存在。", "error")
+        return redirect_admin_subscriptions()
+    confirm_email = (request.form.get("confirm_email", "") or "").strip().lower()
+    expected_email = ((user["email"] or "").strip()).lower()
+    if not confirm_email or confirm_email != expected_email:
+        flash("删除失败：请输入用户邮箱进行二次确认。", "error")
         return redirect_admin_subscriptions()
 
     try:
@@ -7219,6 +8272,7 @@ def admin_delete_user(user_id: int):
         if qr_path:
             Path(qr_path).unlink(missing_ok=True)
 
+        db.execute("DELETE FROM email_verifications WHERE email = ?", (user["email"],))
         db.execute("DELETE FROM users WHERE id = ? AND role = 'user'", (user_id,))
         db.commit()
         flash(f"用户 {user['username']} 已删除。", "success")
@@ -7297,7 +8351,7 @@ def admin_mark_order_paid(order_id: int):
             db,
             order_id,
             source="admin",
-            require_tx_hash=True,
+            require_tx_hash=False,
         )
         if result["status"] == "already_paid":
             flash("该订单已支付。", "success")

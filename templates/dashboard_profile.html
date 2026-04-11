@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard-main">
+  <section class="card narrow">
+    <h3>个人中心</h3>
+    <p class="helper">修改密码后将自动注销全部 Web 会话，并重置 VPN 密钥，需重新下载配置并连接。</p>
+    <form method="post" class="form">
+      <label>当前密码
+        <input type="password" name="current_password" required>
+      </label>
+      <label>新密码
+        <input type="password" name="new_password" minlength="8" required>
+      </label>
+      <label>确认新密码
+        <input type="password" name="confirm_password" minlength="8" required>
+      </label>
+      <button type="submit">保存新密码</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

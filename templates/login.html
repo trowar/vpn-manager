@@ -10,8 +10,33 @@
     <label>密码
       <input type="password" name="password" required>
     </label>
+    <label>图片验证码</label>
+    <div class="captcha-row">
+      <input type="text" name="captcha" maxlength="6" required placeholder="输入右侧验证码">
+      <img
+        id="captcha-login"
+        class="captcha-img"
+        src="{{ url_for('captcha_svg', scene='login') }}"
+        alt="验证码"
+        title="点击刷新验证码"
+      >
+    </div>
     <button type="submit">登录</button>
   </form>
-  <p class="helper">还没有账号？<a href="{{ url_for('register') }}">立即注册</a></p>
+  <p class="helper">忘记密码？<a href="{{ url_for('password_recover') }}">找回密码</a></p>
+  {% if registration_open %}
+    <p class="helper">还没有账号？<a href="{{ url_for('register') }}">立即注册</a></p>
+  {% else %}
+    <p class="helper">当前暂停开放注册，请联系管理员。</p>
+  {% endif %}
 </section>
+<script>
+  (function () {
+    var captcha = document.getElementById("captcha-login");
+    if (!captcha) return;
+    captcha.addEventListener("click", function () {
+      captcha.src = "{{ url_for('captcha_svg', scene='login') }}?t=" + Date.now();
+    });
+  })();
+</script>
 {% endblock %}

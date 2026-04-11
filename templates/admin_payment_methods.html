@@ -10,66 +10,68 @@
   </div>
 
   {% if payment_methods %}
-    <table class="subscriptions-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>名称</th>
-          <th>方式</th>
-          <th>网络</th>
-          <th>收款地址</th>
-          <th>状态</th>
-          <th>排序</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for m in payment_methods %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
           <tr>
-            <td>{{ m["id"] }}</td>
-            <td>{{ m["method_name"] }}</td>
-            <td>{{ m["method_label"] }}</td>
-            <td>{{ m["network"] }}</td>
-            <td><code>{{ m["receive_address"] }}</code></td>
-            <td>
-              {% if m["is_active"] == 1 %}
-                <span class="tag tag-ok">启用中</span>
-              {% else %}
-                <span class="tag tag-warn">已停用</span>
-              {% endif %}
-            </td>
-            <td>{{ m["sort_order"] }}</td>
-            <td>
-              <div class="subscription-actions">
-                <form method="post" action="{{ url_for('admin_toggle_payment_method', method_id=m['id']) }}" class="inline-form">
-                  {% if m["is_active"] == 1 %}
-                    <button type="submit">停用</button>
-                  {% else %}
-                    <button type="submit">启用</button>
-                  {% endif %}
-                </form>
-                <button
-                  type="button"
-                  class="btn secondary open-payment-method-edit-modal"
-                  data-update-url="{{ url_for('admin_update_payment_method', method_id=m['id']) }}"
-                  data-method-name="{{ m['method_name'] }}"
-                  data-method-code="{{ m['method_code'] }}"
-                  data-network="{{ m['network'] }}"
-                  data-address="{{ m['receive_address'] }}"
-                  data-sort-order="{{ m['sort_order'] }}"
-                >编辑</button>
-                <button
-                  type="button"
-                  class="danger open-payment-method-delete-modal"
-                  data-delete-url="{{ url_for('admin_delete_payment_method', method_id=m['id']) }}"
-                  data-method-name="{{ m['method_name'] }}"
-                >删除</button>
-              </div>
-            </td>
+            <th>ID</th>
+            <th>名称</th>
+            <th>方式</th>
+            <th>网络</th>
+            <th>收款地址</th>
+            <th>状态</th>
+            <th>排序</th>
+            <th>操作</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for m in payment_methods %}
+            <tr>
+              <td>{{ m["id"] }}</td>
+              <td>{{ m["method_name"] }}</td>
+              <td>{{ m["method_label"] }}</td>
+              <td>{{ m["network"] }}</td>
+              <td><code>{{ m["receive_address"] }}</code></td>
+              <td>
+                {% if m["is_active"] == 1 %}
+                  <span class="tag tag-ok">启用中</span>
+                {% else %}
+                  <span class="tag tag-warn">已停用</span>
+                {% endif %}
+              </td>
+              <td>{{ m["sort_order"] }}</td>
+              <td>
+                <div class="subscription-actions">
+                  <form method="post" action="{{ url_for('admin_toggle_payment_method', method_id=m['id']) }}" class="inline-form">
+                    {% if m["is_active"] == 1 %}
+                      <button type="submit">停用</button>
+                    {% else %}
+                      <button type="submit">启用</button>
+                    {% endif %}
+                  </form>
+                  <button
+                    type="button"
+                    class="btn secondary open-payment-method-edit-modal"
+                    data-update-url="{{ url_for('admin_update_payment_method', method_id=m['id']) }}"
+                    data-method-name="{{ m['method_name'] }}"
+                    data-method-code="{{ m['method_code'] }}"
+                    data-network="{{ m['network'] }}"
+                    data-address="{{ m['receive_address'] }}"
+                    data-sort-order="{{ m['sort_order'] }}"
+                  >编辑</button>
+                  <button
+                    type="button"
+                    class="danger open-payment-method-delete-modal"
+                    data-delete-url="{{ url_for('admin_delete_payment_method', method_id=m['id']) }}"
+                    data-method-name="{{ m['method_name'] }}"
+                  >删除</button>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
     <p class="helper">暂无付款方式，请先添加。</p>
   {% endif %}

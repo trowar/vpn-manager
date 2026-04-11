@@ -9,78 +9,80 @@
   </div>
 
   {% if managed_domains %}
-    <table class="subscriptions-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>域名</th>
-          <th>Cloudflare 账号</th>
-          <th>分配服务器</th>
-          <th>DNS 记录 ID</th>
-          <th>最近同步</th>
-          <th>状态</th>
-          <th>排序</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for d in managed_domains %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
           <tr>
-            <td>{{ d["id"] }}</td>
-            <td><strong>{{ d["domain_name"] }}</strong></td>
-            <td>
-              <div>{{ d["account_name"] or "-" }}</div>
-              <div class="helper">{{ d["zone_name"] or "-" }}</div>
-            </td>
-            <td>
-              {% if d["assigned_server_id"] %}
-                <div>#{{ d["assigned_server_id"] }} {{ d["assigned_server_name"] or "" }}</div>
-              {% else %}
-                <span class="helper">未分配</span>
-              {% endif %}
-            </td>
-            <td><code>{{ d["dns_record_id"] or "-" }}</code></td>
-            <td>
-              <div>{{ d["last_sync_at"]|fmt_utc }}</div>
-              <div class="helper">{{ d["last_sync_message"] or "-" }}</div>
-            </td>
-            <td>
-              {% if d["is_active"] == 1 %}
-                <span class="tag tag-ok">启用中</span>
-              {% else %}
-                <span class="tag tag-warn">已停用</span>
-              {% endif %}
-            </td>
-            <td>{{ d["sort_order"] }}</td>
-            <td>
-              <div class="subscription-actions">
-                <form method="post" action="{{ url_for('admin_toggle_domain', domain_id=d['id']) }}" class="inline-form">
-                  {% if d["is_active"] == 1 %}
-                    <button type="submit">停用</button>
-                  {% else %}
-                    <button type="submit">启用</button>
-                  {% endif %}
-                </form>
-                <button
-                  type="button"
-                  class="btn secondary open-domain-edit-modal"
-                  data-update-url="{{ url_for('admin_update_domain', domain_id=d['id']) }}"
-                  data-domain-name="{{ d['domain_name'] }}"
-                  data-account-id="{{ d['cloudflare_account_id'] }}"
-                  data-sort-order="{{ d['sort_order'] }}"
-                >编辑</button>
-                <button
-                  type="button"
-                  class="danger open-domain-delete-modal"
-                  data-delete-url="{{ url_for('admin_delete_domain', domain_id=d['id']) }}"
-                  data-domain-name="{{ d['domain_name'] }}"
-                >删除</button>
-              </div>
-            </td>
+            <th>ID</th>
+            <th>域名</th>
+            <th>Cloudflare 账号</th>
+            <th>分配服务器</th>
+            <th>DNS 记录 ID</th>
+            <th>最近同步</th>
+            <th>状态</th>
+            <th>排序</th>
+            <th>操作</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for d in managed_domains %}
+            <tr>
+              <td>{{ d["id"] }}</td>
+              <td><strong>{{ d["domain_name"] }}</strong></td>
+              <td>
+                <div>{{ d["account_name"] or "-" }}</div>
+                <div class="helper">{{ d["zone_name"] or "-" }}</div>
+              </td>
+              <td>
+                {% if d["assigned_server_id"] %}
+                  <div>#{{ d["assigned_server_id"] }} {{ d["assigned_server_name"] or "" }}</div>
+                {% else %}
+                  <span class="helper">未分配</span>
+                {% endif %}
+              </td>
+              <td><code>{{ d["dns_record_id"] or "-" }}</code></td>
+              <td>
+                <div>{{ d["last_sync_at"]|fmt_utc }}</div>
+                <div class="helper">{{ d["last_sync_message"] or "-" }}</div>
+              </td>
+              <td>
+                {% if d["is_active"] == 1 %}
+                  <span class="tag tag-ok">启用中</span>
+                {% else %}
+                  <span class="tag tag-warn">已停用</span>
+                {% endif %}
+              </td>
+              <td>{{ d["sort_order"] }}</td>
+              <td>
+                <div class="subscription-actions">
+                  <form method="post" action="{{ url_for('admin_toggle_domain', domain_id=d['id']) }}" class="inline-form">
+                    {% if d["is_active"] == 1 %}
+                      <button type="submit">停用</button>
+                    {% else %}
+                      <button type="submit">启用</button>
+                    {% endif %}
+                  </form>
+                  <button
+                    type="button"
+                    class="btn secondary open-domain-edit-modal"
+                    data-update-url="{{ url_for('admin_update_domain', domain_id=d['id']) }}"
+                    data-domain-name="{{ d['domain_name'] }}"
+                    data-account-id="{{ d['cloudflare_account_id'] }}"
+                    data-sort-order="{{ d['sort_order'] }}"
+                  >编辑</button>
+                  <button
+                    type="button"
+                    class="danger open-domain-delete-modal"
+                    data-delete-url="{{ url_for('admin_delete_domain', domain_id=d['id']) }}"
+                    data-domain-name="{{ d['domain_name'] }}"
+                  >删除</button>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
     <p class="helper">暂无域名，请到“Cloudflare 账号”页面点击“刷新域名”同步。</p>
   {% endif %}

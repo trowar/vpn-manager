@@ -1,5 +1,17 @@
 # vpn-manager（Docker 架构）
 
+## 一键安装（apt / yum）
+
+```bash
+wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/install.sh | bash
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/install.sh | bash
+```
+
+安装完成后会启动 Web 控制端服务，并打印访问地址与默认管理员账号密码（`admin / admin`，首次登录需改密）。
+
 本项目已拆分为两个主要容器服务：
 
 - `web`：中文管理后台 + 用户门户（Flask）

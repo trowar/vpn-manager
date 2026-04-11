@@ -7,18 +7,45 @@
 
   <form method="post" class="form" id="register-form">
     <label>邮箱
-      <input type="email" name="email" required>
+      <input type="email" name="email" value="{{ email_prefill }}" required>
     </label>
     <label>密码
       <input type="password" name="password" minlength="8" required>
     </label>
-    <button
-      type="submit"
-      id="register-submit"
-      {% if cooldown_seconds and cooldown_seconds > 0 %}disabled{% endif %}
-    >
-      创建账号
-    </button>
+    <label>确认密码
+      <input type="password" name="confirm_password" minlength="8" required>
+    </label>
+    <label>图片验证码</label>
+    <div class="captcha-row">
+      <input type="text" name="captcha" maxlength="6" required placeholder="输入右侧验证码">
+      <img
+        id="captcha-register"
+        class="captcha-img"
+        src="{{ url_for('captcha_svg', scene='register') }}"
+        alt="验证码"
+        title="点击刷新验证码"
+      >
+    </div>
+    <label>邮箱验证码
+      <input type="text" name="email_code" maxlength="6" required placeholder="请输入 6 位数字验证码">
+    </label>
+    <div class="actions">
+      <button
+        type="submit"
+        formaction="{{ url_for('register_send_code') }}"
+        formmethod="post"
+        class="secondary"
+      >
+        发送邮箱验证码
+      </button>
+      <button
+        type="submit"
+        id="register-submit"
+        {% if cooldown_seconds and cooldown_seconds > 0 %}disabled{% endif %}
+      >
+        创建账号
+      </button>
+    </div>
   </form>
 
   <p class="helper" id="cooldown-tip" {% if not cooldown_seconds or cooldown_seconds <= 0 %}style="display:none;"{% endif %}>
@@ -30,49 +57,41 @@
 <script>
   (function () {
     var remaining = Number({{ cooldown_seconds|default(0, true) }});
-    if (!Number.isFinite(remaining) || remaining <= 0) {
-      return;
-    }
-
     var form = document.getElementById("register-form");
     var submitButton = document.getElementById("register-submit");
     var tip = document.getElementById("cooldown-tip");
     var secondsLabel = document.getElementById("cooldown-seconds");
-    var timerId = null;
+    var captcha = document.getElementById("captcha-register");
 
-    if (submitButton) {
-      submitButton.disabled = true;
+    function refreshCaptcha() {
+      if (!captcha) return;
+      captcha.src = "{{ url_for('captcha_svg', scene='register') }}?t=" + Date.now();
     }
 
-    if (form) {
-      form.addEventListener("submit", function (event) {
-        if (remaining > 0) {
-          event.preventDefault();
-        }
-      });
-    }
+    if (captcha) captcha.addEventListener("click", refreshCaptcha);
 
-    function tick() {
-      if (secondsLabel) {
-        secondsLabel.textContent = String(Math.max(remaining, 0));
+    if (Number.isFinite(remaining) && remaining > 0) {
+      if (submitButton) submitButton.disabled = true;
+      if (form) {
+        form.addEventListener("submit", function (event) {
+          if (event.submitter && event.submitter.formAction.indexOf("send-code") !== -1) {
+            return;
+          }
+          if (remaining > 0) event.preventDefault();
+        });
       }
-      if (remaining <= 0) {
-        if (submitButton) {
-          submitButton.disabled = false;
+      function tick() {
+        if (secondsLabel) secondsLabel.textContent = String(Math.max(remaining, 0));
+        if (remaining <= 0) {
+          if (submitButton) submitButton.disabled = false;
+          if (tip) tip.textContent = "已到可注册时间，现在可以提交。";
+          return;
         }
-        if (tip) {
-          tip.textContent = "已到可注册时间，现在可以提交。";
-        }
-        if (timerId !== null) {
-          window.clearInterval(timerId);
-        }
-        return;
+        remaining -= 1;
+        window.setTimeout(tick, 1000);
       }
-      remaining -= 1;
+      tick();
     }
-
-    tick();
-    timerId = window.setInterval(tick, 1000);
   })();
 </script>
 {% endblock %}

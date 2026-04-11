@@ -10,68 +10,70 @@
   </div>
 
   {% if plans %}
-    <table class="subscriptions-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>套餐名称</th>
-          <th>收费模式</th>
-          <th>套餐内容</th>
-          <th>价格</th>
-          <th>状态</th>
-          <th>排序</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for plan in plans %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
           <tr>
-            <td>{{ plan["id"] }}</td>
-            <td>{{ plan["plan_name"] }}</td>
-            <td>{{ plan["mode_label"] }}</td>
-            <td>{{ plan["value_label"] }}</td>
-            <td>{{ plan["price_usdt"] }} USDT</td>
-            <td>
-              {% if plan["is_active"] == 1 %}
-                <span class="tag tag-ok">启用中</span>
-              {% else %}
-                <span class="tag tag-warn">已停用</span>
-              {% endif %}
-            </td>
-            <td>{{ plan["sort_order"] }}</td>
-            <td>
-              <div class="subscription-actions">
-                <form method="post" action="{{ url_for('admin_toggle_plan', plan_id=plan['id']) }}" class="inline-form">
-                  {% if plan["is_active"] == 1 %}
-                    <button type="submit">停用</button>
-                  {% else %}
-                    <button type="submit">启用</button>
-                  {% endif %}
-                </form>
-                <button
-                  type="button"
-                  class="btn secondary open-plan-edit-modal"
-                  data-plan-id="{{ plan['id'] }}"
-                  data-plan-name="{{ plan['plan_name'] }}"
-                  data-billing-mode="{{ plan['billing_mode'] }}"
-                  data-duration-months="{{ plan['duration_months'] }}"
-                  data-traffic-gb="{{ plan['traffic_gb'] }}"
-                  data-price-usdt="{{ plan['price_usdt'] }}"
-                  data-sort-order="{{ plan['sort_order'] }}"
-                  data-update-url="{{ url_for('admin_update_plan', plan_id=plan['id']) }}"
-                >编辑</button>
-                <button
-                  type="button"
-                  class="danger open-plan-delete-modal"
-                  data-plan-name="{{ plan['plan_name'] }}"
-                  data-delete-url="{{ url_for('admin_delete_plan', plan_id=plan['id']) }}"
-                >删除</button>
-              </div>
-            </td>
+            <th>ID</th>
+            <th>套餐名称</th>
+            <th>收费模式</th>
+            <th>套餐内容</th>
+            <th>价格</th>
+            <th>状态</th>
+            <th>排序</th>
+            <th>操作</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for plan in plans %}
+            <tr>
+              <td>{{ plan["id"] }}</td>
+              <td>{{ plan["plan_name"] }}</td>
+              <td>{{ plan["mode_label"] }}</td>
+              <td>{{ plan["value_label"] }}</td>
+              <td>{{ plan["price_usdt"] }} USDT</td>
+              <td>
+                {% if plan["is_active"] == 1 %}
+                  <span class="tag tag-ok">启用中</span>
+                {% else %}
+                  <span class="tag tag-warn">已停用</span>
+                {% endif %}
+              </td>
+              <td>{{ plan["sort_order"] }}</td>
+              <td>
+                <div class="subscription-actions">
+                  <form method="post" action="{{ url_for('admin_toggle_plan', plan_id=plan['id']) }}" class="inline-form">
+                    {% if plan["is_active"] == 1 %}
+                      <button type="submit">停用</button>
+                    {% else %}
+                      <button type="submit">启用</button>
+                    {% endif %}
+                  </form>
+                  <button
+                    type="button"
+                    class="btn secondary open-plan-edit-modal"
+                    data-plan-id="{{ plan['id'] }}"
+                    data-plan-name="{{ plan['plan_name'] }}"
+                    data-billing-mode="{{ plan['billing_mode'] }}"
+                    data-duration-months="{{ plan['duration_months'] }}"
+                    data-traffic-gb="{{ plan['traffic_gb'] }}"
+                    data-price-usdt="{{ plan['price_usdt'] }}"
+                    data-sort-order="{{ plan['sort_order'] }}"
+                    data-update-url="{{ url_for('admin_update_plan', plan_id=plan['id']) }}"
+                  >编辑</button>
+                  <button
+                    type="button"
+                    class="danger open-plan-delete-modal"
+                    data-plan-name="{{ plan['plan_name'] }}"
+                    data-delete-url="{{ url_for('admin_delete_plan', plan_id=plan['id']) }}"
+                  >删除</button>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
     <p class="helper">暂无套餐，请先添加套餐。</p>
   {% endif %}

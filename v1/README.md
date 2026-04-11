@@ -13,13 +13,14 @@ curl -fsSL https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/
 ## 本地开发
 
 ```bash
-cd v1
+cd .
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-flask --app app init-db
-flask --app app run --host 0.0.0.0 --port 8080
+python app.py
 ```
+
+`v1/wsgi.py` 已切换为加载仓库根目录 `app.py`（完整功能版）。
 
 默认管理员：
 
