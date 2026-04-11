@@ -293,6 +293,18 @@ table {
   word-break: break-word;
 }
 
+.subscriptions-table td code.table-code-wrap {
+  display: inline-block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.cloudflare-account-table td:nth-child(5) {
+  max-width: 380px;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--border);

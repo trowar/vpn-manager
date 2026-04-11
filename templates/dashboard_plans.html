@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard-main">
+  <section class="card">
+    <div class="section-title-row">
+      <h3>套餐</h3>
+      <a class="btn" href="{{ url_for('dashboard_orders') }}">去下单</a>
+    </div>
+    {% if available_plans %}
+      <table class="subscriptions-table">
+        <thead>
+          <tr>
+            <th>套餐名称</th>
+            <th>收费模式</th>
+            <th>套餐内容</th>
+            <th>价格</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for plan in available_plans %}
+            <tr>
+              <td>{{ plan["plan_name"] }}</td>
+              <td>{{ plan["mode_label"] }}</td>
+              <td>{{ plan["value_label"] }}</td>
+              <td><strong>{{ plan["price_usdt"] }} USDT</strong></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="helper">按时长套餐默认不限流量；按流量套餐默认永久有效期。</p>
+    {% else %}
+      <p class="helper">当前暂无可售套餐，请联系管理员配置后再试。</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard-main">
+  <section class="card">
+    <h3>配置</h3>
+    {% if node_alert_text %}
+      <div class="alert alert-error">{{ node_alert_text }}</div>
+    {% endif %}
+
+    {% if active %}
+      <div class="actions">
+        <a class="btn" href="{{ url_for('download_config', mode='global') }}">下载 WireGuard 配置（全局代理）</a>
+        <a class="btn secondary" href="{{ url_for('download_openvpn_config', mode='global') }}">下载 OpenVPN 配置（全局代理）</a>
+      </div>
+      <div class="payment-qr-wrap">
+        <img src="{{ url_for('download_qr', mode='global') }}" alt="WireGuard 全局代理二维码" loading="eager">
+      </div>
+      <p class="helper">二维码为 WireGuard 全局代理配置，手机端可直接扫码导入。</p>
+    {% else %}
+      <p class="helper">当前账号未生效，配置文件下载已停用。你仍可先安装客户端，待套餐生效后再下载配置。</p>
+    {% endif %}
+
+    <hr class="section-divider">
+
+    <h4>客户端下载</h4>
+    <div class="actions">
+      <a class="btn secondary" href="{{ url_for('wireguard_download_auto') }}">一键下载 WireGuard 客户端</a>
+      <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部 WireGuard 下载入口</a>
+      <a class="btn secondary" href="{{ url_for('openvpn_download_auto') }}">一键下载 OpenVPN 客户端</a>
+      <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">全部 OpenVPN 下载入口</a>
+    </div>
+
+    <hr class="section-divider">
+
+    <h4>使用说明</h4>
+    <ol class="guide-steps">
+      <li>选择客户端类型：WireGuard 或 OpenVPN。</li>
+      <li>确认账号状态为“已生效”。</li>
+      <li>下载对应配置文件（WireGuard `.conf` / OpenVPN `.ovpn`）。</li>
+      <li>在客户端导入配置文件并连接。</li>
+      <li>连接成功后即可使用。</li>
+    </ol>
+
+    <div class="guide-image-grid">
+      <figure class="guide-image-card">
+        <img src="{{ url_for('static', filename='openvpn_import_step1.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤1">
+        <figcaption>OpenVPN 导入步骤 1：点击 “Have a configuration file instead (.ovpn)?”，再点击 “Upload File”。</figcaption>
+      </figure>
+      <figure class="guide-image-card">
+        <img src="{{ url_for('static', filename='openvpn_import_step2.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤2">
+        <figcaption>OpenVPN 导入步骤 2：选择下载的 `.ovpn` 文件，点击“打开”完成导入。</figcaption>
+      </figure>
+    </div>
+    <p class="helper">常见问题：连接失败时先检查套餐状态、系统时间、以及本地网络是否拦截 VPN。</p>
+  </section>
+</div>
+{% endblock %}

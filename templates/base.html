@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title or "VPN 门户" }}</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg', v='20260409-1') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260411-1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260411-2') }}">
 </head>
 <body>
   <div class="app-shell{% if not current_user %} app-shell-guest{% endif %}">
@@ -33,8 +33,9 @@
           <a class="site-nav-link {% if admin_page == 'change_password' %}active{% endif %}" href="{{ url_for('admin_change_password') }}">修改密码</a>
         {% else %}
           <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
-          <a class="site-nav-link {% if dashboard_page == 'guide' %}active{% endif %}" href="{{ url_for('dashboard_guide') }}">使用说明</a>
+          <a class="site-nav-link {% if dashboard_page == 'plans' %}active{% endif %}" href="{{ url_for('dashboard_plans') }}">套餐</a>
           <a class="site-nav-link {% if dashboard_page == 'orders' %}active{% endif %}" href="{{ url_for('dashboard_orders') }}">订单管理</a>
+          <a class="site-nav-link {% if dashboard_page == 'config' %}active{% endif %}" href="{{ url_for('dashboard_config') }}">配置</a>
           <a class="site-nav-link {% if dashboard_page == 'profile' %}active{% endif %}" href="{{ url_for('dashboard_profile') }}">个人中心</a>
         {% endif %}
         <a class="site-nav-link" href="{{ url_for('logout') }}">退出登录</a>

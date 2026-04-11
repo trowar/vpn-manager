@@ -11,7 +11,7 @@
 
   {% if cloudflare_accounts %}
     <div class="table-scroll">
-      <table class="subscriptions-table">
+      <table class="subscriptions-table cloudflare-account-table">
         <thead>
           <tr>
             <th>ID</th>
@@ -30,8 +30,8 @@
               <td>{{ a["id"] }}</td>
               <td>{{ a["account_name"] }}</td>
               <td>{{ a["zone_name"] }}</td>
-              <td><code>{{ a["zone_id"] or "-" }}</code></td>
-              <td><code>{{ a["api_token_masked"] }}</code></td>
+              <td><code class="table-code-wrap">{{ a["zone_id"] or "-" }}</code></td>
+              <td><code class="table-code-wrap">{{ a["api_token_masked"] }}</code></td>
               <td>
                 {% if a["is_active"] == 1 %}
                   <span class="tag tag-ok">启用中</span>

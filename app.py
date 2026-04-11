@@ -492,7 +492,36 @@ def detect_openvpn_platform(user_agent: str) -> str:
     return detect_client_platform(user_agent)
 
 
-def get_openvpn_endpoint_host() -> str:
+def get_openvpn_endpoint_host(
+    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+) -> str:
+    use_server = server_row
+    if use_server is None and user is not None:
+        try:
+            db = get_db()
+            use_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
+            if use_server is not None:
+                db.commit()
+        except Exception:
+            use_server = None
+
+    if use_server is not None:
+        domain = normalize_domain_host(row_get(use_server, "domain", ""))
+        if domain:
+            if domain.startswith("[") and "]" in domain:
+                end = domain.find("]")
+                if end > 1:
+                    return domain[1:end]
+            if domain.count(":") == 1:
+                host_part, port_part = domain.rsplit(":", 1)
+                if host_part and port_part.isdigit():
+                    return host_part
+            return domain
+
+        host = normalize_remote_host(row_get(use_server, "host", ""))
+        if host:
+            return host
+
     portal_domain = get_portal_domain_setting()
     if portal_domain:
         if portal_domain.startswith("["):
@@ -508,7 +537,7 @@ def get_openvpn_endpoint_host() -> str:
     if OPENVPN_ENDPOINT_HOST:
         return OPENVPN_ENDPOINT_HOST
 
-    wg_endpoint = (get_wireguard_endpoint_for_clients() or "").strip()
+    wg_endpoint = (get_wireguard_endpoint_for_clients(user=user, server_row=server_row) or "").strip()
     if not wg_endpoint:
         return "127.0.0.1"
     if wg_endpoint.startswith("["):
@@ -550,9 +579,16 @@ def read_required_text(path: Path, label: str) -> str:
     return content
 
 
-def get_openvpn_client_materials() -> tuple[str, str]:
-    if use_vpn_api():
-        result = vpn_api_request("GET", "/openvpn/client-materials")
+def get_openvpn_client_materials(
+    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+) -> tuple[str, str]:
+    if use_vpn_api(user=user, server_row=server_row):
+        result = vpn_api_request(
+            "GET",
+            "/openvpn/client-materials",
+            user=user,
+            server_row=server_row,
+        )
         ca_text = (result.get("ca_cert") or "").strip()
         tls_crypt_text = (result.get("tls_crypt_key") or "").strip()
         if not ca_text:
@@ -570,18 +606,29 @@ def build_openvpn_client_config(
     username: str,
     *,
     profile_mode: str | None = None,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
 ) -> str:
     if not OPENVPN_ENABLED:
         raise RuntimeError("管理员尚未启用 OpenVPN 支持。")
 
-    ca_text, tls_crypt_text = get_openvpn_client_materials()
+    ca_text, tls_crypt_text = get_openvpn_client_materials(
+        user=user,
+        server_row=server_row,
+    )
 
-    remote_host = get_openvpn_endpoint_host()
+    remote_host = get_openvpn_endpoint_host(user=user, server_row=server_row)
+    remote_port = OPENVPN_ENDPOINT_PORT
+    if server_row is not None:
+        remote_port = normalize_server_port(
+            row_get(server_row, "openvpn_port", OPENVPN_ENDPOINT_PORT),
+            OPENVPN_ENDPOINT_PORT,
+        )
     lines = [
         "client",
         "dev tun",
         f"proto {OPENVPN_PROTO}",
-        f"remote {remote_host} {OPENVPN_ENDPOINT_PORT}",
+        f"remote {remote_host} {remote_port}",
         "resolv-retry infinite",
         "nobind",
         "persist-key",
@@ -961,7 +1008,38 @@ def get_portal_domain_setting() -> str:
     )
 
 
-def get_wireguard_endpoint_for_clients() -> str:
+def get_wireguard_endpoint_for_clients(
+    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+) -> str:
+    use_server = server_row
+    if use_server is None and user is not None:
+        try:
+            db = get_db()
+            use_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
+            if use_server is not None:
+                db.commit()
+        except Exception:
+            use_server = None
+
+    if use_server is not None:
+        domain = normalize_domain_host(row_get(use_server, "domain", ""))
+        host = domain or normalize_remote_host(row_get(use_server, "host", ""))
+        if host:
+            wg_port = normalize_server_port(
+                row_get(use_server, "wg_port", SERVER_DEPLOY_DEFAULT_WG_PORT),
+                SERVER_DEPLOY_DEFAULT_WG_PORT,
+            )
+            if host.startswith("[") and "]" in host:
+                idx = host.find("]")
+                if idx > 0 and len(host) > idx + 2 and host[idx + 1] == ":":
+                    return host
+                return f"{host}:{wg_port}"
+            if host.count(":") == 1:
+                host_part, port_part = host.rsplit(":", 1)
+                if host_part and port_part.isdigit():
+                    return host
+            return f"{host}:{wg_port}"
+
     wg_endpoint = (WG_ENDPOINT or "").strip()
     if wg_endpoint:
         return wg_endpoint
@@ -1306,6 +1384,7 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
             last_deploy_ok,
             last_deploy_message,
             last_deploy_log,
+            last_allocated_at,
             created_at,
             updated_at
         FROM vpn_servers
@@ -1339,11 +1418,104 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
                 "last_deploy_ok": int(row["last_deploy_ok"] or 0) == 1,
                 "last_deploy_message": summarize_text(row["last_deploy_message"] or "", 280),
                 "has_deploy_log": bool((row["last_deploy_log"] or "").strip()),
+                "last_allocated_at": row["last_allocated_at"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
         )
     return servers
+
+
+def get_server_by_id(db: sqlite3.Connection, server_id: int | None) -> sqlite3.Row | None:
+    if not server_id:
+        return None
+    return db.execute(
+        """
+        SELECT *
+        FROM vpn_servers
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (int(server_id),),
+    ).fetchone()
+
+
+def pick_best_online_server(db: sqlite3.Connection) -> sqlite3.Row | None:
+    return db.execute(
+        """
+        SELECT
+            s.*,
+            COUNT(u.id) AS active_user_count
+        FROM vpn_servers s
+        LEFT JOIN users u
+          ON u.assigned_server_id = s.id
+         AND u.role = 'user'
+         AND u.wg_enabled = 1
+        WHERE s.status = 'online'
+        GROUP BY s.id
+        ORDER BY
+          active_user_count ASC,
+          COALESCE(s.last_allocated_at, '1970-01-01T00:00:00+00:00') ASC,
+          s.id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+def choose_runtime_server_for_user(
+    db: sqlite3.Connection,
+    user: sqlite3.Row,
+    *,
+    allow_reassign: bool = True,
+) -> sqlite3.Row | None:
+    if not user or row_get(user, "role") != "user":
+        return None
+
+    assigned_server_id = row_get(user, "assigned_server_id")
+    current = get_server_by_id(db, int(assigned_server_id) if assigned_server_id else None)
+    if current and (row_get(current, "status", "") or "").strip().lower() == "online":
+        return current
+
+    if not allow_reassign:
+        return None
+
+    next_server = pick_best_online_server(db)
+    if not next_server:
+        return None
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        UPDATE users
+        SET assigned_server_id = ?
+        WHERE id = ? AND role = 'user'
+        """,
+        (int(next_server["id"]), int(user["id"])),
+    )
+    db.execute(
+        """
+        UPDATE vpn_servers
+        SET last_allocated_at = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (now_iso, now_iso, int(next_server["id"])),
+    )
+    return db.execute(
+        "SELECT * FROM vpn_servers WHERE id = ? LIMIT 1",
+        (int(next_server["id"]),),
+    ).fetchone()
+
+
+def user_prefers_managed_nodes(db: sqlite3.Connection, user: sqlite3.Row | None) -> bool:
+    if not user or row_get(user, "role") != "user":
+        return False
+    if VPN_API_URL:
+        return True
+    if row_get(user, "assigned_server_id"):
+        return True
+    row = db.execute("SELECT id FROM vpn_servers LIMIT 1").fetchone()
+    return bool(row)
 
 
 def load_cloudflare_accounts(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
@@ -2808,6 +2980,7 @@ def init_db() -> None:
             role TEXT NOT NULL DEFAULT 'user',
             status TEXT NOT NULL DEFAULT 'approved',
             email_verified INTEGER NOT NULL DEFAULT 1,
+            assigned_server_id INTEGER,
             assigned_ip TEXT,
             client_private_key TEXT,
             client_public_key TEXT,
@@ -2822,7 +2995,8 @@ def init_db() -> None:
             traffic_used_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0,
             force_password_change INTEGER NOT NULL DEFAULT 0,
-            session_version INTEGER NOT NULL DEFAULT 1
+            session_version INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (assigned_server_id) REFERENCES vpn_servers(id) ON DELETE SET NULL
         )
         """
     )
@@ -2937,6 +3111,7 @@ def init_db() -> None:
             last_deploy_ok INTEGER NOT NULL DEFAULT 0,
             last_deploy_message TEXT,
             last_deploy_log TEXT,
+            last_allocated_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -3021,6 +3196,9 @@ def init_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_users_expire ON users(subscription_expires_at)"
     )
     db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_assigned_server ON users(assigned_server_id)"
+    )
+    db.execute(
         "CREATE INDEX IF NOT EXISTS idx_orders_user_status ON payment_orders(user_id, status)"
     )
     db.execute(
@@ -3045,6 +3223,9 @@ def init_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_payment_methods_active_sort ON payment_methods(is_active, sort_order, id)"
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_vpn_servers_host ON vpn_servers(host)")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vpn_servers_status_alloc ON vpn_servers(status, last_allocated_at, id)"
+    )
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_cloudflare_accounts_active_sort ON cloudflare_accounts(is_active, sort_order, id)"
     )
@@ -3086,6 +3267,8 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         )
     if "email_verified" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1")
+    if "assigned_server_id" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN assigned_server_id INTEGER")
     if "session_version" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
 
@@ -3234,6 +3417,7 @@ def migrate_schema(db: sqlite3.Connection) -> None:
             last_deploy_ok INTEGER NOT NULL DEFAULT 0,
             last_deploy_message TEXT,
             last_deploy_log TEXT,
+            last_allocated_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -3279,6 +3463,8 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_message TEXT")
     if "last_deploy_log" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN last_deploy_log TEXT")
+    if "last_allocated_at" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN last_allocated_at TEXT")
     if "created_at" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
     if "updated_at" not in vpn_server_columns:
@@ -3636,8 +3822,12 @@ def run_command(args, input_text=None, check=True) -> str:
     return completed.stdout.strip()
 
 
-def use_vpn_api() -> bool:
-    api_url, _ = get_runtime_vpn_api_target()
+def use_vpn_api(*, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None) -> bool:
+    if server_row is not None:
+        host = normalize_remote_host(row_get(server_row, "host", ""))
+        token = (row_get(server_row, "vpn_api_token", "") or "").strip()
+        return bool(host and token)
+    api_url, _, _ = get_runtime_vpn_api_target(user=user)
     return bool(api_url)
 
 
@@ -3650,14 +3840,38 @@ def host_for_http_url(raw_host: str) -> str:
     return host
 
 
-def get_runtime_vpn_api_target() -> tuple[str, str]:
+def get_runtime_vpn_api_target(
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+    allow_reassign: bool = True,
+) -> tuple[str, str, sqlite3.Row | None]:
+    if server_row is not None:
+        host = normalize_remote_host(row_get(server_row, "host", ""))
+        token = (row_get(server_row, "vpn_api_token", "") or "").strip()
+        if host and token:
+            host_url = host_for_http_url(host)
+            return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token, server_row
+        return "", "", None
+
     if VPN_API_URL:
-        return VPN_API_URL, VPN_API_TOKEN
+        return VPN_API_URL, VPN_API_TOKEN, None
 
     try:
         db = get_db()
     except Exception:
-        return "", ""
+        return "", "", None
+
+    if user is not None and row_get(user, "role") == "user":
+        selected = choose_runtime_server_for_user(db, user, allow_reassign=allow_reassign)
+        if not selected:
+            return "", "", None
+        host = normalize_remote_host(row_get(selected, "host", ""))
+        token = (row_get(selected, "vpn_api_token", "") or "").strip()
+        if not host or not token:
+            return "", "", None
+        host_url = host_for_http_url(host)
+        return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token, selected
 
     try:
         settings = load_onboarding_settings(db)
@@ -3689,23 +3903,35 @@ def get_runtime_vpn_api_target() -> tuple[str, str]:
         ).fetchone()
 
     if not row:
-        return "", ""
+        return "", "", None
 
     status = (row_get(row, "status", "") or "").strip().lower()
     if status != "online":
-        return "", ""
+        return "", "", None
 
     host = normalize_remote_host(row_get(row, "host", ""))
     token = (row_get(row, "vpn_api_token", "") or "").strip()
     if not host or not token:
-        return "", ""
+        return "", "", None
 
     host_url = host_for_http_url(host)
-    return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token
+    return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token, row
 
 
-def vpn_api_request(method: str, path: str, payload: dict | None = None) -> dict:
-    runtime_api_url, runtime_api_token = get_runtime_vpn_api_target()
+def vpn_api_request(
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+    allow_reassign: bool = True,
+) -> dict:
+    runtime_api_url, runtime_api_token, _ = get_runtime_vpn_api_target(
+        user=user,
+        server_row=server_row,
+        allow_reassign=allow_reassign,
+    )
     if not runtime_api_url:
         raise RuntimeError("VPN 服务未配置，请先在后台完成服务器部署。")
 
@@ -3748,16 +3974,30 @@ def vpn_api_request(method: str, path: str, payload: dict | None = None) -> dict
     return obj
 
 
-def get_wireguard_dump_text() -> str:
-    if use_vpn_api():
-        result = vpn_api_request("GET", "/wireguard/dump")
+def get_wireguard_dump_text(
+    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+) -> str:
+    if use_vpn_api(user=user, server_row=server_row):
+        result = vpn_api_request(
+            "GET",
+            "/wireguard/dump",
+            user=user,
+            server_row=server_row,
+        )
         return str(result.get("dump") or "")
     return run_command(["wg", "show", WG_INTERFACE, "dump"], check=False)
 
 
-def get_wireguard_server_public_key() -> str:
-    if use_vpn_api():
-        result = vpn_api_request("GET", "/wireguard/server-public-key")
+def get_wireguard_server_public_key(
+    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+) -> str:
+    if use_vpn_api(user=user, server_row=server_row):
+        result = vpn_api_request(
+            "GET",
+            "/wireguard/server-public-key",
+            user=user,
+            server_row=server_row,
+        )
         key = (result.get("public_key") or "").strip()
         if not key:
             raise RuntimeError("VPN API 未返回服务端公钥。")
@@ -3767,9 +4007,16 @@ def get_wireguard_server_public_key() -> str:
     return WG_SERVER_PUBLIC_KEY_FILE.read_text(encoding="utf-8").strip()
 
 
-def wireguard_generate_keys() -> tuple[str, str, str]:
-    if use_vpn_api():
-        result = vpn_api_request("POST", "/wireguard/generate-keys")
+def wireguard_generate_keys(
+    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+) -> tuple[str, str, str]:
+    if use_vpn_api(user=user, server_row=server_row):
+        result = vpn_api_request(
+            "POST",
+            "/wireguard/generate-keys",
+            user=user,
+            server_row=server_row,
+        )
         private_key = (result.get("private_key") or "").strip()
         public_key = (result.get("public_key") or "").strip()
         psk = (result.get("preshared_key") or "").strip()
@@ -3795,12 +4042,17 @@ def format_bytes(num_bytes: int) -> str:
     return "0 B"
 
 
-def get_wireguard_transfer_bytes(public_key: str | None) -> tuple[int, int]:
+def get_wireguard_peer_state(
+    public_key: str | None,
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+) -> dict[str, int | str]:
     if not public_key:
-        return 0, 0
-    dump = get_wireguard_dump_text()
+        return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
+    dump = get_wireguard_dump_text(user=user, server_row=server_row)
     if not dump:
-        return 0, 0
+        return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
 
     for line in dump.splitlines()[1:]:
         parts = line.split("\t")
@@ -3808,6 +4060,11 @@ def get_wireguard_transfer_bytes(public_key: str | None) -> tuple[int, int]:
             continue
         if parts[0].strip() != public_key:
             continue
+        endpoint = parts[2].strip() if len(parts) > 2 else ""
+        try:
+            latest_handshake = int(parts[4])
+        except Exception:
+            latest_handshake = 0
         try:
             rx = int(parts[5])
         except Exception:
@@ -3816,12 +4073,30 @@ def get_wireguard_transfer_bytes(public_key: str | None) -> tuple[int, int]:
             tx = int(parts[6])
         except Exception:
             tx = 0
-        return max(0, rx), max(0, tx)
-    return 0, 0
+        return {
+            "rx": max(0, rx),
+            "tx": max(0, tx),
+            "latest_handshake": max(0, latest_handshake),
+            "endpoint": endpoint,
+        }
+    return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
+
+
+def get_wireguard_transfer_bytes(
+    public_key: str | None,
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+) -> tuple[int, int]:
+    state = get_wireguard_peer_state(public_key, user=user, server_row=server_row)
+    return int(state["rx"]), int(state["tx"])
 
 
 def get_user_traffic_stats(user: sqlite3.Row) -> dict[str, int | str]:
-    rx_bytes, tx_bytes = get_wireguard_transfer_bytes(user["client_public_key"])
+    rx_bytes, tx_bytes = get_wireguard_transfer_bytes(
+        user["client_public_key"],
+        user=user,
+    )
     total_bytes = rx_bytes + tx_bytes
     quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
     used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
@@ -3926,11 +4201,17 @@ def build_client_config(
     client_ip: str,
     *,
     allowed_ips: str | None = None,
+    endpoint: str | None = None,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
 ) -> str:
-    server_public_key = get_wireguard_server_public_key()
+    server_public_key = get_wireguard_server_public_key(user=user, server_row=server_row)
     resolved_allowed_ips = (allowed_ips or get_client_allowed_ips()).strip()
     if not resolved_allowed_ips:
         raise RuntimeError("WireGuard AllowedIPs 为空，无法生成配置。")
+    resolved_endpoint = (endpoint or "").strip() or get_wireguard_endpoint_for_clients(
+        user=user, server_row=server_row
+    )
     return "\n".join(
         [
             "[Interface]",
@@ -3942,7 +4223,7 @@ def build_client_config(
             f"PublicKey = {server_public_key}",
             f"PresharedKey = {client_psk}",
             f"AllowedIPs = {resolved_allowed_ips}",
-            f"Endpoint = {get_wireguard_endpoint_for_clients()}",
+            f"Endpoint = {resolved_endpoint}",
             f"PersistentKeepalive = {WG_CLIENT_KEEPALIVE}",
             "",
         ]
@@ -3958,12 +4239,20 @@ def write_client_artifacts(
     client_ip: str,
     config_path: str | None = None,
     qr_path: str | None = None,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
 ) -> dict[str, str | None]:
     filename_prefix = f"{safe_name(username)}_{user_id}"
     conf_path = Path(config_path) if config_path else CLIENT_CONF_DIR / f"{filename_prefix}.conf"
     qr_image_path = Path(qr_path) if qr_path else CLIENT_QR_DIR / f"{filename_prefix}.png"
 
-    config_text = build_client_config(client_private_key, client_psk, client_ip)
+    config_text = build_client_config(
+        client_private_key,
+        client_psk,
+        client_ip,
+        user=user,
+        server_row=server_row,
+    )
 
     conf_path.parent.mkdir(parents=True, exist_ok=True)
     conf_path.write_text(config_text, encoding="utf-8")
@@ -3994,17 +4283,35 @@ def build_user_wireguard_config(
         raise RuntimeError("用户密钥尚未就绪，请联系管理员。")
 
     allowed_ips = get_client_allowed_ips_for_profile(normalized_mode)
+    target_server = None
+    if row_get(user, "role") == "user":
+        try:
+            db = get_db()
+            target_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
+            if target_server is not None:
+                db.commit()
+        except Exception:
+            target_server = None
     config_text = build_client_config(
         client_private_key,
         client_psk,
         assigned_ip,
         allowed_ips=allowed_ips,
+        user=user,
+        server_row=target_server,
     )
     return config_text, normalized_mode
 
 
-def set_wireguard_peer(peer_public_key: str, peer_psk: str, client_ip: str) -> None:
-    if use_vpn_api():
+def set_wireguard_peer(
+    peer_public_key: str,
+    peer_psk: str,
+    client_ip: str,
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+) -> None:
+    if use_vpn_api(user=user, server_row=server_row):
         vpn_api_request(
             "POST",
             "/wireguard/set-peer",
@@ -4014,6 +4321,8 @@ def set_wireguard_peer(peer_public_key: str, peer_psk: str, client_ip: str) -> N
                 "peer_psk": peer_psk,
                 "client_ip": client_ip,
             },
+            user=user,
+            server_row=server_row,
         )
         return
 
@@ -4041,12 +4350,19 @@ def set_wireguard_peer(peer_public_key: str, peer_psk: str, client_ip: str) -> N
         Path(tmp_psk_path).unlink(missing_ok=True)
 
 
-def remove_wireguard_peer(peer_public_key: str) -> None:
-    if use_vpn_api():
+def remove_wireguard_peer(
+    peer_public_key: str,
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+) -> None:
+    if use_vpn_api(user=user, server_row=server_row):
         vpn_api_request(
             "POST",
             "/wireguard/remove-peer",
             {"interface": WG_INTERFACE, "peer_public_key": peer_public_key},
+            user=user,
+            server_row=server_row,
         )
         return
 
@@ -4057,8 +4373,18 @@ def remove_wireguard_peer(peer_public_key: str) -> None:
     run_command(["wg-quick", "save", WG_INTERFACE], check=False)
 
 
-def generate_wireguard_bundle(username: str, user_id: int, client_ip: str):
-    client_private_key, client_public_key, client_psk = wireguard_generate_keys()
+def generate_wireguard_bundle(
+    username: str,
+    user_id: int,
+    client_ip: str,
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+):
+    client_private_key, client_public_key, client_psk = wireguard_generate_keys(
+        user=user,
+        server_row=server_row,
+    )
 
     artifacts = write_client_artifacts(
         username=username,
@@ -4066,8 +4392,16 @@ def generate_wireguard_bundle(username: str, user_id: int, client_ip: str):
         client_private_key=client_private_key,
         client_psk=client_psk,
         client_ip=client_ip,
+        user=user,
+        server_row=server_row,
     )
-    set_wireguard_peer(client_public_key, client_psk, client_ip)
+    set_wireguard_peer(
+        client_public_key,
+        client_psk,
+        client_ip,
+        user=user,
+        server_row=server_row,
+    )
 
     return {
         "assigned_ip": client_ip,
@@ -4080,6 +4414,12 @@ def generate_wireguard_bundle(username: str, user_id: int, client_ip: str):
 
 
 def ensure_user_vpn_ready(db: sqlite3.Connection, user: sqlite3.Row) -> dict[str, str | int]:
+    target_server = None
+    if row_get(user, "role") == "user":
+        target_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
+        if not target_server and user_prefers_managed_nodes(db, user):
+            raise RuntimeError("当前没有可用在线节点，请联系管理员检查服务器状态。")
+
     has_crypto_keys = all(
         [
             user["client_private_key"],
@@ -4090,8 +4430,16 @@ def ensure_user_vpn_ready(db: sqlite3.Connection, user: sqlite3.Row) -> dict[str
 
     if not has_crypto_keys:
         assigned_ip = next_available_ip(db, exclude_user_id=user["id"])
-        bundle = generate_wireguard_bundle(user["username"], user["id"], assigned_ip)
+        bundle = generate_wireguard_bundle(
+            user["username"],
+            user["id"],
+            assigned_ip,
+            user=user,
+            server_row=target_server,
+        )
         bundle["wg_enabled"] = 1
+        if target_server:
+            bundle["assigned_server_id"] = int(target_server["id"])
         return bundle
 
     assigned_ip = user["assigned_ip"]
@@ -4110,10 +4458,18 @@ def ensure_user_vpn_ready(db: sqlite3.Connection, user: sqlite3.Row) -> dict[str
         client_ip=assigned_ip,
         config_path=user["config_path"],
         qr_path=user["qr_path"],
+        user=user,
+        server_row=target_server,
     )
-    set_wireguard_peer(user["client_public_key"], user["client_psk"], assigned_ip)
+    set_wireguard_peer(
+        user["client_public_key"],
+        user["client_psk"],
+        assigned_ip,
+        user=user,
+        server_row=target_server,
+    )
 
-    return {
+    result = {
         "assigned_ip": assigned_ip,
         "client_private_key": user["client_private_key"],
         "client_public_key": user["client_public_key"],
@@ -4122,6 +4478,9 @@ def ensure_user_vpn_ready(db: sqlite3.Connection, user: sqlite3.Row) -> dict[str
         "qr_path": artifacts["qr_path"],
         "wg_enabled": 1,
     }
+    if target_server:
+        result["assigned_server_id"] = int(target_server["id"])
+    return result
 
 
 def ensure_admin_self_vpn_ready(
@@ -4199,7 +4558,10 @@ def sync_user_traffic_usage(
     used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
     last_total_bytes = to_non_negative_int(row_get(user, "traffic_last_total_bytes", 0))
     if current_total_bytes is None:
-        rx_bytes, tx_bytes = get_wireguard_transfer_bytes(row_get(user, "client_public_key"))
+        rx_bytes, tx_bytes = get_wireguard_transfer_bytes(
+            row_get(user, "client_public_key"),
+            user=user,
+        )
         current_total_bytes = rx_bytes + tx_bytes
     current_total_bytes = max(0, int(current_total_bytes))
 
@@ -4227,7 +4589,7 @@ def sync_user_traffic_usage(
     exhausted = quota_bytes > 0 and new_used_bytes >= quota_bytes
     if exhausted and int(row_get(user, "wg_enabled", 0) or 0) == 1 and not has_active_time_subscription(user):
         if row_get(user, "client_public_key"):
-            remove_wireguard_peer(user["client_public_key"])
+            remove_wireguard_peer(user["client_public_key"], user=user)
         if is_dynamic_ip_assignment_mode():
             db.execute(
                 "UPDATE users SET wg_enabled = 0, assigned_ip = NULL WHERE id = ?",
@@ -4255,6 +4617,8 @@ def reconcile_expired_subscriptions(db: sqlite3.Connection) -> None:
         """
         SELECT
             id,
+            role,
+            assigned_server_id,
             client_public_key,
             subscription_expires_at,
             wg_enabled,
@@ -4273,7 +4637,7 @@ def reconcile_expired_subscriptions(db: sqlite3.Connection) -> None:
         if has_active_traffic_subscription(row):
             continue
         if row["client_public_key"]:
-            remove_wireguard_peer(row["client_public_key"])
+            remove_wireguard_peer(row["client_public_key"], user=row)
         if is_dynamic_ip_assignment_mode():
             db.execute(
                 "UPDATE users SET wg_enabled = 0, assigned_ip = NULL WHERE id = ?",
@@ -4407,7 +4771,10 @@ def settle_order_paid(
         row_get(user, "traffic_last_total_bytes", 0)
     )
     if row_get(user, "client_public_key"):
-        rx_now, tx_now = get_wireguard_transfer_bytes(user["client_public_key"])
+        rx_now, tx_now = get_wireguard_transfer_bytes(
+            user["client_public_key"],
+            user=user,
+        )
         current_total_bytes = rx_now + tx_now
         delta_bytes = current_total_bytes - current_last_total_bytes
         if delta_bytes > 0 and current_quota_bytes > 0:
@@ -4427,6 +4794,9 @@ def settle_order_paid(
 
     remaining_traffic_bytes = max(0, current_quota_bytes - current_used_bytes)
     vpn_data = ensure_user_vpn_ready(db, user)
+    assigned_server_id = vpn_data.get("assigned_server_id")
+    if assigned_server_id is None:
+        assigned_server_id = row_get(user, "assigned_server_id")
     paid_at_iso = paid_at_iso or utcnow_iso()
     tx_submitted_at = order["tx_submitted_at"] or (paid_at_iso if final_tx_hash else None)
     note_line = f"{source} confirmed at {paid_at_iso}"
@@ -4437,6 +4807,7 @@ def settle_order_paid(
         UPDATE users
         SET status = 'approved',
             assigned_ip = ?,
+            assigned_server_id = ?,
             client_private_key = ?,
             client_public_key = ?,
             client_psk = ?,
@@ -4452,6 +4823,7 @@ def settle_order_paid(
         """,
         (
             vpn_data["assigned_ip"],
+            assigned_server_id,
             vpn_data["client_private_key"],
             vpn_data["client_public_key"],
             vpn_data["client_psk"],
@@ -4780,18 +5152,34 @@ def cleanup_verification_records(db: sqlite3.Connection) -> None:
 
 
 def rotate_user_wireguard_credentials(db: sqlite3.Connection, user: sqlite3.Row) -> sqlite3.Row:
+    target_server = None
+    if row_get(user, "role") == "user":
+        target_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
+        if not target_server and user_prefers_managed_nodes(db, user):
+            raise RuntimeError("当前没有可用在线节点，请联系管理员检查服务器状态。")
+
     old_public_key = (row_get(user, "client_public_key", "") or "").strip()
     if old_public_key:
-        remove_wireguard_peer(old_public_key)
+        remove_wireguard_peer(old_public_key, user=user, server_row=target_server)
 
     assigned_ip = row_get(user, "assigned_ip")
     if is_dynamic_ip_assignment_mode() or not assigned_ip:
         assigned_ip = next_available_ip(db, exclude_user_id=int(user["id"]))
-    bundle = generate_wireguard_bundle(user["username"], int(user["id"]), str(assigned_ip))
+    bundle = generate_wireguard_bundle(
+        user["username"],
+        int(user["id"]),
+        str(assigned_ip),
+        user=user,
+        server_row=target_server,
+    )
+    assigned_server_id = bundle.get("assigned_server_id")
+    if assigned_server_id is None:
+        assigned_server_id = row_get(user, "assigned_server_id")
     db.execute(
         """
         UPDATE users
         SET assigned_ip = ?,
+            assigned_server_id = ?,
             client_private_key = ?,
             client_public_key = ?,
             client_psk = ?,
@@ -4802,6 +5190,7 @@ def rotate_user_wireguard_credentials(db: sqlite3.Connection, user: sqlite3.Row)
         """,
         (
             bundle["assigned_ip"],
+            assigned_server_id,
             bundle["client_private_key"],
             bundle["client_public_key"],
             bundle["client_psk"],
@@ -4858,10 +5247,14 @@ def grant_new_user_welcome_entitlement(db: sqlite3.Connection, user_id: int) -> 
 
     if duration_months > 0 or traffic_gb > 0:
         vpn_data = ensure_user_vpn_ready(db, user)
+        assigned_server_id = vpn_data.get("assigned_server_id")
+        if assigned_server_id is None:
+            assigned_server_id = row_get(user, "assigned_server_id")
         db.execute(
             """
             UPDATE users
             SET assigned_ip = ?,
+                assigned_server_id = ?,
                 client_private_key = ?,
                 client_public_key = ?,
                 client_psk = ?,
@@ -4875,6 +5268,7 @@ def grant_new_user_welcome_entitlement(db: sqlite3.Connection, user_id: int) -> 
             """,
             (
                 vpn_data["assigned_ip"],
+                assigned_server_id,
                 vpn_data["client_private_key"],
                 vpn_data["client_public_key"],
                 vpn_data["client_psk"],
@@ -5373,12 +5767,50 @@ def dashboard_home():
 @app.route("/dashboard/guide")
 @login_required
 def dashboard_guide():
+    return redirect(url_for("dashboard_config"))
+
+
+@app.route("/dashboard/plans")
+@login_required
+def dashboard_plans():
     user = current_user()
     if user["role"] == "admin":
         return redirect(url_for("admin_home"))
+    db = get_db()
+    available_plans = load_subscription_plans(db, active_only=True)
     return render_template(
-        "dashboard_guide.html",
-        dashboard_page="guide",
+        "dashboard_plans.html",
+        available_plans=available_plans,
+        dashboard_page="plans",
+    )
+
+
+@app.route("/dashboard/config")
+@login_required
+def dashboard_config():
+    user = current_user()
+    if user["role"] == "admin":
+        return redirect(url_for("admin_home"))
+
+    db = get_db()
+    reconcile_expired_subscriptions(db)
+    health_overview = refresh_server_health_status(db)
+    db.commit()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    user = sync_user_traffic_usage(db, user)
+
+    node_alert_text = ""
+    if health_overview["total"] > 0 and health_overview["online"] == 0:
+        node_alert_text = "当前节点异常，VPN 服务暂不可用，系统正在恢复。"
+    elif health_overview["abnormal"] > 0:
+        node_alert_text = "当前节点异常，系统正在切换。"
+
+    return render_template(
+        "dashboard_config.html",
+        user=user,
+        active=is_subscription_active(user),
+        node_alert_text=node_alert_text,
+        dashboard_page="config",
     )
 
 
@@ -8167,10 +8599,14 @@ def admin_set_user_expiry(user_id: int):
     try:
         if expires_at_utc >= utcnow():
             vpn_data = ensure_user_vpn_ready(db, user)
+            assigned_server_id = vpn_data.get("assigned_server_id")
+            if assigned_server_id is None:
+                assigned_server_id = row_get(user, "assigned_server_id")
             db.execute(
                 """
                 UPDATE users
                 SET assigned_ip = ?,
+                    assigned_server_id = ?,
                     client_private_key = ?,
                     client_public_key = ?,
                     client_psk = ?,
@@ -8183,6 +8619,7 @@ def admin_set_user_expiry(user_id: int):
                 """,
                 (
                     vpn_data["assigned_ip"],
+                    assigned_server_id,
                     vpn_data["client_private_key"],
                     vpn_data["client_public_key"],
                     vpn_data["client_psk"],
@@ -8201,7 +8638,7 @@ def admin_set_user_expiry(user_id: int):
             return redirect_admin_subscriptions()
 
         if user["client_public_key"]:
-            remove_wireguard_peer(user["client_public_key"])
+            remove_wireguard_peer(user["client_public_key"], user=user)
         if is_dynamic_ip_assignment_mode():
             db.execute(
                 """
@@ -8244,7 +8681,7 @@ def admin_delete_user(user_id: int):
     db = get_db()
     user = db.execute(
         """
-        SELECT id, username, email, role, client_public_key, config_path, qr_path
+        SELECT id, username, email, role, assigned_server_id, client_public_key, config_path, qr_path
         FROM users
         WHERE id = ? AND role = 'user'
         LIMIT 1
@@ -8262,7 +8699,7 @@ def admin_delete_user(user_id: int):
 
     try:
         if user["client_public_key"]:
-            remove_wireguard_peer(user["client_public_key"])
+            remove_wireguard_peer(user["client_public_key"], user=user)
 
         config_path = (user["config_path"] or "").strip()
         if config_path:
@@ -8292,7 +8729,7 @@ def admin_disable_user(user_id: int):
     db = get_db()
     user = db.execute(
         """
-        SELECT id, username, role, client_public_key, wg_enabled
+        SELECT id, username, role, assigned_server_id, client_public_key, wg_enabled
         FROM users
         WHERE id = ? AND role = 'user'
         LIMIT 1
@@ -8305,7 +8742,7 @@ def admin_disable_user(user_id: int):
 
     try:
         if user["client_public_key"]:
-            remove_wireguard_peer(user["client_public_key"])
+            remove_wireguard_peer(user["client_public_key"], user=user)
 
         if is_dynamic_ip_assignment_mode():
             db.execute(
@@ -8565,6 +9002,7 @@ def download_openvpn_config():
         config_text = build_openvpn_client_config(
             user["username"],
             profile_mode=normalized_mode,
+            user=user,
         )
     except Exception as exc:
         flash(f"OpenVPN 配置生成失败：{exc}", "error")
@@ -8599,6 +9037,7 @@ def admin_download_openvpn_config():
         config_text = build_openvpn_client_config(
             admin["username"],
             profile_mode=normalized_mode,
+            user=admin,
         )
     except Exception as exc:
         flash(f"管理员 OpenVPN 配置生成失败：{exc}", "error")
