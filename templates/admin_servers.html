@@ -75,6 +75,12 @@
                 <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
                   <button type="submit" class="btn secondary">测试</button>
                 </form>
+                <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='disable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器关闭 IPv6 吗？');">
+                  <button type="submit" class="btn secondary">关闭 IPv6</button>
+                </form>
+                <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='enable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器开启 IPv6 吗？');">
+                  <button type="submit" class="btn secondary">开启 IPv6</button>
+                </form>
                 <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
                   <button type="submit">部署</button>
                 </form>

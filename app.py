@@ -2751,6 +2751,91 @@ def test_server_connectivity(
             client.close()
 
 
+def run_remote_ssh_command(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    private_key_text: str = "",
+    command: str,
+    timeout: int = 30,
+) -> tuple[bool, str]:
+    safe_host = normalize_remote_host(host)
+    safe_port = normalize_server_port(port)
+    safe_username = (username or "").strip()
+    safe_private_key = (private_key_text or "").strip()
+    if not safe_host or not safe_username or (not password and not safe_private_key):
+        return False, "服务器连接信息不完整（需提供密码或私钥）。"
+
+    client: paramiko.SSHClient | None = None
+    try:
+        client = open_ssh_client(
+            safe_host,
+            safe_port,
+            safe_username,
+            password,
+            private_key_text=safe_private_key,
+            timeout=10,
+        )
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        exit_code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode("utf-8", errors="ignore").strip()
+        err = stderr.read().decode("utf-8", errors="ignore").strip()
+        merged = "\n".join(
+            [item for item in [out, err] if (item or "").strip()]
+        ).strip()
+        if exit_code != 0:
+            detail = summarize_text(merged or f"exit={exit_code}", 320)
+            return False, f"远程命令执行失败：{detail}"
+        if merged:
+            return True, summarize_text(merged, 320)
+        return True, "远程命令执行成功。"
+    except Exception as exc:
+        return False, f"SSH 执行失败：{exc}"
+    finally:
+        if client:
+            client.close()
+
+
+def set_server_ipv6_state(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    private_key_text: str,
+    enable: bool,
+) -> tuple[bool, str]:
+    target_value = "0" if enable else "1"
+    action_text = "开启" if enable else "关闭"
+    script = textwrap.dedent(
+        f"""
+        set -euo pipefail
+        mkdir -p /etc/sysctl.d
+        cat > /etc/sysctl.d/99-vpnmanager-ipv6.conf <<'EOF'
+        net.ipv6.conf.all.disable_ipv6 = {target_value}
+        net.ipv6.conf.default.disable_ipv6 = {target_value}
+        net.ipv6.conf.lo.disable_ipv6 = {target_value}
+        EOF
+        sysctl -p /etc/sysctl.d/99-vpnmanager-ipv6.conf >/dev/null
+        sysctl net.ipv6.conf.all.disable_ipv6 net.ipv6.conf.default.disable_ipv6 net.ipv6.conf.lo.disable_ipv6
+        """
+    ).strip()
+    ok, result = run_remote_ssh_command(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        private_key_text=private_key_text,
+        command=f"bash -lc {json.dumps(script)}",
+        timeout=45,
+    )
+    if ok:
+        return True, f"{action_text} IPv6 成功：{result}"
+    return False, f"{action_text} IPv6 失败：{result}"
+
+
 def test_server_vpn_api_health(host: str, vpn_api_token: str) -> tuple[bool, str]:
     safe_host = normalize_remote_host(host)
     if not safe_host:
@@ -7857,6 +7942,36 @@ def admin_test_saved_server(server_id: int):
         row["username"],
         row["password"],
         row_get(row, "ssh_private_key", ""),
+    )
+    update_server_test_result(db, server_id, ok=ok, message=message)
+    db.commit()
+    flash(message, "success" if ok else "error")
+    return redirect(url_for("admin_servers"))
+
+
+@app.route("/admin/servers/<int:server_id>/ipv6/<string:action>", methods=["POST"])
+@login_required
+@admin_required
+def admin_toggle_server_ipv6(server_id: int, action: str):
+    normalized_action = (action or "").strip().lower()
+    if normalized_action not in {"enable", "disable"}:
+        flash("IPv6 操作无效。", "error")
+        return redirect(url_for("admin_servers"))
+
+    db = get_db()
+    row = db.execute("SELECT * FROM vpn_servers WHERE id = ?", (server_id,)).fetchone()
+    if not row:
+        flash("服务器不存在。", "error")
+        return redirect(url_for("admin_servers"))
+
+    enable = normalized_action == "enable"
+    ok, message = set_server_ipv6_state(
+        host=row_get(row, "host", ""),
+        port=normalize_server_port(row_get(row, "port", 22), 22),
+        username=row_get(row, "username", ""),
+        password=row_get(row, "password", "") or "",
+        private_key_text=row_get(row, "ssh_private_key", "") or "",
+        enable=enable,
     )
     update_server_test_result(db, server_id, ok=ok, message=message)
     db.commit()
