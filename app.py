@@ -6711,13 +6711,14 @@ def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
     base_sql = """
         SELECT
             id,
+            role,
             username,
             email,
             assigned_ip,
             subscription_expires_at,
             wg_enabled
         FROM users
-        WHERE role = 'user'
+        WHERE role IN ('user', 'admin')
     """
     params = []
     normalized_query = (email_query or "").strip()

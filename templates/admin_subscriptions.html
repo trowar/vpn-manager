@@ -65,7 +65,12 @@
         <tbody>
           {% for u in subscriptions %}
             <tr>
-              <td>{{ u["username"] }}</td>
+              <td>
+                {{ u["username"] }}
+                {% if u["role"] == "admin" %}
+                  <span class="tag">管理员</span>
+                {% endif %}
+              </td>
               <td>{{ u["email"] }}</td>
               <td>{{ u["assigned_ip"] or "-" }}</td>
               <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
@@ -77,58 +82,62 @@
                 {% endif %}
               </td>
               <td>
-                <div class="subscription-actions">
-                  <form
-                    method="post"
-                    action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
-                    class="expiry-form"
-                  >
-                    <input type="hidden" name="q" value="{{ search_email or '' }}">
-                    <input
-                      type="datetime-local"
-                      name="expires_at_local"
-                      value="{{ u['subscription_expires_at']|fmt_local_input }}"
-                      required
+                {% if u["role"] == "admin" %}
+                  <span class="helper">管理员账号，不可修改</span>
+                {% else %}
+                  <div class="subscription-actions">
+                    <form
+                      method="post"
+                      action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
+                      class="expiry-form"
                     >
-                    <button type="submit">保存期限</button>
-                  </form>
-                  <form
-                    method="post"
-                    action="{{ url_for('admin_disable_user', user_id=u['id']) }}"
-                    class="inline-form"
-                    onsubmit="return confirm('确定停用该用户吗？停用后将立刻断开 VPN。');"
-                  >
-                    <input type="hidden" name="q" value="{{ search_email or '' }}">
-                    <button type="submit">停用用户</button>
-                  </form>
-                  <form
-                    method="post"
-                    action="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
-                    class="inline-form"
-                    onsubmit="return confirm('确定重置该用户密码吗？重置后会断开其旧 VPN 会话。');"
-                  >
-                    <input type="hidden" name="q" value="{{ search_email or '' }}">
-                    <input
-                      type="password"
-                      class="admin-reset-password-input"
-                      name="new_password"
-                      placeholder="新密码（至少8位）"
-                      minlength="8"
-                      required
+                      <input type="hidden" name="q" value="{{ search_email or '' }}">
+                      <input
+                        type="datetime-local"
+                        name="expires_at_local"
+                        value="{{ u['subscription_expires_at']|fmt_local_input }}"
+                        required
+                      >
+                      <button type="submit">保存期限</button>
+                    </form>
+                    <form
+                      method="post"
+                      action="{{ url_for('admin_disable_user', user_id=u['id']) }}"
+                      class="inline-form"
+                      onsubmit="return confirm('确定停用该用户吗？停用后将立刻断开 VPN。');"
                     >
-                    <button type="submit" class="btn secondary">重置密码</button>
-                  </form>
-                  <form
-                    method="post"
-                    action="{{ url_for('admin_delete_user', user_id=u['id']) }}"
-                    class="inline-form delete-user-form"
-                    data-user-email="{{ u['email'] }}"
-                  >
-                    <input type="hidden" name="q" value="{{ search_email or '' }}">
-                    <input type="hidden" name="confirm_email" value="">
-                    <button type="submit" class="danger">删除用户</button>
-                  </form>
-                </div>
+                      <input type="hidden" name="q" value="{{ search_email or '' }}">
+                      <button type="submit">停用用户</button>
+                    </form>
+                    <form
+                      method="post"
+                      action="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
+                      class="inline-form"
+                      onsubmit="return confirm('确定重置该用户密码吗？重置后会断开其旧 VPN 会话。');"
+                    >
+                      <input type="hidden" name="q" value="{{ search_email or '' }}">
+                      <input
+                        type="password"
+                        class="admin-reset-password-input"
+                        name="new_password"
+                        placeholder="新密码（至少8位）"
+                        minlength="8"
+                        required
+                      >
+                      <button type="submit" class="btn secondary">重置密码</button>
+                    </form>
+                    <form
+                      method="post"
+                      action="{{ url_for('admin_delete_user', user_id=u['id']) }}"
+                      class="inline-form delete-user-form"
+                      data-user-email="{{ u['email'] }}"
+                    >
+                      <input type="hidden" name="q" value="{{ search_email or '' }}">
+                      <input type="hidden" name="confirm_email" value="">
+                      <button type="submit" class="danger">删除用户</button>
+                    </form>
+                  </div>
+                {% endif %}
               </td>
             </tr>
           {% endfor %}
