@@ -55,7 +55,7 @@ WG_SERVER_PUBLIC_KEY_FILE = Path(
 )
 WG_ENDPOINT = os.environ.get("WG_ENDPOINT", "193.134.209.54:51820")
 WG_CLIENT_DNS = os.environ.get("WG_CLIENT_DNS", WG_SERVER_ADDRESS)
-WG_CLIENT_ALLOWED_IPS = os.environ.get("WG_CLIENT_ALLOWED_IPS", "0.0.0.0/0, ::/0")
+WG_CLIENT_ALLOWED_IPS = os.environ.get("WG_CLIENT_ALLOWED_IPS", "0.0.0.0/0")
 WG_CLIENT_KEEPALIVE = os.environ.get("WG_CLIENT_KEEPALIVE", "25")
 WG_IP_ASSIGNMENT_MODE = os.environ.get("WG_IP_ASSIGNMENT_MODE", "static").strip().lower()
 WG_ROUTE_POLICY = os.environ.get("WG_ROUTE_POLICY", "full").strip().lower()
@@ -460,7 +460,7 @@ def get_client_allowed_ips() -> str:
         return _CLIENT_ALLOWED_IPS_CACHE
 
     # Force global mode to avoid huge split-route configs causing client freeze.
-    _CLIENT_ALLOWED_IPS_CACHE = "0.0.0.0/0, ::/0"
+    _CLIENT_ALLOWED_IPS_CACHE = "0.0.0.0/0"
     return _CLIENT_ALLOWED_IPS_CACHE
 
 
@@ -486,7 +486,7 @@ def get_smart_allowed_ips() -> str:
 
 def get_client_allowed_ips_for_profile(profile_mode: str) -> str:
     _ = normalize_wg_profile_mode(profile_mode)
-    return "0.0.0.0/0, ::/0"
+    return "0.0.0.0/0"
 
 
 def default_profile_mode_from_policy() -> str:

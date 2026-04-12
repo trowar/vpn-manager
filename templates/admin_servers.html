@@ -13,7 +13,6 @@
       <table class="subscriptions-table">
         <thead>
           <tr>
-            <th>ID</th>
             <th>服务器</th>
             <th>状态</th>
             <th>最近测试</th>
@@ -24,7 +23,6 @@
         <tbody>
           {% for s in abnormal_servers %}
             <tr>
-              <td>{{ s["id"] }}</td>
               <td>{{ s["server_name"] }}</td>
               <td><span class="tag tag-warn">{{ s["status"] }}</span></td>
               <td>{{ s["last_test_at"]|fmt_utc }}</td>
@@ -48,7 +46,6 @@
     <table class="subscriptions-table server-table">
       <thead>
         <tr>
-          <th>ID</th>
           <th>名称</th>
           <th>地址</th>
           <th>账号</th>
@@ -59,7 +56,6 @@
       <tbody>
         {% for s in servers %}
           <tr>
-            <td>{{ s["id"] }}</td>
             <td>{{ s["server_name"] }}</td>
             <td><strong>{{ s["host"] }}</strong></td>
             <td>{{ s["username"] }}</td>
