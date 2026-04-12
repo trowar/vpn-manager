@@ -6793,6 +6793,7 @@ def load_admin_online_users(
         """
         SELECT
             id,
+            role,
             username,
             email,
             assigned_ip,
@@ -6802,7 +6803,7 @@ def load_admin_online_users(
             traffic_used_bytes,
             wg_enabled
         FROM users
-        WHERE role = 'user'
+        WHERE role IN ('user', 'admin')
           AND wg_enabled = 1
           AND client_public_key IS NOT NULL
           AND trim(client_public_key) <> ''
@@ -6885,10 +6886,16 @@ def load_admin_online_users(
         if not is_online:
             continue
 
+        role_value = (row_get(user, "role", "") or "").strip().lower()
+        username_display = (row_get(user, "username", "") or "").strip()
+        if role_value == "admin":
+            username_display = f"{username_display or '管理员'}（管理员）"
+
         online_users.append(
             {
                 "id": int(user["id"]),
-                "username": (row_get(user, "username", "") or "").strip(),
+                "role": role_value or "user",
+                "username": username_display,
                 "email": (row_get(user, "email", "") or "").strip(),
                 "assigned_ip": (row_get(user, "assigned_ip", "") or "").strip(),
                 "server_name": server_name,
