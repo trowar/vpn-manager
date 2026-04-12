@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>系统设置</h2>
+  <p class="helper">全局控制注册开关、订单过期时间、新用户赠送策略与 Telegram 联系方式。</p>
+</section>
+
+<section class="card" id="system-settings">
+  <h3>系统设置</h3>
+  <form method="post" action="{{ url_for('admin_update_system_settings') }}" class="form">
+    <label>开放注册
+      <select name="registration_open">
+        <option value="1" {% if system_settings['registration_open'] %}selected{% endif %}>开启</option>
+        <option value="0" {% if not system_settings['registration_open'] %}selected{% endif %}>关闭</option>
+      </select>
+    </label>
+    <label>订单过期时长（小时）
+      <input type="number" name="order_expire_hours" min="1" step="1" value="{{ system_settings['order_expire_hours'] }}" required>
+    </label>
+    <label>新用户赠送时长（月）
+      <input type="number" name="gift_duration_months" min="0" step="1" value="{{ system_settings['gift_duration_months'] }}" required>
+    </label>
+    <label>新用户赠送流量（GB）
+      <input type="number" name="gift_traffic_gb" min="0" step="1" value="{{ system_settings['gift_traffic_gb'] }}" required>
+    </label>
+    <label>Telegram 联系方式（可选）
+      <input type="text" name="telegram_contact" value="{{ system_settings['telegram_contact'] }}" placeholder="@your_tg 或 t.me/xxx">
+    </label>
+    <p class="helper">赠送策略仅影响后续新注册用户；可同时赠送时长和流量。</p>
+    <button type="submit">保存系统设置</button>
+  </form>
+</section>
+{% endblock %}

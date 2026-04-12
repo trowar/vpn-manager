@@ -5,6 +5,41 @@
   <p class="helper">按行管理已接入服务器。新增服务器时可先测试 SSH 连通，再保存并自动部署 VPN 服务端。</p>
 
   <div class="section-title-row" id="node-status">
+    <h3>节点显示（异常节点）</h3>
+  </div>
+
+  {% if abnormal_servers %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>服务器</th>
+            <th>状态</th>
+            <th>最近测试</th>
+            <th>最近部署</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in abnormal_servers %}
+            <tr>
+              <td>{{ s["id"] }}</td>
+              <td>{{ s["server_name"] }}</td>
+              <td><span class="tag tag-warn">{{ s["status"] }}</span></td>
+              <td>{{ s["last_test_at"]|fmt_utc }}</td>
+              <td>{{ s["last_deploy_at"]|fmt_utc }}</td>
+              <td>{{ s["last_test_message"] or s["last_deploy_message"] or "-" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="helper">当前无异常节点。</p>
+  {% endif %}
+
+  <div class="section-title-row">
     <h3>服务器列表</h3>
     <button type="button" id="open-server-modal">新增服务器</button>
   </div>

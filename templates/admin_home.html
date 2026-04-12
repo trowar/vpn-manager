@@ -2,141 +2,32 @@
 {% block content %}
 <section class="card">
   <h2>管理员仪表盘</h2>
-  <p class="helper">按 PRD 展示：待处理订单、异常节点、即将到期权益、用户总览。</p>
+  <p class="helper">运营总览：待处理订单、在线用户、异常节点、即将到期权益（7天内）与用户总数。</p>
 </section>
 
 <section class="card">
   <h3>运营概览</h3>
-  <div class="overview-grid">
+  <div class="overview-grid overview-grid-5">
     <a class="overview-link" href="{{ url_for('admin_pending_orders') }}">
       <span class="overview-label">待处理订单</span>
       <strong class="overview-value">{{ pending_count }}</strong>
+    </a>
+    <a class="overview-link" href="{{ url_for('admin_online_users') }}">
+      <span class="overview-label">在线用户</span>
+      <strong class="overview-value">{{ online_user_count }}</strong>
     </a>
     <a class="overview-link" href="{{ url_for('admin_servers') }}#node-status">
       <span class="overview-label">异常节点</span>
       <strong class="overview-value">{{ abnormal_server_count }}</strong>
     </a>
-    <a class="overview-link" href="{{ url_for('admin_subscriptions') }}">
+    <a class="overview-link" href="{{ url_for('admin_subscriptions') }}#expiring-rights">
       <span class="overview-label">即将到期权益</span>
-      <strong class="overview-value">{{ expiring_subscriptions|length }}</strong>
+      <strong class="overview-value">{{ expiring_count }}</strong>
     </a>
     <a class="overview-link" href="{{ url_for('admin_subscriptions') }}">
       <span class="overview-label">用户总览</span>
       <strong class="overview-value">{{ total_users }}</strong>
     </a>
   </div>
-</section>
-
-<section class="card">
-  <h3>管理员自用 VPN 配置</h3>
-  <p class="helper">系统默认维护管理员无限期权限（有效期永久 + 流量永久），并提供 WireGuard 全局配置下载。</p>
-  {% if admin_vpn_ready %}
-    <p><span class="tag tag-ok">{{ admin_vpn_status_text }}</span></p>
-  {% else %}
-    <p><span class="tag tag-warn">{{ admin_vpn_status_text }}</span></p>
-    {% if admin_vpn_error %}
-      <p class="helper">原因：{{ admin_vpn_error }}</p>
-    {% endif %}
-  {% endif %}
-  <div class="actions">
-    {% if admin_vpn_ready %}
-      <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载管理员 WireGuard 配置（全局）</a>
-      {% if openvpn_enabled %}
-        <a class="btn secondary" href="{{ url_for('admin_download_openvpn_config', mode='global') }}">下载管理员 OpenVPN 配置</a>
-      {% endif %}
-      <a class="btn secondary" href="{{ url_for('admin_download_qr', mode='global') }}" target="_blank" rel="noopener">查看 WireGuard 二维码</a>
-    {% else %}
-      <button type="button" disabled>管理员 WireGuard 配置未就绪</button>
-      {% if openvpn_enabled %}
-        <button type="button" class="secondary" disabled>管理员 OpenVPN 配置未就绪</button>
-      {% endif %}
-    {% endif %}
-  </div>
-</section>
-
-<section class="card" id="node-status">
-  <h3>异常节点</h3>
-  {% if abnormal_servers %}
-    <div class="table-scroll">
-      <table class="subscriptions-table">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>服务器</th>
-            <th>状态</th>
-            <th>最近心跳</th>
-            <th>说明</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for s in abnormal_servers %}
-            <tr>
-              <td>{{ s["id"] }}</td>
-              <td>{{ s["server_name"] }}</td>
-              <td><span class="tag tag-warn">{{ s["status"] }}</span></td>
-              <td>{{ s["last_test_at"]|fmt_utc }}</td>
-              <td>{{ s["last_test_message"] or s["last_deploy_message"] or "-" }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% else %}
-    <p class="helper">当前无异常节点。</p>
-  {% endif %}
-</section>
-
-<section class="card">
-  <h3>即将到期权益（7天内）</h3>
-  {% if expiring_subscriptions %}
-    <div class="table-scroll">
-      <table class="subscriptions-table">
-        <thead>
-          <tr>
-            <th>用户</th>
-            <th>邮箱</th>
-            <th>到期时间</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for u in expiring_subscriptions %}
-            <tr>
-              <td>{{ u["username"] }}</td>
-              <td>{{ u["email"] }}</td>
-              <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% else %}
-    <p class="helper">最近 7 天没有到期权益。</p>
-  {% endif %}
-</section>
-
-<section class="card" id="system-settings">
-  <h3>系统设置</h3>
-  <form method="post" action="{{ url_for('admin_update_system_settings') }}" class="form">
-    <label>开放注册
-      <select name="registration_open">
-        <option value="1" {% if system_settings['registration_open'] %}selected{% endif %}>开启</option>
-        <option value="0" {% if not system_settings['registration_open'] %}selected{% endif %}>关闭</option>
-      </select>
-    </label>
-    <label>订单过期时长（小时）
-      <input type="number" name="order_expire_hours" min="1" step="1" value="{{ system_settings['order_expire_hours'] }}" required>
-    </label>
-    <label>新用户赠送时长（月）
-      <input type="number" name="gift_duration_months" min="0" step="1" value="{{ system_settings['gift_duration_months'] }}" required>
-    </label>
-    <label>新用户赠送流量（GB）
-      <input type="number" name="gift_traffic_gb" min="0" step="1" value="{{ system_settings['gift_traffic_gb'] }}" required>
-    </label>
-    <label>Telegram 联系方式（可选）
-      <input type="text" name="telegram_contact" value="{{ system_settings['telegram_contact'] }}" placeholder="@your_tg 或 t.me/xxx">
-    </label>
-    <p class="helper">赠送策略仅影响后续新注册用户；可同时赠送时长和流量。</p>
-    <button type="submit">保存系统设置</button>
-  </form>
 </section>
 {% endblock %}

@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>在线用户</h2>
+  <p class="helper">每 {{ refresh_seconds }} 秒自动刷新一次。在线判定窗口：最近 {{ online_window_seconds }} 秒内有握手。</p>
+</section>
+
+<section class="card">
+  <div class="stats-grid">
+    <div class="stat-item">
+      <span class="stat-label">追踪用户</span>
+      <strong class="stat-value" id="online-stat-tracked">{{ summary["tracked_users"] }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">在线用户</span>
+      <strong class="stat-value" id="online-stat-users">{{ summary["online_users"] }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">总下载</span>
+      <strong class="stat-value" id="online-stat-download">{{ summary["total_download_human"] }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">总上传</span>
+      <strong class="stat-value" id="online-stat-upload">{{ summary["total_upload_human"] }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">总流量</span>
+      <strong class="stat-value" id="online-stat-total">{{ summary["total_traffic_human"] }}</strong>
+    </div>
+  </div>
+
+  <p class="helper" id="online-sampled-at">最近采样：{{ sampled_at|fmt_utc }}</p>
+  <p class="helper" id="online-source-errors">
+    {% if summary["source_errors"] > 0 %}
+      数据源异常（{{ summary["source_errors"] }}）：{{ summary["source_errors_text"] }}
+    {% else %}
+      数据源状态正常
+    {% endif %}
+  </p>
+
+  <div class="table-scroll">
+    <table class="subscriptions-table">
+      <thead>
+        <tr>
+          <th>用户</th>
+          <th>邮箱</th>
+          <th>分配 IP</th>
+          <th>节点</th>
+          <th>客户端端点</th>
+          <th>最近握手</th>
+          <th>总下载</th>
+          <th>总上传</th>
+          <th>总流量</th>
+          <th>实时下载</th>
+          <th>实时上传</th>
+          <th>已用流量</th>
+          <th>到期时间</th>
+        </tr>
+      </thead>
+      <tbody id="online-users-body">
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+  (function () {
+    var refreshSeconds = Number({{ refresh_seconds|int }}) || 5;
+    var dataUrl = "{{ url_for('admin_online_users_data') }}";
+    var bodyNode = document.getElementById("online-users-body");
+    var sampledNode = document.getElementById("online-sampled-at");
+    var sourceErrorsNode = document.getElementById("online-source-errors");
+    var statTrackedNode = document.getElementById("online-stat-tracked");
+    var statUsersNode = document.getElementById("online-stat-users");
+    var statDownloadNode = document.getElementById("online-stat-download");
+    var statUploadNode = document.getElementById("online-stat-upload");
+    var statTotalNode = document.getElementById("online-stat-total");
+    var previousByUserId = new Map();
+
+    var initialPayload = {
+      sampled_at: {{ sampled_at|tojson }},
+      sampled_at_epoch: {{ sampled_at_epoch|tojson }},
+      summary: {{ summary|tojson }},
+      rows: {{ online_users|tojson }}
+    };
+
+    function escapeHtml(value) {
+      return String(value === null || value === undefined ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatBytes(bytes) {
+      var value = Number(bytes) || 0;
+      if (value < 0) value = 0;
+      var units = ["B", "KB", "MB", "GB", "TB"];
+      var unitIndex = 0;
+      while (value >= 1024 && unitIndex < units.length - 1) {
+        value = value / 1024;
+        unitIndex += 1;
+      }
+      if (unitIndex === 0) {
+        return String(Math.floor(value)) + " " + units[unitIndex];
+      }
+      return value.toFixed(2) + " " + units[unitIndex];
+    }
+
+    function formatRate(rateBytesPerSecond) {
+      var value = Number(rateBytesPerSecond) || 0;
+      if (value <= 0) {
+        return "0 B/s";
+      }
+      return formatBytes(value) + "/s";
+    }
+
+    function formatUtcText(isoText) {
+      var raw = String(isoText || "").trim();
+      if (!raw) return "-";
+      var dt = new Date(raw);
+      if (Number.isNaN(dt.getTime())) {
+        return escapeHtml(raw);
+      }
+      return dt.toISOString().replace("T", " ").replace(".000Z", " UTC");
+    }
+
+    function expiryText(isoText) {
+      var raw = String(isoText || "").trim();
+      if (!raw) return "永久";
+      return formatUtcText(raw);
+    }
+
+    function updateSummary(summary) {
+      var safe = summary || {};
+      if (statTrackedNode) statTrackedNode.textContent = String(safe.tracked_users || 0);
+      if (statUsersNode) statUsersNode.textContent = String(safe.online_users || 0);
+      if (statDownloadNode) statDownloadNode.textContent = String(safe.total_download_human || "0 B");
+      if (statUploadNode) statUploadNode.textContent = String(safe.total_upload_human || "0 B");
+      if (statTotalNode) statTotalNode.textContent = String(safe.total_traffic_human || "0 B");
+      if (sourceErrorsNode) {
+        if (Number(safe.source_errors || 0) > 0) {
+          sourceErrorsNode.textContent = "数据源异常（" + String(safe.source_errors) + "）："
+            + String(safe.source_errors_text || "未知错误");
+        } else {
+          sourceErrorsNode.textContent = "数据源状态正常";
+        }
+      }
+    }
+
+    function renderRows(payload) {
+      if (!bodyNode) return;
+      var rows = Array.isArray(payload.rows) ? payload.rows : [];
+      var sampledEpoch = Number(payload.sampled_at_epoch) || Math.floor(Date.now() / 1000);
+      var nextByUserId = new Map();
+
+      if (!rows.length) {
+        bodyNode.innerHTML = '<tr><td colspan="13" class="helper">当前无在线用户</td></tr>';
+        previousByUserId = nextByUserId;
+        return;
+      }
+
+      var html = rows.map(function (row) {
+        var id = String(row.id || "");
+        var rxBytes = Number(row.rx_bytes || 0);
+        var txBytes = Number(row.tx_bytes || 0);
+        var downRate = 0;
+        var upRate = 0;
+        var prev = previousByUserId.get(id);
+        if (prev && sampledEpoch > prev.sampledEpoch) {
+          var deltaSeconds = sampledEpoch - prev.sampledEpoch;
+          if (deltaSeconds > 0) {
+            downRate = Math.max(0, (rxBytes - prev.rxBytes) / deltaSeconds);
+            upRate = Math.max(0, (txBytes - prev.txBytes) / deltaSeconds);
+          }
+        }
+        nextByUserId.set(id, {
+          sampledEpoch: sampledEpoch,
+          rxBytes: rxBytes,
+          txBytes: txBytes
+        });
+
+        var username = escapeHtml(row.username || "-");
+        var email = escapeHtml(row.email || "-");
+        var assignedIp = escapeHtml(row.assigned_ip || "-");
+        var serverName = escapeHtml(row.server_name || "-");
+        var endpoint = escapeHtml(row.endpoint || "-");
+        var handshake = formatUtcText(row.latest_handshake_at || "");
+        var rxText = escapeHtml(row.rx_human || formatBytes(rxBytes));
+        var txText = escapeHtml(row.tx_human || formatBytes(txBytes));
+        var totalText = escapeHtml(row.total_human || formatBytes(Number(row.total_bytes || 0)));
+        var trafficUsed = escapeHtml(row.traffic_used_human || "0 B");
+        var expiresAt = expiryText(row.subscription_expires_at || "");
+        var downRateText = formatRate(downRate);
+        var upRateText = formatRate(upRate);
+        var downRateClass = downRate > 0 ? "online-rate" : "online-rate online-rate-zero";
+        var upRateClass = upRate > 0 ? "online-rate" : "online-rate online-rate-zero";
+
+        return (
+          "<tr>"
+          + "<td>" + username + "</td>"
+          + "<td>" + email + "</td>"
+          + "<td>" + assignedIp + "</td>"
+          + "<td>" + serverName + "</td>"
+          + "<td><span class=\"table-code-wrap\">" + endpoint + "</span></td>"
+          + "<td>" + handshake + "</td>"
+          + "<td>" + rxText + "</td>"
+          + "<td>" + txText + "</td>"
+          + "<td>" + totalText + "</td>"
+          + "<td><span class=\"" + downRateClass + "\">" + downRateText + "</span></td>"
+          + "<td><span class=\"" + upRateClass + "\">" + upRateText + "</span></td>"
+          + "<td>" + trafficUsed + "</td>"
+          + "<td>" + expiresAt + "</td>"
+          + "</tr>"
+        );
+      }).join("");
+
+      bodyNode.innerHTML = html;
+      previousByUserId = nextByUserId;
+    }
+
+    function render(payload) {
+      updateSummary(payload.summary || {});
+      if (sampledNode) {
+        sampledNode.textContent = "最近采样：" + formatUtcText(payload.sampled_at || "");
+      }
+      renderRows(payload);
+    }
+
+    async function pullLatest() {
+      try {
+        var response = await fetch(dataUrl, {
+          method: "GET",
+          headers: { "Accept": "application/json" }
+        });
+        var payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error((payload && (payload.error || payload.message)) || "拉取在线用户失败");
+        }
+        render(payload);
+      } catch (err) {
+        if (sourceErrorsNode) {
+          sourceErrorsNode.textContent = "在线用户刷新失败：" + String(err);
+        }
+      }
+    }
+
+    render(initialPayload);
+    if (refreshSeconds > 0) {
+      window.setInterval(pullLatest, refreshSeconds * 1000);
+    }
+  })();
+</script>
+{% endblock %}

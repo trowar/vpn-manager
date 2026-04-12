@@ -162,6 +162,20 @@ SETTING_GIFT_DURATION_MONTHS = "gift_duration_months"
 SETTING_GIFT_TRAFFIC_GB = "gift_traffic_gb"
 SETTING_TELEGRAM_CONTACT = "telegram_contact"
 NODE_HEARTBEAT_TIMEOUT_SECONDS = 60
+ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS_RAW = os.environ.get(
+    "ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS", "180"
+).strip()
+ADMIN_ONLINE_REFRESH_SECONDS_RAW = os.environ.get("ADMIN_ONLINE_REFRESH_SECONDS", "5").strip()
+try:
+    ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS = max(
+        30, int(ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS_RAW)
+    )
+except ValueError:
+    ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS = 180
+try:
+    ADMIN_ONLINE_REFRESH_SECONDS = max(3, int(ADMIN_ONLINE_REFRESH_SECONDS_RAW))
+except ValueError:
+    ADMIN_ONLINE_REFRESH_SECONDS = 5
 ADMIN_UI_TZ = timezone(timedelta(hours=8))
 ADMIN_UI_TZ_NAME = "北京时间 (UTC+8)"
 DEFAULT_ADMIN_USERNAME = "admin"
@@ -514,7 +528,11 @@ def get_openvpn_endpoint_host(
     if use_server is None and user is not None:
         try:
             db = get_db()
-            use_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
+            use_server = select_runtime_server_for_account(
+                db,
+                user,
+                allow_reassign=True,
+            )
             if use_server is not None:
                 db.commit()
         except Exception:
@@ -1038,7 +1056,11 @@ def get_wireguard_endpoint_for_clients(
     if use_server is None and user is not None:
         try:
             db = get_db()
-            use_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
+            use_server = select_runtime_server_for_account(
+                db,
+                user,
+                allow_reassign=True,
+            )
             if use_server is not None:
                 db.commit()
         except Exception:
@@ -1589,6 +1611,75 @@ def choose_runtime_server_for_user(
         "SELECT * FROM vpn_servers WHERE id = ? LIMIT 1",
         (int(next_server["id"]),),
     ).fetchone()
+
+
+def choose_runtime_server_for_admin(
+    db: sqlite3.Connection,
+    admin_user: sqlite3.Row | None = None,
+) -> sqlite3.Row | None:
+    candidate_ids: list[int] = []
+
+    preferred_server_id_raw = ""
+    try:
+        settings = load_onboarding_settings(db)
+        preferred_server_id_raw = str(settings.get("last_server_id", "") or "").strip()
+    except Exception:
+        preferred_server_id_raw = ""
+    if preferred_server_id_raw.isdigit():
+        candidate_ids.append(int(preferred_server_id_raw))
+
+    assigned_server_id = row_get(admin_user, "assigned_server_id")
+    if assigned_server_id is not None and str(assigned_server_id).strip():
+        try:
+            assigned_id = int(assigned_server_id)
+            if assigned_id not in candidate_ids:
+                candidate_ids.append(assigned_id)
+        except Exception:
+            pass
+
+    for server_id in candidate_ids:
+        row = get_server_by_id(db, server_id)
+        if not row:
+            continue
+        status = (row_get(row, "status", "") or "").strip().lower()
+        host = normalize_remote_host(row_get(row, "host", ""))
+        token = (row_get(row, "vpn_api_token", "") or "").strip()
+        if status == "online" and host and token:
+            return row
+
+    row = db.execute(
+        """
+        SELECT *
+        FROM vpn_servers
+        WHERE status = 'online'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+
+    host = normalize_remote_host(row_get(row, "host", ""))
+    token = (row_get(row, "vpn_api_token", "") or "").strip()
+    if not host or not token:
+        return None
+    return row
+
+
+def select_runtime_server_for_account(
+    db: sqlite3.Connection,
+    user: sqlite3.Row | None,
+    *,
+    allow_reassign: bool = True,
+) -> sqlite3.Row | None:
+    if not user:
+        return None
+    role = (row_get(user, "role", "") or "").strip().lower()
+    if role == "user":
+        return choose_runtime_server_for_user(db, user, allow_reassign=allow_reassign)
+    if role == "admin":
+        return choose_runtime_server_for_admin(db, user)
+    return None
 
 
 def user_prefers_managed_nodes(db: sqlite3.Connection, user: sqlite3.Row | None) -> bool:
@@ -4064,49 +4155,21 @@ def get_runtime_vpn_api_target(
         host_url = host_for_http_url(host)
         return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token, selected
 
-    try:
-        settings = load_onboarding_settings(db)
-        preferred_server_id_raw = str(settings.get("last_server_id", "") or "").strip()
-    except Exception:
-        preferred_server_id_raw = ""
-
-    row = None
-    if preferred_server_id_raw.isdigit():
-        row = db.execute(
-            """
-            SELECT host, vpn_api_token, status
-            FROM vpn_servers
-            WHERE id = ?
-            LIMIT 1
-            """,
-            (int(preferred_server_id_raw),),
-        ).fetchone()
-
-    if not row:
-        row = db.execute(
-            """
-            SELECT host, vpn_api_token, status
-            FROM vpn_servers
-            WHERE status = 'online'
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-
-    if not row:
+    selected = choose_runtime_server_for_admin(db, user)
+    if not selected:
         return "", "", None
 
-    status = (row_get(row, "status", "") or "").strip().lower()
+    status = (row_get(selected, "status", "") or "").strip().lower()
     if status != "online":
         return "", "", None
 
-    host = normalize_remote_host(row_get(row, "host", ""))
-    token = (row_get(row, "vpn_api_token", "") or "").strip()
+    host = normalize_remote_host(row_get(selected, "host", ""))
+    token = (row_get(selected, "vpn_api_token", "") or "").strip()
     if not host or not token:
         return "", "", None
 
     host_url = host_for_http_url(host)
-    return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token, row
+    return f"http://{host_url}:{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}", token, selected
 
 
 def vpn_api_request(
@@ -4179,6 +4242,41 @@ def get_wireguard_dump_text(
     return run_command(["wg", "show", WG_INTERFACE, "dump"], check=False)
 
 
+def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]]:
+    peers: dict[str, dict[str, int | str]] = {}
+    lines = (dump_text or "").splitlines()
+    if not lines:
+        return peers
+
+    for line in lines[1:]:
+        parts = (line or "").split("\t")
+        if len(parts) < 7:
+            continue
+        public_key = (parts[0] or "").strip()
+        if not public_key:
+            continue
+        endpoint = (parts[2] or "").strip() if len(parts) > 2 else ""
+        try:
+            latest_handshake = int(parts[4])
+        except Exception:
+            latest_handshake = 0
+        try:
+            rx = int(parts[5])
+        except Exception:
+            rx = 0
+        try:
+            tx = int(parts[6])
+        except Exception:
+            tx = 0
+        peers[public_key] = {
+            "rx": max(0, rx),
+            "tx": max(0, tx),
+            "latest_handshake": max(0, latest_handshake),
+            "endpoint": endpoint,
+        }
+    return peers
+
+
 def get_wireguard_server_public_key(
     *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
 ) -> str:
@@ -4244,32 +4342,9 @@ def get_wireguard_peer_state(
     dump = get_wireguard_dump_text(user=user, server_row=server_row)
     if not dump:
         return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
-
-    for line in dump.splitlines()[1:]:
-        parts = line.split("\t")
-        if len(parts) < 7:
-            continue
-        if parts[0].strip() != public_key:
-            continue
-        endpoint = parts[2].strip() if len(parts) > 2 else ""
-        try:
-            latest_handshake = int(parts[4])
-        except Exception:
-            latest_handshake = 0
-        try:
-            rx = int(parts[5])
-        except Exception:
-            rx = 0
-        try:
-            tx = int(parts[6])
-        except Exception:
-            tx = 0
-        return {
-            "rx": max(0, rx),
-            "tx": max(0, tx),
-            "latest_handshake": max(0, latest_handshake),
-            "endpoint": endpoint,
-        }
+    peers = parse_wireguard_dump_peers(dump)
+    if public_key in peers:
+        return peers[public_key]
     return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
 
 
@@ -4341,7 +4416,7 @@ def next_available_ip(
     network = ipaddress.ip_network(WG_NETWORK, strict=False)
     server_ip = ipaddress.ip_address(WG_SERVER_ADDRESS)
 
-    where_parts = ["role = 'user'", "assigned_ip IS NOT NULL"]
+    where_parts = ["role IN ('user', 'admin')", "assigned_ip IS NOT NULL"]
     params: list[object] = []
     if is_dynamic_ip_assignment_mode():
         where_parts.append("wg_enabled = 1")
@@ -4475,11 +4550,16 @@ def build_user_wireguard_config(
 
     allowed_ips = get_client_allowed_ips_for_profile(normalized_mode)
     target_server = None
-    if row_get(user, "role") == "user":
+    role = (row_get(user, "role", "") or "").strip().lower()
+    if role in {"user", "admin"}:
         try:
             db = get_db()
-            target_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
-            if target_server is not None:
+            target_server = select_runtime_server_for_account(
+                db,
+                user,
+                allow_reassign=(role == "user"),
+            )
+            if target_server is not None and role == "user":
                 db.commit()
         except Exception:
             target_server = None
@@ -4606,9 +4686,14 @@ def generate_wireguard_bundle(
 
 def ensure_user_vpn_ready(db: sqlite3.Connection, user: sqlite3.Row) -> dict[str, str | int]:
     target_server = None
-    if row_get(user, "role") == "user":
-        target_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
-        if not target_server and user_prefers_managed_nodes(db, user):
+    role = (row_get(user, "role", "") or "").strip().lower()
+    if role in {"user", "admin"}:
+        target_server = select_runtime_server_for_account(
+            db,
+            user,
+            allow_reassign=(role == "user"),
+        )
+        if role == "user" and (not target_server) and user_prefers_managed_nodes(db, user):
             raise RuntimeError("当前没有可用在线节点，请联系管理员检查服务器状态。")
 
     has_crypto_keys = all(
@@ -4682,10 +4767,14 @@ def ensure_admin_self_vpn_ready(
         raise ValueError("仅管理员可使用自用 VPN 配置。")
 
     vpn_data = ensure_user_vpn_ready(db, admin_user)
+    assigned_server_id = vpn_data.get("assigned_server_id")
+    if assigned_server_id is None:
+        assigned_server_id = row_get(admin_user, "assigned_server_id")
     db.execute(
         """
         UPDATE users
         SET assigned_ip = ?,
+            assigned_server_id = ?,
             client_private_key = ?,
             client_public_key = ?,
             client_psk = ?,
@@ -4700,6 +4789,7 @@ def ensure_admin_self_vpn_ready(
         """,
         (
             vpn_data["assigned_ip"],
+            assigned_server_id,
             vpn_data["client_private_key"],
             vpn_data["client_public_key"],
             vpn_data["client_psk"],
@@ -5396,9 +5486,14 @@ def cleanup_verification_records(db: sqlite3.Connection) -> None:
 
 def rotate_user_wireguard_credentials(db: sqlite3.Connection, user: sqlite3.Row) -> sqlite3.Row:
     target_server = None
-    if row_get(user, "role") == "user":
-        target_server = choose_runtime_server_for_user(db, user, allow_reassign=True)
-        if not target_server and user_prefers_managed_nodes(db, user):
+    role = (row_get(user, "role", "") or "").strip().lower()
+    if role in {"user", "admin"}:
+        target_server = select_runtime_server_for_account(
+            db,
+            user,
+            allow_reassign=(role == "user"),
+        )
+        if role == "user" and (not target_server) and user_prefers_managed_nodes(db, user):
             raise RuntimeError("当前没有可用在线节点，请联系管理员检查服务器状态。")
 
     old_public_key = (row_get(user, "client_public_key", "") or "").strip()
@@ -6447,6 +6542,212 @@ def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
     return db.execute(base_sql, params).fetchall()
 
 
+def load_expiring_subscriptions(
+    db: sqlite3.Connection,
+    *,
+    days: int = 7,
+    limit: int = 20,
+) -> list[dict]:
+    now_dt = utcnow()
+    expire_before = now_dt + timedelta(days=max(1, int(days)))
+    safe_limit = max(1, int(limit))
+    rows = db.execute(
+        """
+        SELECT
+            id,
+            username,
+            email,
+            subscription_expires_at
+        FROM users
+        WHERE role = 'user'
+          AND wg_enabled = 1
+          AND subscription_expires_at IS NOT NULL
+        ORDER BY subscription_expires_at ASC
+        LIMIT ?
+        """,
+        (safe_limit,),
+    ).fetchall()
+    result: list[dict] = []
+    for row in rows:
+        expires_at = parse_iso(row_get(row, "subscription_expires_at", ""))
+        if not expires_at:
+            continue
+        if expires_at < now_dt or expires_at > expire_before:
+            continue
+        result.append(
+            {
+                "id": int(row["id"]),
+                "username": (row_get(row, "username", "") or "").strip(),
+                "email": (row_get(row, "email", "") or "").strip(),
+                "subscription_expires_at": row_get(row, "subscription_expires_at", ""),
+            }
+        )
+    return result
+
+
+def handshake_epoch_to_iso(epoch_seconds: int) -> str:
+    try:
+        epoch = int(epoch_seconds or 0)
+    except Exception:
+        epoch = 0
+    if epoch <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(microsecond=0).isoformat()
+    except Exception:
+        return ""
+
+
+def load_admin_online_users(
+    db: sqlite3.Connection,
+    *,
+    online_window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
+) -> tuple[list[dict], dict]:
+    users = db.execute(
+        """
+        SELECT
+            id,
+            username,
+            email,
+            assigned_ip,
+            assigned_server_id,
+            client_public_key,
+            subscription_expires_at,
+            traffic_used_bytes,
+            wg_enabled
+        FROM users
+        WHERE role = 'user'
+          AND wg_enabled = 1
+          AND client_public_key IS NOT NULL
+          AND trim(client_public_key) <> ''
+        ORDER BY id DESC
+        """
+    ).fetchall()
+    servers = db.execute(
+        """
+        SELECT *
+        FROM vpn_servers
+        ORDER BY id DESC
+        """
+    ).fetchall()
+    servers_by_id: dict[int, sqlite3.Row] = {}
+    for server in servers:
+        try:
+            servers_by_id[int(server["id"])] = server
+        except Exception:
+            continue
+
+    now_dt = utcnow()
+    now_ts = int(now_dt.timestamp())
+    peer_cache: dict[str, dict[str, dict[str, int | str]]] = {}
+    cache_errors: dict[str, str] = {}
+    online_users: list[dict] = []
+
+    for user in users:
+        public_key = (row_get(user, "client_public_key", "") or "").strip()
+        if not public_key:
+            continue
+
+        server_row = None
+        assigned_server_id = row_get(user, "assigned_server_id")
+        if assigned_server_id is not None and str(assigned_server_id).strip():
+            try:
+                server_row = servers_by_id.get(int(assigned_server_id))
+            except Exception:
+                server_row = None
+
+        if server_row is not None:
+            source_key = f"server:{int(server_row['id'])}"
+            server_name = (
+                (row_get(server_row, "server_name", "") or "").strip()
+                or (row_get(server_row, "host", "") or "").strip()
+                or f"#{int(server_row['id'])}"
+            )
+        elif VPN_API_URL:
+            source_key = "global-api"
+            server_name = "全局 VPN API"
+        else:
+            source_key = "local"
+            server_name = "本机 VPN"
+
+        if source_key not in peer_cache:
+            try:
+                if server_row is not None:
+                    if use_vpn_api(server_row=server_row):
+                        dump_text = get_wireguard_dump_text(server_row=server_row)
+                    else:
+                        dump_text = ""
+                else:
+                    dump_text = get_wireguard_dump_text()
+                peer_cache[source_key] = parse_wireguard_dump_peers(dump_text)
+            except Exception as exc:
+                peer_cache[source_key] = {}
+                cache_errors[source_key] = str(exc)
+
+        peer_state = peer_cache[source_key].get(
+            public_key,
+            {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""},
+        )
+        rx_bytes = max(0, int(peer_state.get("rx", 0) or 0))
+        tx_bytes = max(0, int(peer_state.get("tx", 0) or 0))
+        total_bytes = rx_bytes + tx_bytes
+        latest_handshake = max(0, int(peer_state.get("latest_handshake", 0) or 0))
+        handshake_age_seconds = (
+            now_ts - latest_handshake if latest_handshake > 0 else 10**9
+        )
+        is_online = latest_handshake > 0 and handshake_age_seconds <= online_window_seconds
+        if not is_online:
+            continue
+
+        online_users.append(
+            {
+                "id": int(user["id"]),
+                "username": (row_get(user, "username", "") or "").strip(),
+                "email": (row_get(user, "email", "") or "").strip(),
+                "assigned_ip": (row_get(user, "assigned_ip", "") or "").strip(),
+                "server_name": server_name,
+                "endpoint": (peer_state.get("endpoint", "") or "").strip(),
+                "latest_handshake": latest_handshake,
+                "latest_handshake_at": handshake_epoch_to_iso(latest_handshake),
+                "handshake_age_seconds": max(0, handshake_age_seconds),
+                "rx_bytes": rx_bytes,
+                "tx_bytes": tx_bytes,
+                "total_bytes": total_bytes,
+                "rx_human": format_bytes(rx_bytes),
+                "tx_human": format_bytes(tx_bytes),
+                "total_human": format_bytes(total_bytes),
+                "traffic_used_bytes": to_non_negative_int(row_get(user, "traffic_used_bytes", 0)),
+                "traffic_used_human": format_bytes(
+                    to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
+                ),
+                "subscription_expires_at": row_get(user, "subscription_expires_at", ""),
+            }
+        )
+
+    online_users.sort(
+        key=lambda item: (
+            int(item.get("latest_handshake", 0) or 0),
+            int(item.get("total_bytes", 0) or 0),
+        ),
+        reverse=True,
+    )
+    summary = {
+        "tracked_users": len(users),
+        "online_users": len(online_users),
+        "total_download_bytes": sum(int(item["rx_bytes"]) for item in online_users),
+        "total_upload_bytes": sum(int(item["tx_bytes"]) for item in online_users),
+        "total_traffic_bytes": sum(int(item["total_bytes"]) for item in online_users),
+        "source_errors": len(cache_errors),
+        "source_errors_text": " | ".join(
+            f"{name}: {message}" for name, message in cache_errors.items()
+        ).strip(),
+    }
+    summary["total_download_human"] = format_bytes(summary["total_download_bytes"])
+    summary["total_upload_human"] = format_bytes(summary["total_upload_bytes"])
+    summary["total_traffic_human"] = format_bytes(summary["total_traffic_bytes"])
+    return online_users, summary
+
+
 def get_user_current_plan_display(db: sqlite3.Connection, user: sqlite3.Row) -> str:
     row = db.execute(
         """
@@ -7459,9 +7760,13 @@ def admin_servers():
     refresh_server_health_status(db, force=True)
     db.commit()
     servers = load_admin_servers(db)
+    abnormal_servers = [
+        s for s in servers if (s.get("status") or "").strip().lower() != "online"
+    ]
     return render_template(
         "admin_servers.html",
         servers=servers,
+        abnormal_servers=abnormal_servers,
         admin_page="servers",
     )
 
@@ -7724,28 +8029,6 @@ def admin_deploy_saved_server(server_id: int):
 def admin_home():
     db = get_db()
     reconcile_expired_subscriptions(db)
-    system_settings = load_system_settings(db)
-    admin_row = db.execute(
-        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
-        (current_user()["id"],),
-    ).fetchone()
-    admin_vpn_ready = False
-    admin_vpn_status_text = "未生成"
-    admin_vpn_error = ""
-    if admin_row:
-        try:
-            admin_row, prepared_now = ensure_admin_self_vpn_profile(db, admin_row)
-            # Validate default global conf can be rendered.
-            build_user_wireguard_config(admin_row, profile_mode=WG_PROFILE_GLOBAL)
-            admin_vpn_ready = True
-            admin_vpn_status_text = (
-                "已自动生成（无限期）" if prepared_now else "已就绪（无限期）"
-            )
-        except Exception as exc:
-            admin_vpn_ready = False
-            admin_vpn_status_text = "未生成"
-            admin_vpn_error = str(exc)
-
     pending_count = db.execute(
         "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'pending'"
     ).fetchone()["cnt"]
@@ -7753,50 +8036,87 @@ def admin_home():
         "SELECT COUNT(*) AS cnt FROM users WHERE role='user'"
     ).fetchone()["cnt"]
     server_overview = refresh_server_health_status(db)
-    servers = load_admin_servers(db)
-    abnormal_servers = [s for s in servers if (s.get("status") or "").strip().lower() != "online"]
-    expiring_subscriptions: list[dict] = []
-    now_dt = utcnow()
-    expire_before = now_dt + timedelta(days=7)
-    expiring_rows = db.execute(
-        """
-        SELECT id, username, email, subscription_expires_at
-        FROM users
-        WHERE role = 'user'
-          AND wg_enabled = 1
-          AND subscription_expires_at IS NOT NULL
-        ORDER BY subscription_expires_at ASC
-        LIMIT 20
-        """
-    ).fetchall()
-    for row in expiring_rows:
-        expires_at = parse_iso(row_get(row, "subscription_expires_at", ""))
-        if not expires_at:
-            continue
-        if expires_at < now_dt or expires_at > expire_before:
-            continue
-        expiring_subscriptions.append(
-            {
-                "id": int(row["id"]),
-                "username": (row["username"] or "").strip(),
-                "email": (row["email"] or "").strip(),
-                "subscription_expires_at": row["subscription_expires_at"],
-            }
-        )
+    expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=50)
+    _, online_summary = load_admin_online_users(db)
     db.commit()
 
     return render_template(
         "admin_home.html",
         pending_count=pending_count,
         total_users=total_users,
+        online_user_count=int(online_summary.get("online_users", 0) or 0),
+        abnormal_server_count=server_overview["abnormal"],
+        expiring_count=len(expiring_subscriptions),
+        admin_page="home",
+    )
+
+
+@app.route("/admin/configs")
+@login_required
+@admin_required
+def admin_configs():
+    db = get_db()
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    if not admin:
+        flash("管理员账号不存在。", "error")
+        return redirect(url_for("admin_home"))
+
+    target_server = choose_runtime_server_for_admin(db, admin)
+    target_server_name = "-"
+    target_server_host = "-"
+    if target_server is not None:
+        target_server_name = (
+            (row_get(target_server, "server_name", "") or "").strip()
+            or (row_get(target_server, "host", "") or "").strip()
+            or "-"
+        )
+        target_server_host = (row_get(target_server, "host", "") or "").strip() or "-"
+
+    admin_vpn_ready = False
+    admin_vpn_status_text = "未生成"
+    admin_vpn_error = ""
+    endpoint_display = "-"
+    try:
+        admin, prepared_now = ensure_admin_self_vpn_profile(db, admin)
+        # Validate default global conf can be rendered.
+        build_user_wireguard_config(admin, profile_mode=WG_PROFILE_GLOBAL)
+        admin_vpn_ready = True
+        admin_vpn_status_text = "已自动生成（无限期）" if prepared_now else "已就绪（无限期）"
+        endpoint_display = (
+            get_wireguard_endpoint_for_clients(user=admin, server_row=target_server) or "-"
+        ).strip() or "-"
+    except Exception as exc:
+        admin_vpn_ready = False
+        admin_vpn_status_text = "未生成"
+        admin_vpn_error = str(exc)
+    db.commit()
+
+    return render_template(
+        "admin_configs.html",
+        admin_user=admin,
         admin_vpn_ready=admin_vpn_ready,
         admin_vpn_status_text=admin_vpn_status_text,
         admin_vpn_error=admin_vpn_error,
-        abnormal_server_count=server_overview["abnormal"],
-        abnormal_servers=abnormal_servers[:8],
-        expiring_subscriptions=expiring_subscriptions[:8],
+        target_server_name=target_server_name,
+        target_server_host=target_server_host,
+        endpoint_display=endpoint_display,
+        admin_page="configs",
+    )
+
+
+@app.route("/admin/settings")
+@login_required
+@admin_required
+def admin_settings():
+    db = get_db()
+    system_settings = load_system_settings(db)
+    return render_template(
+        "admin_settings.html",
         system_settings=system_settings,
-        admin_page="home",
+        admin_page="system_settings",
     )
 
 
@@ -8328,13 +8648,55 @@ def admin_subscriptions():
     reconcile_expired_subscriptions(db)
     search_email = request.args.get("q", "").strip()
     subscriptions = load_admin_subscriptions(db, search_email)
+    expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=20)
     return render_template(
         "admin_subscriptions.html",
         subscriptions=subscriptions,
+        expiring_subscriptions=expiring_subscriptions,
         search_email=search_email,
         admin_ui_tz_name=ADMIN_UI_TZ_NAME,
         admin_page="subscriptions",
     )
+
+
+@app.route("/admin/online-users")
+@login_required
+@admin_required
+def admin_online_users():
+    db = get_db()
+    reconcile_expired_subscriptions(db)
+    rows, summary = load_admin_online_users(db)
+    db.commit()
+    return render_template(
+        "admin_online_users.html",
+        online_users=rows,
+        summary=summary,
+        sampled_at=utcnow_iso(),
+        sampled_at_epoch=int(utcnow().timestamp()),
+        refresh_seconds=ADMIN_ONLINE_REFRESH_SECONDS,
+        online_window_seconds=ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
+        admin_page="online_users",
+    )
+
+
+@app.route("/admin/online-users/data")
+@login_required
+@admin_required
+def admin_online_users_data():
+    db = get_db()
+    reconcile_expired_subscriptions(db)
+    rows, summary = load_admin_online_users(db)
+    now_iso = utcnow_iso()
+    now_epoch = int(utcnow().timestamp())
+    db.commit()
+    return {
+        "ok": True,
+        "sampled_at": now_iso,
+        "sampled_at_epoch": now_epoch,
+        "online_window_seconds": ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
+        "summary": summary,
+        "rows": rows,
+    }, 200
 
 
 def redirect_admin_subscriptions():
@@ -8361,11 +8723,11 @@ def admin_update_system_settings():
         gift_traffic_gb = parse_int_setting(gift_traffic_raw, 0, min_value=0)
     except Exception:
         flash("系统设置参数无效。", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_settings"))
 
     if order_expire_hours <= 0:
         flash("订单过期小时数必须大于 0。", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_settings"))
 
     upsert_app_setting(db, SETTING_REGISTRATION_OPEN, "1" if registration_open else "0")
     upsert_app_setting(db, SETTING_ORDER_EXPIRE_HOURS, str(order_expire_hours))
@@ -8374,7 +8736,7 @@ def admin_update_system_settings():
     upsert_app_setting(db, SETTING_TELEGRAM_CONTACT, telegram_contact[:160])
     db.commit()
     flash("系统设置已更新。", "success")
-    return redirect(url_for("admin_home"))
+    return redirect(url_for("admin_settings"))
 
 
 @app.route("/admin/settings/payment", methods=["POST"])

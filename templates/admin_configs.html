@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>配置下载</h2>
+  <p class="helper">管理员自用 VPN 配置（无限期、无限流量）。支持 WireGuard 与 OpenVPN。</p>
+</section>
+
+<section class="card">
+  <h3>管理员自用 VPN 配置</h3>
+  {% if admin_vpn_ready %}
+    <p><span class="tag tag-ok">{{ admin_vpn_status_text }}</span></p>
+  {% else %}
+    <p><span class="tag tag-warn">{{ admin_vpn_status_text }}</span></p>
+    {% if admin_vpn_error %}
+      <p class="helper">原因：{{ admin_vpn_error }}</p>
+    {% endif %}
+  {% endif %}
+
+  <div class="stats-grid">
+    <div class="stat-item">
+      <span class="stat-label">管理员邮箱</span>
+      <strong class="stat-value">{{ admin_user["email"] }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">分配 IP</span>
+      <strong class="stat-value">{{ admin_user["assigned_ip"] or "-" }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">当前节点</span>
+      <strong class="stat-value">{{ target_server_name }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">节点地址</span>
+      <strong class="stat-value">{{ target_server_host }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">WireGuard 端点</span>
+      <strong class="stat-value table-code-wrap">{{ endpoint_display }}</strong>
+    </div>
+  </div>
+
+  <div class="actions">
+    {% if admin_vpn_ready %}
+      <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载管理员 WireGuard 配置</a>
+      <a class="btn secondary" href="{{ url_for('admin_download_qr', mode='global') }}" target="_blank" rel="noopener">查看 WireGuard 二维码</a>
+      {% if openvpn_enabled %}
+        <a class="btn secondary" href="{{ url_for('admin_download_openvpn_config', mode='global') }}">下载管理员 OpenVPN 配置</a>
+      {% endif %}
+    {% else %}
+      <button type="button" disabled>管理员 WireGuard 配置未就绪</button>
+      {% if openvpn_enabled %}
+        <button type="button" class="secondary" disabled>管理员 OpenVPN 配置未就绪</button>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

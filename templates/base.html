@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title or "VPN 门户" }}</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg', v='20260409-1') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260411-3') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260412-1') }}">
 </head>
 <body>
   <div class="app-shell{% if not current_user %} app-shell-guest{% endif %}">
@@ -20,9 +20,11 @@
           <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">仪表盘</a>
           <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">订单</a>
           <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户</a>
+          <a class="site-nav-link {% if admin_page == 'online_users' %}active{% endif %}" href="{{ url_for('admin_online_users') }}">在线用户</a>
+          <a class="site-nav-link {% if admin_page == 'configs' %}active{% endif %}" href="{{ url_for('admin_configs') }}">配置下载</a>
           <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器</a>
           <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}#node-status">节点</a>
-          <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_home') }}#system-settings">设置</a>
+          <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_settings') }}">设置</a>
         {% else %}
           <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
           <a class="site-nav-link {% if dashboard_page == 'plans' %}active{% endif %}" href="{{ url_for('dashboard_plans') }}">套餐</a>
