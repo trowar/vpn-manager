@@ -3024,6 +3024,9 @@ def build_vpn_node_deploy_script(
         #!/usr/bin/env bash
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true
+        export TERM="${{TERM:-dumb}}"
+        export NEEDRESTART_MODE=a
 
         log() {{ echo "[deploy] $1"; }}
 
@@ -3045,7 +3048,7 @@ def build_vpn_node_deploy_script(
             return 0
           fi
           if [ "$PM" = "apt" ]; then
-            apt-get update -y -qq >/dev/null
+            DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 update -y -qq >/dev/null
           elif [ "$PM" = "dnf" ]; then
             dnf -y -q makecache >/dev/null || true
           else
@@ -3058,7 +3061,7 @@ def build_vpn_node_deploy_script(
           log "升级系统组件（$PM）"
           if [ "$PM" = "apt" ]; then
             pkg_update
-            apt-get upgrade -y -qq >/dev/null || apt-get dist-upgrade -y -qq >/dev/null
+            DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 upgrade -y -qq >/dev/null || DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 dist-upgrade -y -qq >/dev/null
           elif [ "$PM" = "dnf" ]; then
             dnf -y -q upgrade --refresh >/dev/null || dnf -y -q update >/dev/null
           else
@@ -3072,7 +3075,7 @@ def build_vpn_node_deploy_script(
           fi
           pkg_update
           if [ "$PM" = "apt" ]; then
-            apt-get install -y -qq --no-install-recommends "$@" >/dev/null
+            DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 install -y -qq --no-install-recommends "$@" >/dev/null
           elif [ "$PM" = "dnf" ]; then
             dnf -y -q install "$@" >/dev/null
           else

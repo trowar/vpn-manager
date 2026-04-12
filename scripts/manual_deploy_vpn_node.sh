@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+export DEBCONF_NONINTERACTIVE_SEEN=true
+export TERM="${TERM:-dumb}"
+export NEEDRESTART_MODE=a
 
 APP_DIR="${APP_DIR:-/opt/vpn-node}"
 REPO_URL="${REPO_URL:-https://github.com/trowar/vpn-manager.git}"
@@ -65,9 +68,10 @@ retry_cmd() {
 }
 
 apt_cmd() {
-  apt-get \
+  DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get \
     -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" \
     -o Acquire::Retries=3 \
+    -o Dpkg::Use-Pty=0 \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold" \
     "$@"
