@@ -59,17 +59,12 @@
                   type="button"
                   class="btn secondary open-server-edit-modal"
                   data-update-url="{{ url_for('admin_update_saved_server', server_id=s['id']) }}"
+                  data-delete-url="{{ url_for('admin_delete_saved_server', server_id=s['id']) }}"
                   data-server-name="{{ s['host'] }}"
                   data-host="{{ s['host'] }}"
                   data-port="{{ s['port'] }}"
                   data-username="{{ s['username'] }}"
                 >修改</button>
-                <button
-                  type="button"
-                  class="danger open-server-delete-modal"
-                  data-delete-url="{{ url_for('admin_delete_saved_server', server_id=s['id']) }}"
-                  data-server-name="{{ s['host'] }}"
-                >删除</button>
               </div>
             </td>
           </tr>
@@ -141,22 +136,10 @@
       <p class="helper">WireGuard 端口固定为 51820，OpenVPN 端口固定为 1194，DNS 端口固定为 53。</p>
       <div class="actions">
         <button type="submit">保存修改</button>
+        <button type="button" class="danger" id="server-edit-delete-btn">删除服务器</button>
       </div>
     </form>
-  </div>
-</div>
-
-<div class="payment-modal" id="server-delete-modal" hidden>
-  <div class="payment-modal-card" style="max-width:460px;">
-    <div class="section-title-row">
-      <h4>确认删除</h4>
-      <button type="button" class="btn secondary modal-close-x" id="close-server-delete-modal">×</button>
-    </div>
-    <p id="server-delete-message">确认删除该服务器吗？</p>
-    <form method="post" id="server-delete-form" class="actions">
-      <button type="submit" class="danger">确认删除</button>
-      <button type="button" class="btn secondary" id="cancel-server-delete-modal">取消</button>
-    </form>
+    <form method="post" id="server-edit-delete-form" class="inline-form" style="display:none;"></form>
   </div>
 </div>
 
@@ -189,13 +172,9 @@
     var editUser = document.getElementById("server-edit-username");
     var editPass = document.getElementById("server-edit-password");
     var editKey = document.getElementById("server-edit-key");
-
-    var deleteModal = document.getElementById("server-delete-modal");
-    var deleteCloseBtn = document.getElementById("close-server-delete-modal");
-    var deleteCancelBtn = document.getElementById("cancel-server-delete-modal");
-    var deleteButtons = document.querySelectorAll(".open-server-delete-modal");
-    var deleteForm = document.getElementById("server-delete-form");
-    var deleteMessage = document.getElementById("server-delete-message");
+    var editDeleteBtn = document.getElementById("server-edit-delete-btn");
+    var editDeleteForm = document.getElementById("server-edit-delete-form");
+    var editDeleteTargetName = "";
 
     var logModal = document.getElementById("server-log-modal");
     var logCloseBtn = document.getElementById("close-server-log-modal");
@@ -305,22 +284,20 @@
         if (editUser) editUser.value = btn.dataset.username || "root";
         if (editPass) editPass.value = "";
         if (editKey) editKey.value = "";
+        if (editDeleteForm) editDeleteForm.action = btn.dataset.deleteUrl || "";
+        editDeleteTargetName = btn.dataset.serverName || btn.dataset.host || "该服务器";
         openModal(editModal);
       });
     });
-
-    if (deleteCloseBtn) deleteCloseBtn.addEventListener("click", function () { closeModal(deleteModal); });
-    if (deleteCancelBtn) deleteCancelBtn.addEventListener("click", function () { closeModal(deleteModal); });
-    bindOverlayClose(deleteModal);
-    deleteButtons.forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        if (deleteForm) deleteForm.action = btn.dataset.deleteUrl || "";
-        if (deleteMessage) {
-          deleteMessage.textContent = "确定删除服务器“" + (btn.dataset.serverName || "该服务器") + "”吗？";
+    if (editDeleteBtn) {
+      editDeleteBtn.addEventListener("click", function () {
+        if (!editDeleteForm || !editDeleteForm.action) return;
+        var targetName = editDeleteTargetName || "该服务器";
+        if (confirm("确定删除服务器“" + targetName + "”吗？该操作不可恢复。")) {
+          editDeleteForm.submit();
         }
-        openModal(deleteModal);
       });
-    });
+    }
 
     if (logCloseBtn) logCloseBtn.addEventListener("click", function () { closeModal(logModal); });
     bindOverlayClose(logModal);

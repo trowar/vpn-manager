@@ -42,7 +42,6 @@
   <div class="actions">
     {% if admin_vpn_ready %}
       <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载管理员 WireGuard 配置</a>
-      <a class="btn secondary" href="{{ url_for('admin_download_qr', mode='global') }}" target="_blank" rel="noopener">查看 WireGuard 二维码</a>
       {% if openvpn_enabled %}
         <a class="btn secondary" href="{{ url_for('admin_download_openvpn_config', mode='global') }}">下载管理员 OpenVPN 配置</a>
       {% endif %}
@@ -53,5 +52,12 @@
       {% endif %}
     {% endif %}
   </div>
+
+  {% if admin_vpn_ready %}
+    <div class="payment-qr-wrap" id="admin-inline-qr">
+      <img src="{{ url_for('admin_download_qr', mode='global') }}" alt="管理员 WireGuard 二维码">
+    </div>
+    <p class="helper">管理员 WireGuard 二维码已默认显示，可直接扫码导入。</p>
+  {% endif %}
 </section>
 {% endblock %}
