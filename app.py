@@ -7473,7 +7473,6 @@ def admin_onboarding_step_server():
         action == "save_and_deploy"
         and (request.form.get("open_deploy_log_window", "") or "").strip() == "1"
     )
-    server_name = request.form.get("server_name", "").strip()
     server_host = normalize_remote_host(request.form.get("server_host", ""))
     server_port = normalize_server_port(request.form.get("server_port", "22"), 22)
     server_username = request.form.get("server_username", "").strip()
@@ -7482,7 +7481,7 @@ def admin_onboarding_step_server():
 
     save_onboarding_server_draft(
         db,
-        server_name=server_name,
+        server_name=server_host,
         server_host=server_host,
         server_port=server_port,
         server_username=server_username or "root",
@@ -7557,8 +7556,7 @@ def admin_onboarding_step_server():
 
     settings = load_onboarding_settings(db)
     portal_domain = normalize_fqdn(str(settings["portal_domain"]))
-    if not server_name:
-        server_name = server_host
+    server_name = server_host
 
     deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
     server_id = create_server_record(
@@ -7708,7 +7706,6 @@ def admin_onboarding():
         cloudflare_account = request.form.get("cloudflare_account", "").strip()
         cloudflare_password = request.form.get("cloudflare_password", "").strip()
 
-        server_name = request.form.get("server_name", "").strip()
         server_host = normalize_remote_host(request.form.get("server_host", ""))
         server_port = normalize_server_port(request.form.get("server_port", "22"), 22)
         server_username = request.form.get("server_username", "").strip()
@@ -7853,8 +7850,7 @@ def admin_onboarding():
         upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT, cloudflare_account)
         upsert_app_setting(db, ONBOARDING_SETTING_CLOUDFLARE_PASSWORD, cloudflare_password)
 
-        if not server_name:
-            server_name = server_host
+        server_name = server_host
         deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
         server_id = create_server_record(
             db,
@@ -7963,7 +7959,6 @@ def admin_test_server_connection():
 @admin_required
 def admin_create_server():
     db = get_db()
-    server_name = request.form.get("server_name", "").strip()
     host = normalize_remote_host(request.form.get("host", ""))
     port = normalize_server_port(request.form.get("port", "22"), 22)
     username = (request.form.get("username", "") or "").strip()
@@ -7984,8 +7979,7 @@ def admin_create_server():
         flash(f"服务器连接测试失败：{test_message}", "error")
         return redirect(url_for("admin_servers"))
 
-    if not server_name:
-        server_name = host
+    server_name = host
     deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
     server_id = create_server_record(
         db,
@@ -8073,6 +8067,7 @@ def admin_server_deploy_log(server_id: int):
         SELECT
             id,
             server_name,
+            host,
             status,
             last_test_at,
             last_test_message,
@@ -8100,7 +8095,8 @@ def admin_server_deploy_log(server_id: int):
     return {
         "ok": True,
         "server_id": int(row["id"]),
-        "server_name": (row["server_name"] or "").strip(),
+        "server_name": (row_get(row, "server_name", "") or "").strip()
+        or (row_get(row, "host", "") or "").strip(),
         "last_test_at": row_get(row, "last_test_at", "") or "",
         "last_test_message": summarize_text(
             normalize_deploy_log_text(row_get(row, "last_test_message", "") or "") or "-",
@@ -8125,7 +8121,6 @@ def admin_update_saved_server(server_id: int):
         flash("服务器不存在。", "error")
         return redirect(url_for("admin_servers"))
 
-    server_name = request.form.get("server_name", "").strip()
     host = normalize_remote_host(request.form.get("host", ""))
     port = normalize_server_port(request.form.get("port", "22"), 22)
     username = (request.form.get("username", "") or "").strip()
@@ -8138,8 +8133,7 @@ def admin_update_saved_server(server_id: int):
     if not host or not username:
         flash("服务器地址和账号不能为空。", "error")
         return redirect(url_for("admin_servers"))
-    if not server_name:
-        server_name = host
+    server_name = host
 
     password_to_save = password_raw if password_raw else (row_get(row, "password", "") or "")
     private_key_to_save = (
@@ -8189,7 +8183,7 @@ def admin_update_saved_server(server_id: int):
 def admin_delete_saved_server(server_id: int):
     db = get_db()
     row = db.execute(
-        "SELECT id, server_name FROM vpn_servers WHERE id = ? LIMIT 1",
+        "SELECT id, server_name, host FROM vpn_servers WHERE id = ? LIMIT 1",
         (server_id,),
     ).fetchone()
     if not row:
@@ -8201,7 +8195,10 @@ def admin_delete_saved_server(server_id: int):
     if (get_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, "") or "").strip() == str(server_id):
         upsert_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, "")
     db.commit()
-    flash(f"服务器 {row['server_name']} 已删除。", "success")
+    server_label = (row_get(row, "host", "") or "").strip() or (
+        row_get(row, "server_name", "") or ""
+    ).strip()
+    flash(f"服务器 {server_label} 已删除。", "success")
     return redirect(url_for("admin_servers"))
 
 

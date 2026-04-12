@@ -13,7 +13,6 @@
     <table class="subscriptions-table server-table">
       <thead>
         <tr>
-          <th>名称</th>
           <th>地址</th>
           <th>账号</th>
           <th>状态</th>
@@ -23,7 +22,6 @@
       <tbody>
         {% for s in servers %}
           <tr>
-            <td>{{ s["server_name"] }}</td>
             <td><strong>{{ s["host"] }}</strong></td>
             <td>{{ s["username"] }}</td>
             <td>
@@ -55,13 +53,13 @@
                   type="button"
                   class="btn secondary open-server-log-modal"
                   data-log-url="{{ url_for('admin_server_deploy_log', server_id=s['id']) }}"
-                  data-server-name="{{ s['server_name'] }}"
+                  data-server-name="{{ s['host'] }}"
                 >部署日志</button>
                 <button
                   type="button"
                   class="btn secondary open-server-edit-modal"
                   data-update-url="{{ url_for('admin_update_saved_server', server_id=s['id']) }}"
-                  data-server-name="{{ s['server_name'] }}"
+                  data-server-name="{{ s['host'] }}"
                   data-host="{{ s['host'] }}"
                   data-port="{{ s['port'] }}"
                   data-username="{{ s['username'] }}"
@@ -70,7 +68,7 @@
                   type="button"
                   class="danger open-server-delete-modal"
                   data-delete-url="{{ url_for('admin_delete_saved_server', server_id=s['id']) }}"
-                  data-server-name="{{ s['server_name'] }}"
+                  data-server-name="{{ s['host'] }}"
                 >删除</button>
               </div>
             </td>
@@ -91,9 +89,6 @@
     </div>
 
     <form method="post" action="{{ url_for('admin_create_server') }}" class="form" id="server-create-form">
-      <label>服务器名称（可选）
-        <input type="text" name="server_name" id="server-name-input" placeholder="例如：香港节点1">
-      </label>
       <label>服务器 IP/域名
         <input type="text" name="host" id="server-host-input" placeholder="例如：193.134.209.54" required>
       </label>
@@ -128,9 +123,6 @@
     </div>
 
     <form method="post" id="server-edit-form" class="form">
-      <label>服务器名称
-        <input type="text" name="server_name" id="server-edit-name" required>
-      </label>
       <label>服务器 IP/域名
         <input type="text" name="host" id="server-edit-host" required>
       </label>
@@ -192,7 +184,6 @@
     var editCloseBtn = document.getElementById("close-server-edit-modal");
     var editButtons = document.querySelectorAll(".open-server-edit-modal");
     var editForm = document.getElementById("server-edit-form");
-    var editName = document.getElementById("server-edit-name");
     var editHost = document.getElementById("server-edit-host");
     var editPort = document.getElementById("server-edit-port");
     var editUser = document.getElementById("server-edit-username");
@@ -309,7 +300,6 @@
       btn.addEventListener("click", function () {
         if (!editForm) return;
         editForm.action = btn.dataset.updateUrl || "";
-        if (editName) editName.value = btn.dataset.serverName || "";
         if (editHost) editHost.value = btn.dataset.host || "";
         if (editPort) editPort.value = btn.dataset.port || "22";
         if (editUser) editUser.value = btn.dataset.username || "root";
