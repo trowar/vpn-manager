@@ -2798,6 +2798,60 @@ def run_remote_ssh_command(
             client.close()
 
 
+def run_remote_ssh_script(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    private_key_text: str = "",
+    script: str,
+    timeout: int = 45,
+) -> tuple[bool, str]:
+    safe_host = normalize_remote_host(host)
+    safe_port = normalize_server_port(port)
+    safe_username = (username or "").strip()
+    safe_private_key = (private_key_text or "").strip()
+    if not safe_host or not safe_username or (not password and not safe_private_key):
+        return False, "服务器连接信息不完整（需提供密码或私钥）。"
+
+    script_text = (script or "").strip()
+    if not script_text:
+        return False, "远程脚本为空。"
+    script_payload = script_text + "\n"
+
+    client: paramiko.SSHClient | None = None
+    try:
+        client = open_ssh_client(
+            safe_host,
+            safe_port,
+            safe_username,
+            password,
+            private_key_text=safe_private_key,
+            timeout=10,
+        )
+        stdin, stdout, stderr = client.exec_command("bash -s", timeout=timeout)
+        stdin.write(script_payload)
+        stdin.channel.shutdown_write()
+        out = stdout.read().decode("utf-8", errors="ignore").strip()
+        err = stderr.read().decode("utf-8", errors="ignore").strip()
+        exit_code = stdout.channel.recv_exit_status()
+        merged = "\n".join(
+            [item for item in [out, err] if (item or "").strip()]
+        ).strip()
+        if exit_code != 0:
+            detail = summarize_text(merged or f"exit={exit_code}", 320)
+            return False, f"远程脚本执行失败：{detail}"
+        if merged:
+            return True, summarize_text(merged, 320)
+        return True, "远程脚本执行成功。"
+    except Exception as exc:
+        return False, f"SSH 执行失败：{exc}"
+    finally:
+        if client:
+            client.close()
+
+
 def set_server_ipv6_state(
     *,
     host: str,
@@ -2822,13 +2876,13 @@ def set_server_ipv6_state(
         sysctl net.ipv6.conf.all.disable_ipv6 net.ipv6.conf.default.disable_ipv6 net.ipv6.conf.lo.disable_ipv6
         """
     ).strip()
-    ok, result = run_remote_ssh_command(
+    ok, result = run_remote_ssh_script(
         host=host,
         port=port,
         username=username,
         password=password,
         private_key_text=private_key_text,
-        command=f"bash -lc {json.dumps(script)}",
+        script=script,
         timeout=45,
     )
     if ok:
