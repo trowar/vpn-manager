@@ -7879,13 +7879,9 @@ def admin_servers():
     refresh_server_health_status(db, force=True)
     db.commit()
     servers = load_admin_servers(db)
-    abnormal_servers = [
-        s for s in servers if (s.get("status") or "").strip().lower() != "online"
-    ]
     return render_template(
         "admin_servers.html",
         servers=servers,
-        abnormal_servers=abnormal_servers,
         admin_page="servers",
     )
 
