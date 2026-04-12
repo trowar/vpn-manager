@@ -6248,6 +6248,40 @@ def dashboard_config():
     )
 
 
+@app.route("/dashboard/config/regenerate", methods=["POST"])
+@login_required
+def dashboard_regenerate_config():
+    user = current_user()
+    if user["role"] == "admin":
+        flash("管理员请在管理员配置页操作。", "error")
+        return redirect(url_for("admin_configs"))
+
+    db = get_db()
+    reconcile_expired_subscriptions(db)
+    latest_user = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+        (user["id"],),
+    ).fetchone()
+    if not latest_user:
+        flash("用户不存在。", "error")
+        return redirect(url_for("dashboard_config"))
+
+    if not is_subscription_active(latest_user):
+        flash("当前订阅未生效或已过期，暂无法重新生成配置。", "error")
+        return redirect(url_for("dashboard_config"))
+
+    try:
+        rotate_user_wireguard_credentials(db, latest_user)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        flash(f"重新生成配置失败：{exc}", "error")
+        return redirect(url_for("dashboard_config"))
+
+    flash("WireGuard 配置已重新生成。请删除旧隧道并导入新配置后再连接。", "success")
+    return redirect(url_for("dashboard_config"))
+
+
 @app.route("/dashboard/profile", methods=["GET", "POST"])
 @login_required
 def dashboard_profile():

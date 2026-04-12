@@ -14,8 +14,17 @@
         <div class="actions">
           {% if active %}
             <a class="btn" href="{{ url_for('download_config', mode='global') }}">下载 WireGuard 配置</a>
+            <form
+              method="post"
+              action="{{ url_for('dashboard_regenerate_config') }}"
+              class="inline-form"
+              onsubmit="return confirm('确定重新生成 WireGuard 配置吗？旧配置将失效。');"
+            >
+              <button type="submit" class="btn secondary">重新生成配置</button>
+            </form>
           {% else %}
             <button type="button" disabled>下载 WireGuard 配置（未生效）</button>
+            <button type="button" class="secondary" disabled>重新生成配置（未生效）</button>
           {% endif %}
           <a class="btn secondary" href="{{ url_for('wireguard_download_auto') }}">一键下载客户端</a>
           <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部下载入口</a>
