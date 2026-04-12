@@ -4985,6 +4985,16 @@ def ensure_admin_self_vpn_profile(
     prepared_now = False
     refreshed = admin_user
     if force_prepare or admin_self_vpn_needs_prepare(admin_user):
+        # Admin profile should be generated from an online managed node (or explicit global VPN_API_URL).
+        # Without that, avoid falling back to local `wg` command in web runtime.
+        if not (VPN_API_URL or "").strip():
+            target_server = select_runtime_server_for_account(
+                db,
+                admin_user,
+                allow_reassign=False,
+            )
+            if target_server is None:
+                raise RuntimeError("没有服务器，请添加服务器后生成配置。")
         refreshed = ensure_admin_self_vpn_ready(db, admin_user)
         prepared_now = True
 
