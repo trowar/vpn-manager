@@ -90,7 +90,7 @@ body {
 }
 
 .site-content {
-  width: min(1120px, calc(100% - 32px));
+  width: min(1280px, calc(100% - 20px));
   margin: 0 auto;
   padding: 20px 0 40px;
 }
@@ -350,8 +350,8 @@ td {
 }
 
 .server-table {
-  min-width: 100%;
-  table-layout: fixed;
+  width: 100%;
+  table-layout: auto;
 }
 
 .server-table th,
@@ -370,13 +370,16 @@ td {
 }
 
 .server-table .server-actions-cell {
-  width: 330px;
+  width: 460px;
+  min-width: 460px;
+  white-space: normal;
   overflow: visible;
 }
 
 .server-table .subscription-actions {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 6px;
+  justify-content: flex-start;
 }
 
 .server-table .subscription-actions button,
@@ -886,7 +889,7 @@ code {
   }
 
   .site-content {
-    width: min(1120px, calc(100% - 20px));
+    width: min(1280px, calc(100% - 12px));
     padding: 14px 0 28px;
   }
 
