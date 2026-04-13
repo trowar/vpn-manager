@@ -6,7 +6,7 @@
 
   <div class="section-title-row">
     <h3>套餐列表</h3>
-    <a class="btn" href="#plan-create-inline-form">新增套餐</a>
+    <button type="button" id="open-plan-create-modal">新增套餐</button>
   </div>
 
   {% if plans %}
@@ -56,6 +56,8 @@
                     data-plan-name="{{ plan['plan_name'] }}"
                     data-billing-mode="{{ plan['billing_mode'] }}"
                     data-duration-months="{{ plan['duration_months'] }}"
+                    data-duration-value="{{ plan['duration_value'] }}"
+                    data-duration-unit="{{ plan['duration_unit'] }}"
                     data-traffic-gb="{{ plan['traffic_gb'] }}"
                     data-price-usdt="{{ plan['price_usdt'] }}"
                     data-sort-order="{{ plan['sort_order'] }}"
@@ -140,33 +142,47 @@
   {% endif %}
 </section>
 
-<section class="card" id="plan-create-inline-form">
-  <h3>新增套餐</h3>
-  <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
-    <label>套餐名称
-      <input type="text" name="plan_name" placeholder="例如：月付基础版 / 200GB 流量包" required>
-    </label>
-    <label>收费模式
-      <select name="billing_mode" id="plan-inline-billing-mode" required>
-        <option value="duration">按时长收费</option>
-        <option value="traffic">按流量收费</option>
-      </select>
-    </label>
-    <label id="plan-inline-duration-row">时长（月）
-      <input type="number" name="duration_months" min="1" step="1" value="1" required>
-    </label>
-    <label id="plan-inline-traffic-row" hidden style="display:none;">流量（GB）
-      <input type="number" name="traffic_gb" min="1" step="1" disabled>
-    </label>
-    <label>价格（USDT）
-      <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
-    </label>
-    <label>排序（数字越小越靠前）
-      <input type="number" name="sort_order" min="0" step="1" value="100">
-    </label>
-    <button type="submit">添加套餐</button>
-  </form>
-</section>
+<div class="payment-modal" id="plan-create-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>新增套餐</h4>
+      <button type="button" class="btn secondary" id="close-plan-create-modal">关闭</button>
+    </div>
+
+    <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
+      <label>计费方式
+        <select name="billing_mode" id="plan-create-billing-mode" required>
+          <option value="duration">按时长</option>
+          <option value="traffic">按流量</option>
+        </select>
+      </label>
+
+      <div id="plan-create-duration-row">
+        <label>时长单位
+          <select name="duration_unit" id="plan-create-duration-unit">
+            <option value="day">天</option>
+            <option value="month" selected>月</option>
+            <option value="year">年</option>
+          </select>
+        </label>
+        <label>时长数值
+          <input type="number" name="duration_value" id="plan-create-duration-value" min="1" step="1" value="1" required>
+        </label>
+      </div>
+
+      <label id="plan-create-traffic-row" hidden style="display:none;">流量（GB）
+        <input type="number" name="traffic_gb" id="plan-create-traffic-input" min="1" step="1" disabled>
+      </label>
+
+      <label>价格（USDT）
+        <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
+      </label>
+
+      <input type="hidden" name="sort_order" value="100">
+      <button type="submit">保存</button>
+    </form>
+  </div>
+</div>
 
 <div class="payment-modal" id="plan-edit-modal" hidden>
   <div class="payment-modal-card plan-create-modal-card">
@@ -181,13 +197,22 @@
       </label>
       <label>收费模式
         <select name="billing_mode" id="plan-edit-billing-mode" required>
-          <option value="duration">按时长收费</option>
-          <option value="traffic">按流量收费</option>
+          <option value="duration">按时长</option>
+          <option value="traffic">按流量</option>
         </select>
       </label>
-      <label id="plan-edit-duration-row">时长（月）
-        <input type="number" name="duration_months" id="plan-edit-duration-input" min="1" step="1" required>
-      </label>
+      <div id="plan-edit-duration-row">
+        <label>时长单位
+          <select name="duration_unit" id="plan-edit-duration-unit">
+            <option value="day">天</option>
+            <option value="month">月</option>
+            <option value="year">年</option>
+          </select>
+        </label>
+        <label>时长数值
+          <input type="number" name="duration_value" id="plan-edit-duration-input" min="1" step="1" required>
+        </label>
+      </div>
       <label id="plan-edit-traffic-row" hidden style="display:none;">流量（GB）
         <input type="number" name="traffic_gb" id="plan-edit-traffic-input" min="1" step="1" disabled>
       </label>
@@ -197,7 +222,7 @@
       <label>排序（数字越小越靠前）
         <input type="number" name="sort_order" id="plan-edit-sort" min="0" step="1" value="100">
       </label>
-      <button type="submit">保存修改</button>
+      <button type="submit">保存</button>
     </form>
   </div>
 </div>
@@ -218,9 +243,12 @@
 
 <script>
   (function () {
-    var createModeSelect = document.getElementById("plan-inline-billing-mode");
-    var createDurationRow = document.getElementById("plan-inline-duration-row");
-    var createTrafficRow = document.getElementById("plan-inline-traffic-row");
+    var createOpenBtn = document.getElementById("open-plan-create-modal");
+    var createCloseBtn = document.getElementById("close-plan-create-modal");
+    var createModal = document.getElementById("plan-create-modal");
+    var createModeSelect = document.getElementById("plan-create-billing-mode");
+    var createDurationRow = document.getElementById("plan-create-duration-row");
+    var createTrafficRow = document.getElementById("plan-create-traffic-row");
 
     var editButtons = document.querySelectorAll(".open-plan-edit-modal");
     var editModal = document.getElementById("plan-edit-modal");
@@ -229,6 +257,7 @@
     var editNameInput = document.getElementById("plan-edit-name");
     var editModeSelect = document.getElementById("plan-edit-billing-mode");
     var editDurationRow = document.getElementById("plan-edit-duration-row");
+    var editDurationUnitSelect = document.getElementById("plan-edit-duration-unit");
     var editTrafficRow = document.getElementById("plan-edit-traffic-row");
     var editDurationInput = document.getElementById("plan-edit-duration-input");
     var editTrafficInput = document.getElementById("plan-edit-traffic-input");
@@ -273,37 +302,54 @@
       if (!modeSelect || !durationRow || !trafficRow) {
         return;
       }
-      var durationInput = durationRow.querySelector("input");
-      var trafficInput = trafficRow.querySelector("input");
+      var durationControls = durationRow.querySelectorAll("input, select");
+      var durationRequiredInput = durationRow.querySelector("input");
+      var trafficControls = trafficRow.querySelectorAll("input, select");
+      var trafficRequiredInput = trafficRow.querySelector("input");
       if (modeSelect.value === "traffic") {
         trafficRow.hidden = false;
         trafficRow.style.display = "";
         durationRow.hidden = true;
         durationRow.style.display = "none";
-        if (durationInput) {
-          durationInput.removeAttribute("required");
-          durationInput.disabled = true;
-        }
-        if (trafficInput) {
-          trafficInput.setAttribute("required", "required");
-          trafficInput.disabled = false;
+        durationControls.forEach(function (control) {
+          control.disabled = true;
+          control.removeAttribute("required");
+        });
+        trafficControls.forEach(function (control) {
+          control.disabled = false;
+        });
+        if (trafficRequiredInput) {
+          trafficRequiredInput.setAttribute("required", "required");
         }
       } else {
         trafficRow.hidden = true;
         trafficRow.style.display = "none";
         durationRow.hidden = false;
         durationRow.style.display = "";
-        if (trafficInput) {
-          trafficInput.removeAttribute("required");
-          trafficInput.disabled = true;
-        }
-        if (durationInput) {
-          durationInput.setAttribute("required", "required");
-          durationInput.disabled = false;
+        trafficControls.forEach(function (control) {
+          control.disabled = true;
+          control.removeAttribute("required");
+        });
+        durationControls.forEach(function (control) {
+          control.disabled = false;
+        });
+        if (durationRequiredInput) {
+          durationRequiredInput.setAttribute("required", "required");
         }
       }
     }
 
+    if (createOpenBtn) {
+      createOpenBtn.addEventListener("click", function () {
+        openModal(createModal);
+      });
+    }
+    if (createCloseBtn) {
+      createCloseBtn.addEventListener("click", function () {
+        closeModal(createModal);
+      });
+    }
+    bindOverlayClose(createModal);
     if (createModeSelect) {
       createModeSelect.addEventListener("change", function () {
         refreshModeFields(createModeSelect, createDurationRow, createTrafficRow);
@@ -336,11 +382,14 @@
           editModeSelect.value = btn.dataset.billingMode || "duration";
         }
         if (editDurationInput) {
-          var durationValue = btn.dataset.durationMonths || "1";
+          var durationValue = btn.dataset.durationValue || btn.dataset.durationMonths || "1";
           if (!durationValue || durationValue === "0") {
             durationValue = "1";
           }
           editDurationInput.value = durationValue;
+        }
+        if (editDurationUnitSelect) {
+          editDurationUnitSelect.value = btn.dataset.durationUnit || "month";
         }
         if (editTrafficInput) {
           var trafficValue = btn.dataset.trafficGb || "1";

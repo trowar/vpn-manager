@@ -211,6 +211,14 @@ PAYMENT_SETTING_KEYS = (
 PLAN_MODE_DURATION = "duration"
 PLAN_MODE_TRAFFIC = "traffic"
 PLAN_MODES = (PLAN_MODE_DURATION, PLAN_MODE_TRAFFIC)
+PLAN_DURATION_UNIT_DAY = "day"
+PLAN_DURATION_UNIT_MONTH = "month"
+PLAN_DURATION_UNIT_YEAR = "year"
+PLAN_DURATION_UNITS = (
+    PLAN_DURATION_UNIT_DAY,
+    PLAN_DURATION_UNIT_MONTH,
+    PLAN_DURATION_UNIT_YEAR,
+)
 WG_PROFILE_SMART = "smart"
 WG_PROFILE_GLOBAL = "global"
 WG_PROFILE_MODES = (WG_PROFILE_SMART, WG_PROFILE_GLOBAL)
@@ -449,6 +457,61 @@ def plan_mode_label(mode: str | None) -> str:
     return "按时长收费"
 
 
+def normalize_duration_unit(unit: str | None) -> str:
+    raw_unit = (unit or "").strip().lower()
+    if raw_unit in PLAN_DURATION_UNITS:
+        return raw_unit
+    alias_map = {
+        "d": PLAN_DURATION_UNIT_DAY,
+        "day": PLAN_DURATION_UNIT_DAY,
+        "days": PLAN_DURATION_UNIT_DAY,
+        "天": PLAN_DURATION_UNIT_DAY,
+        "m": PLAN_DURATION_UNIT_MONTH,
+        "month": PLAN_DURATION_UNIT_MONTH,
+        "months": PLAN_DURATION_UNIT_MONTH,
+        "月": PLAN_DURATION_UNIT_MONTH,
+        "个月": PLAN_DURATION_UNIT_MONTH,
+        "y": PLAN_DURATION_UNIT_YEAR,
+        "year": PLAN_DURATION_UNIT_YEAR,
+        "years": PLAN_DURATION_UNIT_YEAR,
+        "年": PLAN_DURATION_UNIT_YEAR,
+    }
+    return alias_map.get(raw_unit, PLAN_DURATION_UNIT_MONTH)
+
+
+def plan_duration_unit_label(unit: str | None) -> str:
+    normalized = normalize_duration_unit(unit)
+    if normalized == PLAN_DURATION_UNIT_DAY:
+        return "天"
+    if normalized == PLAN_DURATION_UNIT_YEAR:
+        return "年"
+    return "个月"
+
+
+def duration_value_to_legacy_months(value: int, unit: str | None) -> int:
+    normalized_unit = normalize_duration_unit(unit)
+    normalized_value = max(0, int(value or 0))
+    if normalized_unit == PLAN_DURATION_UNIT_YEAR:
+        return normalized_value * 12
+    if normalized_unit == PLAN_DURATION_UNIT_MONTH:
+        return normalized_value
+    return 0
+
+
+def resolve_duration_value_and_unit(
+    *,
+    duration_months: int,
+    duration_value_raw,
+    duration_unit_raw,
+) -> tuple[int, str]:
+    duration_value = to_non_negative_int(duration_value_raw)
+    duration_unit = normalize_duration_unit(duration_unit_raw)
+    if duration_value <= 0 and duration_months > 0:
+        duration_value = duration_months
+        duration_unit = PLAN_DURATION_UNIT_MONTH
+    return duration_value, duration_unit
+
+
 def parse_positive_int(raw: str | None) -> int:
     value = int((raw or "").strip())
     if value <= 0:
@@ -471,15 +534,27 @@ def row_get(row, key: str, default=None):
         return default
 
 
-def format_plan_value(mode: str | None, duration_months: int, traffic_gb: int) -> str:
+def format_plan_value(
+    mode: str | None,
+    duration_months: int,
+    traffic_gb: int,
+    *,
+    duration_value: int | None = None,
+    duration_unit: str | None = None,
+) -> str:
     normalized = normalize_plan_mode(mode)
     if normalized == PLAN_MODE_TRAFFIC:
         if traffic_gb <= 0:
             return "流量未设置"
         return f"{traffic_gb} GB"
-    if duration_months <= 0:
+    resolved_value, resolved_unit = resolve_duration_value_and_unit(
+        duration_months=duration_months,
+        duration_value_raw=duration_value,
+        duration_unit_raw=duration_unit,
+    )
+    if resolved_value <= 0:
         return "时长未设置"
-    return f"{duration_months} 个月"
+    return f"{resolved_value} {plan_duration_unit_label(resolved_unit)}"
 
 
 def format_plan_display_name(
@@ -487,10 +562,19 @@ def format_plan_display_name(
     mode: str | None,
     duration_months: int,
     traffic_gb: int,
+    *,
+    duration_value: int | None = None,
+    duration_unit: str | None = None,
 ) -> str:
     name = (plan_name or "").strip()
     mode_prefix = "时长" if normalize_plan_mode(mode) == PLAN_MODE_DURATION else "流量"
-    value_text = format_plan_value(mode, duration_months, traffic_gb)
+    value_text = format_plan_value(
+        mode,
+        duration_months,
+        traffic_gb,
+        duration_value=duration_value,
+        duration_unit=duration_unit,
+    )
     if name:
         return f"{name}（{mode_prefix} {value_text}）"
     return f"{mode_prefix} {value_text}"
@@ -501,12 +585,30 @@ def format_order_plan(order: sqlite3.Row | dict) -> str:
     plan_mode_raw = row_get(order, "plan_mode", "")
     plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
     duration_months = to_non_negative_int(row_get(order, "plan_duration_months", 0))
+    duration_value, duration_unit = resolve_duration_value_and_unit(
+        duration_months=duration_months,
+        duration_value_raw=row_get(order, "plan_duration_value", 0),
+        duration_unit_raw=row_get(order, "plan_duration_unit", PLAN_DURATION_UNIT_MONTH),
+    )
     traffic_gb = to_non_negative_int(row_get(order, "plan_traffic_gb", 0))
     if not duration_months:
         duration_months = to_non_negative_int(row_get(order, "plan_months", 0))
+    if duration_value <= 0:
+        duration_value, duration_unit = resolve_duration_value_and_unit(
+            duration_months=duration_months,
+            duration_value_raw=duration_value,
+            duration_unit_raw=duration_unit,
+        )
     if not plan_mode:
         plan_mode = PLAN_MODE_TRAFFIC if traffic_gb > 0 else PLAN_MODE_DURATION
-    return format_plan_display_name(plan_name, plan_mode, duration_months, traffic_gb)
+    return format_plan_display_name(
+        plan_name,
+        plan_mode,
+        duration_months,
+        traffic_gb,
+        duration_value=duration_value,
+        duration_unit=duration_unit,
+    )
 
 
 def resolve_order_plan_snapshot(order: sqlite3.Row | dict) -> dict:
@@ -514,9 +616,20 @@ def resolve_order_plan_snapshot(order: sqlite3.Row | dict) -> dict:
     plan_mode_raw = row_get(order, "plan_mode", "")
     plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
     duration_months = to_non_negative_int(row_get(order, "plan_duration_months", 0))
+    duration_value, duration_unit = resolve_duration_value_and_unit(
+        duration_months=duration_months,
+        duration_value_raw=row_get(order, "plan_duration_value", 0),
+        duration_unit_raw=row_get(order, "plan_duration_unit", PLAN_DURATION_UNIT_MONTH),
+    )
     traffic_gb = to_non_negative_int(row_get(order, "plan_traffic_gb", 0))
     if not duration_months:
         duration_months = to_non_negative_int(row_get(order, "plan_months", 0))
+    if duration_value <= 0:
+        duration_value, duration_unit = resolve_duration_value_and_unit(
+            duration_months=duration_months,
+            duration_value_raw=duration_value,
+            duration_unit_raw=duration_unit,
+        )
     if not plan_mode:
         plan_mode = PLAN_MODE_TRAFFIC if traffic_gb > 0 else PLAN_MODE_DURATION
     if not plan_name:
@@ -526,9 +639,16 @@ def resolve_order_plan_snapshot(order: sqlite3.Row | dict) -> dict:
         "plan_name": plan_name,
         "plan_mode": plan_mode,
         "duration_months": duration_months,
+        "duration_value": duration_value,
+        "duration_unit": duration_unit,
         "traffic_gb": traffic_gb,
         "display_name": format_plan_display_name(
-            plan_name, plan_mode, duration_months, traffic_gb
+            plan_name,
+            plan_mode,
+            duration_months,
+            traffic_gb,
+            duration_value=duration_value,
+            duration_unit=duration_unit,
         ),
     }
 
@@ -536,6 +656,22 @@ def resolve_order_plan_snapshot(order: sqlite3.Row | dict) -> dict:
 @app.template_filter("fmt_order_plan")
 def fmt_order_plan_filter(order: sqlite3.Row | dict) -> str:
     return format_order_plan(order)
+
+
+def generate_plan_name(
+    *,
+    mode: str,
+    duration_value: int | None = None,
+    duration_unit: str | None = None,
+    traffic_gb: int | None = None,
+) -> str:
+    normalized_mode = normalize_plan_mode(mode)
+    if normalized_mode == PLAN_MODE_TRAFFIC:
+        value = max(1, int(traffic_gb or 1))
+        return f"{value}GB 流量包"
+    value = max(1, int(duration_value or 1))
+    unit_text = plan_duration_unit_label(duration_unit)
+    return f"{value}{unit_text} 时长套餐"
 
 
 def get_client_ip() -> str:
@@ -2288,23 +2424,79 @@ def ensure_default_subscription_plans(db: sqlite3.Connection) -> None:
         return
 
     default_rows = [
-        ("月付 1个月", PLAN_MODE_DURATION, 1, None, format_usdt(parse_usdt_amount(USDT_PRICE_1M, "10")), 10),
-        ("季付 3个月", PLAN_MODE_DURATION, 3, None, format_usdt(parse_usdt_amount(USDT_PRICE_3M, "27")), 20),
-        ("半年 6个月", PLAN_MODE_DURATION, 6, None, format_usdt(parse_usdt_amount(USDT_PRICE_6M, "50")), 30),
-        ("年付 12个月", PLAN_MODE_DURATION, 12, None, format_usdt(parse_usdt_amount(USDT_PRICE_12M, "90")), 40),
-        ("流量包 100GB", PLAN_MODE_TRAFFIC, None, 100, format_usdt(parse_usdt_amount(USDT_PRICE_1M, "10")), 50),
+        (
+            "月付 1个月",
+            PLAN_MODE_DURATION,
+            1,
+            1,
+            PLAN_DURATION_UNIT_MONTH,
+            None,
+            format_usdt(parse_usdt_amount(USDT_PRICE_1M, "10")),
+            10,
+        ),
+        (
+            "季付 3个月",
+            PLAN_MODE_DURATION,
+            3,
+            3,
+            PLAN_DURATION_UNIT_MONTH,
+            None,
+            format_usdt(parse_usdt_amount(USDT_PRICE_3M, "27")),
+            20,
+        ),
+        (
+            "半年 6个月",
+            PLAN_MODE_DURATION,
+            6,
+            6,
+            PLAN_DURATION_UNIT_MONTH,
+            None,
+            format_usdt(parse_usdt_amount(USDT_PRICE_6M, "50")),
+            30,
+        ),
+        (
+            "年付 12个月",
+            PLAN_MODE_DURATION,
+            12,
+            12,
+            PLAN_DURATION_UNIT_MONTH,
+            None,
+            format_usdt(parse_usdt_amount(USDT_PRICE_12M, "90")),
+            40,
+        ),
+        (
+            "流量包 100GB",
+            PLAN_MODE_TRAFFIC,
+            None,
+            None,
+            None,
+            100,
+            format_usdt(parse_usdt_amount(USDT_PRICE_1M, "10")),
+            50,
+        ),
     ]
     now_iso = utcnow_iso()
-    for name, mode, duration, traffic, price, sort_order in default_rows:
+    for name, mode, duration, duration_value, duration_unit, traffic, price, sort_order in default_rows:
         db.execute(
             """
             INSERT INTO subscription_plans (
-                plan_name, billing_mode, duration_months, traffic_gb,
+                plan_name, billing_mode, duration_months, duration_value, duration_unit, traffic_gb,
                 price_usdt, is_active, sort_order, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             """,
-            (name, mode, duration, traffic, price, sort_order, now_iso, now_iso),
+            (
+                name,
+                mode,
+                duration,
+                duration_value,
+                duration_unit,
+                traffic,
+                price,
+                sort_order,
+                now_iso,
+                now_iso,
+            ),
         )
 
 
@@ -2315,6 +2507,8 @@ def load_subscription_plans(db: sqlite3.Connection, *, active_only: bool = False
             plan_name,
             billing_mode,
             duration_months,
+            duration_value,
+            duration_unit,
             traffic_gb,
             price_usdt,
             is_active,
@@ -2333,9 +2527,16 @@ def load_subscription_plans(db: sqlite3.Connection, *, active_only: bool = False
     for row in rows:
         mode = normalize_plan_mode(row["billing_mode"])
         duration_months = to_non_negative_int(row["duration_months"])
+        duration_value, duration_unit = resolve_duration_value_and_unit(
+            duration_months=duration_months,
+            duration_value_raw=row_get(row, "duration_value", 0),
+            duration_unit_raw=row_get(row, "duration_unit", PLAN_DURATION_UNIT_MONTH),
+        )
         traffic_gb = to_non_negative_int(row["traffic_gb"])
         if mode == PLAN_MODE_TRAFFIC:
             duration_months = 0
+            duration_value = 0
+            duration_unit = PLAN_DURATION_UNIT_MONTH
         else:
             traffic_gb = 0
 
@@ -2345,13 +2546,27 @@ def load_subscription_plans(db: sqlite3.Connection, *, active_only: bool = False
             "billing_mode": mode,
             "mode_label": plan_mode_label(mode),
             "duration_months": duration_months,
+            "duration_value": duration_value,
+            "duration_unit": duration_unit,
+            "duration_unit_label": plan_duration_unit_label(duration_unit),
             "traffic_gb": traffic_gb,
-            "value_label": format_plan_value(mode, duration_months, traffic_gb),
+            "value_label": format_plan_value(
+                mode,
+                duration_months,
+                traffic_gb,
+                duration_value=duration_value,
+                duration_unit=duration_unit,
+            ),
             "price_usdt": format_usdt(row["price_usdt"]),
             "is_active": 1 if int(row["is_active"] or 0) == 1 else 0,
             "sort_order": to_non_negative_int(row["sort_order"]),
             "display_name": format_plan_display_name(
-                row["plan_name"], mode, duration_months, traffic_gb
+                row["plan_name"],
+                mode,
+                duration_months,
+                traffic_gb,
+                duration_value=duration_value,
+                duration_unit=duration_unit,
             ),
         }
         plans.append(plan)
@@ -4929,6 +5144,8 @@ def init_db() -> None:
             plan_name TEXT,
             plan_mode TEXT,
             plan_duration_months INTEGER,
+            plan_duration_value INTEGER,
+            plan_duration_unit TEXT,
             plan_traffic_gb INTEGER,
             payment_method TEXT NOT NULL DEFAULT 'usdt',
             usdt_network TEXT NOT NULL DEFAULT 'TRC20',
@@ -4952,6 +5169,8 @@ def init_db() -> None:
             plan_name TEXT NOT NULL,
             billing_mode TEXT NOT NULL,
             duration_months INTEGER,
+            duration_value INTEGER,
+            duration_unit TEXT,
             traffic_gb INTEGER,
             price_usdt TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
@@ -5258,6 +5477,10 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE payment_orders ADD COLUMN plan_mode TEXT")
     if "plan_duration_months" not in order_columns:
         db.execute("ALTER TABLE payment_orders ADD COLUMN plan_duration_months INTEGER")
+    if "plan_duration_value" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN plan_duration_value INTEGER")
+    if "plan_duration_unit" not in order_columns:
+        db.execute("ALTER TABLE payment_orders ADD COLUMN plan_duration_unit TEXT")
     if "plan_traffic_gb" not in order_columns:
         db.execute("ALTER TABLE payment_orders ADD COLUMN plan_traffic_gb INTEGER")
     if "payment_method" not in order_columns:
@@ -5288,6 +5511,8 @@ def migrate_schema(db: sqlite3.Connection) -> None:
             plan_name TEXT NOT NULL,
             billing_mode TEXT NOT NULL,
             duration_months INTEGER,
+            duration_value INTEGER,
+            duration_unit TEXT,
             traffic_gb INTEGER,
             price_usdt TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
@@ -5296,6 +5521,46 @@ def migrate_schema(db: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         )
         """
+    )
+    plan_columns = {
+        row["name"]: row
+        for row in db.execute("PRAGMA table_info(subscription_plans)").fetchall()
+    }
+    if "duration_value" not in plan_columns:
+        db.execute("ALTER TABLE subscription_plans ADD COLUMN duration_value INTEGER")
+    if "duration_unit" not in plan_columns:
+        db.execute("ALTER TABLE subscription_plans ADD COLUMN duration_unit TEXT")
+    db.execute(
+        """
+        UPDATE subscription_plans
+        SET duration_unit = ?
+        WHERE duration_unit IS NULL OR TRIM(duration_unit) = ''
+        """,
+        (PLAN_DURATION_UNIT_MONTH,),
+    )
+    db.execute(
+        """
+        UPDATE subscription_plans
+        SET duration_value = duration_months
+        WHERE billing_mode = ? AND (duration_value IS NULL OR duration_value <= 0) AND duration_months > 0
+        """,
+        (PLAN_MODE_DURATION,),
+    )
+    db.execute(
+        """
+        UPDATE payment_orders
+        SET plan_duration_unit = ?
+        WHERE plan_duration_unit IS NULL OR TRIM(plan_duration_unit) = ''
+        """,
+        (PLAN_DURATION_UNIT_MONTH,),
+    )
+    db.execute(
+        """
+        UPDATE payment_orders
+        SET plan_duration_value = COALESCE(NULLIF(plan_duration_months, 0), NULLIF(plan_months, 0))
+        WHERE plan_mode = ? AND (plan_duration_value IS NULL OR plan_duration_value <= 0)
+        """,
+        (PLAN_MODE_DURATION,),
     )
     db.execute(
         """
@@ -6686,6 +6951,30 @@ def calculate_new_expiry(current_expire_iso: str | None, months: int) -> str:
     return period_end.isoformat()
 
 
+def calculate_new_expiry_by_duration(
+    current_expire_iso: str | None,
+    duration_value: int,
+    duration_unit: str | None,
+) -> str:
+    value = max(1, int(duration_value or 0))
+    unit = normalize_duration_unit(duration_unit)
+    now = utcnow()
+    current_expire = parse_iso(current_expire_iso)
+
+    if current_expire and current_expire >= now:
+        period_start = current_expire + timedelta(seconds=1)
+    else:
+        period_start = now
+
+    if unit == PLAN_DURATION_UNIT_DAY:
+        period_end = period_start + timedelta(days=value) - timedelta(seconds=1)
+    elif unit == PLAN_DURATION_UNIT_YEAR:
+        period_end = add_months(period_start, value * 12) - timedelta(seconds=1)
+    else:
+        period_end = add_months(period_start, value) - timedelta(seconds=1)
+    return period_end.isoformat()
+
+
 def has_active_time_subscription(user: sqlite3.Row) -> bool:
     expires_at = parse_iso(row_get(user, "subscription_expires_at"))
     return bool(expires_at and expires_at >= utcnow())
@@ -6902,9 +7191,12 @@ def settle_order_paid(
 
     plan_snapshot = resolve_order_plan_snapshot(order)
     plan_mode = plan_snapshot["plan_mode"]
-    plan_duration_months = to_non_negative_int(plan_snapshot["duration_months"])
+    plan_duration_value = to_non_negative_int(plan_snapshot.get("duration_value", 0))
+    plan_duration_unit = normalize_duration_unit(
+        plan_snapshot.get("duration_unit", PLAN_DURATION_UNIT_MONTH)
+    )
     plan_traffic_gb = to_non_negative_int(plan_snapshot["traffic_gb"])
-    if plan_mode == PLAN_MODE_DURATION and plan_duration_months <= 0:
+    if plan_mode == PLAN_MODE_DURATION and plan_duration_value <= 0:
         db.rollback()
         raise ValueError("时长套餐配置无效。")
     if plan_mode == PLAN_MODE_TRAFFIC and plan_traffic_gb <= 0:
@@ -6913,7 +7205,11 @@ def settle_order_paid(
 
     current_expire_iso = row_get(user, "subscription_expires_at")
     if plan_mode == PLAN_MODE_DURATION:
-        new_expire_at = calculate_new_expiry(current_expire_iso, plan_duration_months)
+        new_expire_at = calculate_new_expiry_by_duration(
+            current_expire_iso,
+            plan_duration_value,
+            plan_duration_unit,
+        )
     else:
         new_expire_at = None
 
@@ -7003,7 +7299,11 @@ def settle_order_paid(
     )
     db.commit()
     if plan_mode == PLAN_MODE_DURATION:
-        grant_text = f"时长套餐生效，到期时间：{format_utc(new_expire_at)}，流量剩余：永久"
+        grant_text = (
+            "时长套餐生效（"
+            f"{plan_duration_value}{plan_duration_unit_label(plan_duration_unit)}"
+            f"），到期时间：{format_utc(new_expire_at)}，流量剩余：永久"
+        )
     else:
         grant_text = (
             f"流量套餐生效（有效期永久），新增 {format_bytes(added_traffic_bytes)}，"
@@ -8349,6 +8649,7 @@ def dashboard_orders():
     pending_orders = db.execute(
         """
         SELECT id, plan_months, plan_name, plan_mode, plan_duration_months, plan_traffic_gb, status, created_at,
+               plan_duration_value, plan_duration_unit,
                payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at, expires_at
         FROM payment_orders
         WHERE user_id = ? AND status = 'pending'
@@ -8359,6 +8660,7 @@ def dashboard_orders():
     paid_orders = db.execute(
         """
         SELECT id, plan_months, plan_name, plan_mode, plan_duration_months, plan_traffic_gb, status, created_at, paid_at,
+               plan_duration_value, plan_duration_unit,
                payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at
         FROM payment_orders
         WHERE user_id = ? AND status = 'paid'
@@ -8422,7 +8724,15 @@ def create_subscription_order():
 
     plan = db.execute(
         """
-        SELECT id, plan_name, billing_mode, duration_months, traffic_gb, price_usdt
+        SELECT
+            id,
+            plan_name,
+            billing_mode,
+            duration_months,
+            duration_value,
+            duration_unit,
+            traffic_gb,
+            price_usdt
         FROM subscription_plans
         WHERE id = ? AND is_active = 1
         LIMIT 1
@@ -8435,8 +8745,13 @@ def create_subscription_order():
 
     plan_mode = normalize_plan_mode(plan["billing_mode"])
     duration_months = to_non_negative_int(plan["duration_months"])
+    duration_value, duration_unit = resolve_duration_value_and_unit(
+        duration_months=duration_months,
+        duration_value_raw=row_get(plan, "duration_value", 0),
+        duration_unit_raw=row_get(plan, "duration_unit", PLAN_DURATION_UNIT_MONTH),
+    )
     traffic_gb = to_non_negative_int(plan["traffic_gb"])
-    if plan_mode == PLAN_MODE_DURATION and duration_months <= 0:
+    if plan_mode == PLAN_MODE_DURATION and duration_value <= 0:
         flash("所选时长套餐配置无效，请联系管理员。", "error")
         return redirect(url_for("dashboard_orders"))
     if plan_mode == PLAN_MODE_TRAFFIC and traffic_gb <= 0:
@@ -8445,24 +8760,33 @@ def create_subscription_order():
 
     usdt_amount = parse_usdt_amount(plan["price_usdt"], "1")
     plan_display = format_plan_display_name(
-        plan["plan_name"], plan_mode, duration_months, traffic_gb
+        plan["plan_name"],
+        plan_mode,
+        duration_months,
+        traffic_gb,
+        duration_value=duration_value,
+        duration_unit=duration_unit,
     )
+    legacy_plan_months = duration_value_to_legacy_months(duration_value, duration_unit)
     order_expire_at = (utcnow() + timedelta(hours=get_order_expire_hours(db))).isoformat()
     db.execute(
         """
         INSERT INTO payment_orders (
-            user_id, plan_months, plan_id, plan_name, plan_mode, plan_duration_months, plan_traffic_gb,
+            user_id, plan_months, plan_id, plan_name, plan_mode,
+            plan_duration_months, plan_duration_value, plan_duration_unit, plan_traffic_gb,
             payment_method, usdt_network, usdt_amount, pay_to_address, expires_at, status, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """,
         (
             user["id"],
-            duration_months,
+            legacy_plan_months,
             plan["id"],
             plan["plan_name"],
             plan_mode,
-            duration_months if plan_mode == PLAN_MODE_DURATION else None,
+            legacy_plan_months if plan_mode == PLAN_MODE_DURATION else None,
+            duration_value if plan_mode == PLAN_MODE_DURATION else None,
+            duration_unit if plan_mode == PLAN_MODE_DURATION else None,
             traffic_gb if plan_mode == PLAN_MODE_TRAFFIC else None,
             payment_method_code,
             network,
@@ -8583,6 +8907,8 @@ def load_admin_pending_orders(db: sqlite3.Connection):
             o.plan_name,
             o.plan_mode,
             o.plan_duration_months,
+            o.plan_duration_value,
+            o.plan_duration_unit,
             o.plan_traffic_gb,
             o.payment_method,
             o.usdt_network,
@@ -8612,6 +8938,8 @@ def load_admin_paid_orders(db: sqlite3.Connection):
             o.plan_name,
             o.plan_mode,
             o.plan_duration_months,
+            o.plan_duration_value,
+            o.plan_duration_unit,
             o.plan_traffic_gb,
             o.payment_method,
             o.usdt_network,
@@ -8872,6 +9200,8 @@ def get_user_current_plan_display(db: sqlite3.Connection, user: sqlite3.Row) -> 
             plan_name,
             plan_mode,
             plan_duration_months,
+            plan_duration_value,
+            plan_duration_unit,
             plan_traffic_gb,
             plan_months
         FROM payment_orders
@@ -8898,7 +9228,16 @@ def get_user_current_plan_display(db: sqlite3.Connection, user: sqlite3.Row) -> 
 def load_first_plan_for_onboarding(db: sqlite3.Connection) -> dict:
     plan = db.execute(
         """
-        SELECT id, plan_name, billing_mode, duration_months, traffic_gb, price_usdt, sort_order
+        SELECT
+            id,
+            plan_name,
+            billing_mode,
+            duration_months,
+            duration_value,
+            duration_unit,
+            traffic_gb,
+            price_usdt,
+            sort_order
         FROM subscription_plans
         ORDER BY sort_order ASC, id ASC
         LIMIT 1
@@ -8914,10 +9253,19 @@ def load_first_plan_for_onboarding(db: sqlite3.Connection) -> dict:
             "sort_order": 10,
         }
     mode = normalize_plan_mode(plan["billing_mode"])
+    duration_months = max(1, to_non_negative_int(plan["duration_months"]) or 1)
+    duration_value, duration_unit = resolve_duration_value_and_unit(
+        duration_months=duration_months,
+        duration_value_raw=row_get(plan, "duration_value", 0),
+        duration_unit_raw=row_get(plan, "duration_unit", PLAN_DURATION_UNIT_MONTH),
+    )
+    duration_months_for_onboarding = duration_value_to_legacy_months(duration_value, duration_unit)
+    if duration_months_for_onboarding <= 0:
+        duration_months_for_onboarding = duration_months
     return {
         "plan_name": (plan["plan_name"] or "").strip() or "基础套餐",
         "billing_mode": mode,
-        "duration_months": max(1, to_non_negative_int(plan["duration_months"]) or 1),
+        "duration_months": duration_months_for_onboarding,
         "traffic_gb": max(1, to_non_negative_int(plan["traffic_gb"]) or 1),
         "price_usdt": format_usdt(plan["price_usdt"]),
         "sort_order": to_non_negative_int(plan["sort_order"]),
@@ -8952,6 +9300,8 @@ def upsert_first_plan_from_onboarding(
             SET plan_name = ?,
                 billing_mode = ?,
                 duration_months = ?,
+                duration_value = ?,
+                duration_unit = ?,
                 traffic_gb = ?,
                 price_usdt = ?,
                 is_active = 1,
@@ -8963,6 +9313,8 @@ def upsert_first_plan_from_onboarding(
                 plan_name,
                 normalized_mode,
                 duration_months if normalized_mode == PLAN_MODE_DURATION else None,
+                duration_months if normalized_mode == PLAN_MODE_DURATION else None,
+                PLAN_DURATION_UNIT_MONTH if normalized_mode == PLAN_MODE_DURATION else None,
                 traffic_gb if normalized_mode == PLAN_MODE_TRAFFIC else None,
                 format_usdt(price_usdt),
                 sort_order,
@@ -8978,6 +9330,8 @@ def upsert_first_plan_from_onboarding(
             plan_name,
             billing_mode,
             duration_months,
+            duration_value,
+            duration_unit,
             traffic_gb,
             price_usdt,
             is_active,
@@ -8985,12 +9339,14 @@ def upsert_first_plan_from_onboarding(
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         """,
         (
             plan_name,
             normalized_mode,
             duration_months if normalized_mode == PLAN_MODE_DURATION else None,
+            duration_months if normalized_mode == PLAN_MODE_DURATION else None,
+            PLAN_DURATION_UNIT_MONTH if normalized_mode == PLAN_MODE_DURATION else None,
             traffic_gb if normalized_mode == PLAN_MODE_TRAFFIC else None,
             format_usdt(price_usdt),
             sort_order,
@@ -11514,18 +11870,19 @@ def admin_create_plan():
     db = get_db()
     plan_name = request.form.get("plan_name", "").strip()
     billing_mode = normalize_plan_mode(request.form.get("billing_mode", "duration"))
+    duration_value_raw = request.form.get("duration_value", "").strip()
+    duration_unit = normalize_duration_unit(request.form.get("duration_unit", PLAN_DURATION_UNIT_MONTH))
     duration_months_raw = request.form.get("duration_months", "").strip()
     traffic_gb_raw = request.form.get("traffic_gb", "").strip()
     if billing_mode == PLAN_MODE_DURATION:
         traffic_gb_raw = ""
+        if not duration_value_raw and duration_months_raw:
+            duration_value_raw = duration_months_raw
     else:
+        duration_value_raw = ""
         duration_months_raw = ""
     price_raw = request.form.get("price_usdt", "").strip()
     sort_order_raw = request.form.get("sort_order", "").strip()
-
-    if not plan_name:
-        flash("套餐名称不能为空。", "error")
-        return redirect(url_for("admin_payment_settings"))
 
     try:
         price_usdt = parse_usdt_amount_strict(price_raw)
@@ -11541,33 +11898,51 @@ def admin_create_plan():
         sort_order = 0
 
     duration_months = None
+    duration_value = None
+    duration_unit_to_save = None
     traffic_gb = None
     if billing_mode == PLAN_MODE_DURATION:
         try:
-            duration_months = parse_positive_int(duration_months_raw)
+            duration_value = parse_positive_int(duration_value_raw)
         except Exception:
-            flash("时长套餐必须填写大于 0 的时长（月）。", "error")
+            flash("时长套餐必须填写大于 0 的时长。", "error")
             return redirect(url_for("admin_payment_settings"))
+        duration_unit_to_save = duration_unit
+        duration_months = duration_value_to_legacy_months(duration_value, duration_unit_to_save)
+        if not plan_name:
+            plan_name = generate_plan_name(
+                mode=billing_mode,
+                duration_value=duration_value,
+                duration_unit=duration_unit_to_save,
+            )
     else:
         try:
             traffic_gb = parse_positive_int(traffic_gb_raw)
         except Exception:
             flash("流量套餐必须填写大于 0 的流量（GB）。", "error")
             return redirect(url_for("admin_payment_settings"))
+        if not plan_name:
+            plan_name = generate_plan_name(mode=billing_mode, traffic_gb=traffic_gb)
+
+    if not plan_name:
+        flash("套餐名称不能为空。", "error")
+        return redirect(url_for("admin_payment_settings"))
 
     now_iso = utcnow_iso()
     db.execute(
         """
         INSERT INTO subscription_plans (
-            plan_name, billing_mode, duration_months, traffic_gb,
+            plan_name, billing_mode, duration_months, duration_value, duration_unit, traffic_gb,
             price_usdt, is_active, sort_order, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         """,
         (
             plan_name,
             billing_mode,
             duration_months,
+            duration_value,
+            duration_unit_to_save,
             traffic_gb,
             format_usdt(price_usdt),
             sort_order,
@@ -11600,18 +11975,19 @@ def admin_update_plan(plan_id: int):
 
     plan_name = request.form.get("plan_name", "").strip()
     billing_mode = normalize_plan_mode(request.form.get("billing_mode", "duration"))
+    duration_value_raw = request.form.get("duration_value", "").strip()
+    duration_unit = normalize_duration_unit(request.form.get("duration_unit", PLAN_DURATION_UNIT_MONTH))
     duration_months_raw = request.form.get("duration_months", "").strip()
     traffic_gb_raw = request.form.get("traffic_gb", "").strip()
     if billing_mode == PLAN_MODE_DURATION:
         traffic_gb_raw = ""
+        if not duration_value_raw and duration_months_raw:
+            duration_value_raw = duration_months_raw
     else:
+        duration_value_raw = ""
         duration_months_raw = ""
     price_raw = request.form.get("price_usdt", "").strip()
     sort_order_raw = request.form.get("sort_order", "").strip()
-
-    if not plan_name:
-        flash("套餐名称不能为空。", "error")
-        return redirect(url_for("admin_payment_settings"))
 
     try:
         price_usdt = parse_usdt_amount_strict(price_raw)
@@ -11627,19 +12003,37 @@ def admin_update_plan(plan_id: int):
         sort_order = 0
 
     duration_months = None
+    duration_value = None
+    duration_unit_to_save = None
     traffic_gb = None
     if billing_mode == PLAN_MODE_DURATION:
         try:
-            duration_months = parse_positive_int(duration_months_raw)
+            duration_value = parse_positive_int(duration_value_raw)
         except Exception:
-            flash("时长套餐必须填写大于 0 的时长（月）。", "error")
+            flash("时长套餐必须填写大于 0 的时长。", "error")
             return redirect(url_for("admin_payment_settings"))
+        duration_unit_to_save = duration_unit
+        duration_months = duration_value_to_legacy_months(duration_value, duration_unit_to_save)
+        if not plan_name:
+            plan_name = generate_plan_name(
+                mode=billing_mode,
+                duration_value=duration_value,
+                duration_unit=duration_unit_to_save,
+            )
     else:
         try:
             traffic_gb = parse_positive_int(traffic_gb_raw)
         except Exception:
             flash("流量套餐必须填写大于 0 的流量（GB）。", "error")
             return redirect(url_for("admin_payment_settings"))
+        if not plan_name:
+            plan_name = generate_plan_name(mode=billing_mode, traffic_gb=traffic_gb)
+
+    if not plan_name:
+        plan_name = (existing_plan["plan_name"] or "").strip()
+    if not plan_name:
+        flash("套餐名称不能为空。", "error")
+        return redirect(url_for("admin_payment_settings"))
 
     db.execute(
         """
@@ -11647,6 +12041,8 @@ def admin_update_plan(plan_id: int):
         SET plan_name = ?,
             billing_mode = ?,
             duration_months = ?,
+            duration_value = ?,
+            duration_unit = ?,
             traffic_gb = ?,
             price_usdt = ?,
             sort_order = ?,
@@ -11657,6 +12053,8 @@ def admin_update_plan(plan_id: int):
             plan_name,
             billing_mode,
             duration_months,
+            duration_value,
+            duration_unit_to_save,
             traffic_gb,
             format_usdt(price_usdt),
             sort_order,
