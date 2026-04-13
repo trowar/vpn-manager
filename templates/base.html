@@ -19,6 +19,7 @@
         {% if current_user["role"] == "admin" %}
           <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">仪表盘</a>
           <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">订单</a>
+          <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐管理</a>
           <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户</a>
           <a class="site-nav-link {% if admin_page == 'online_users' %}active{% endif %}" href="{{ url_for('admin_online_users') }}">在线用户</a>
           <a class="site-nav-link {% if admin_page == 'configs' %}active{% endif %}" href="{{ url_for('admin_configs') }}">配置下载</a>
