@@ -26,18 +26,26 @@
         title="点击刷新验证码"
       >
     </div>
-    <label>邮箱验证码
-      <input type="text" name="email_code" maxlength="6" required placeholder="请输入 6 位数字验证码">
-    </label>
+
+    {% if email_verification_enabled %}
+      <label>邮箱验证码
+        <input type="text" name="email_code" maxlength="6" required placeholder="请输入 6 位数字验证码">
+      </label>
+    {% else %}
+      <p class="helper">当前未配置邮件服务器，已自动关闭邮箱验证码，直接提交即可注册。</p>
+    {% endif %}
+
     <div class="actions">
-      <button
-        type="submit"
-        formaction="{{ url_for('register_send_code') }}"
-        formmethod="post"
-        class="secondary"
-      >
-        发送邮箱验证码
-      </button>
+      {% if email_verification_enabled %}
+        <button
+          type="submit"
+          formaction="{{ url_for('register_send_code') }}"
+          formmethod="post"
+          class="secondary"
+        >
+          发送邮箱验证码
+        </button>
+      {% endif %}
       <button
         type="submit"
         id="register-submit"

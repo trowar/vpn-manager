@@ -65,6 +65,7 @@ SHARED_OPENVPN_SERVER_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_server.key"
 SHARED_OPENVPN_SERVER_CERT_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_server.crt"
 SHARED_OPENVPN_TLS_CRYPT_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_tls_crypt.key"
 SYSTEM_UPGRADE_LOG_FILE = DATA_DIR / "system-upgrade.log"
+DB_INIT_LOCK_DIR = DATA_DIR / ".db-init.lock"
 AUTO_RESTART_AFTER_SELF_UPGRADE = (
     os.environ.get(
         "PORTAL_SELF_UPGRADE_AUTO_RESTART",
@@ -2645,6 +2646,12 @@ def resolve_runtime_mail_server_config(
     return load_env_mail_server_config()
 
 
+def is_email_verification_available(
+    db: sqlite3.Connection | None = None,
+) -> bool:
+    return resolve_runtime_mail_server_config(db) is not None
+
+
 def set_active_mail_server(
     db: sqlite3.Connection,
     mail_server_id: int | None,
@@ -4337,11 +4344,43 @@ def ensure_directories() -> None:
     SHARED_VPN_MATERIALS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def acquire_db_init_lock(timeout_seconds: float = 60.0) -> None:
+    deadline = time.time() + timeout_seconds
+    while True:
+        try:
+            DB_INIT_LOCK_DIR.mkdir()
+            return
+        except FileExistsError:
+            try:
+                stat = DB_INIT_LOCK_DIR.stat()
+                if (time.time() - stat.st_mtime) > 120:
+                    for child in DB_INIT_LOCK_DIR.iterdir():
+                        try:
+                            if child.is_file():
+                                child.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    DB_INIT_LOCK_DIR.rmdir()
+                    continue
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                raise RuntimeError("Timed out waiting for database init lock")
+            time.sleep(0.2)
+
+
+def release_db_init_lock() -> None:
+    try:
+        DB_INIT_LOCK_DIR.rmdir()
+    except Exception:
+        pass
+
+
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         g.db = conn
     return g.db
@@ -7104,6 +7143,9 @@ def register_send_code():
     db = get_db()
     if not is_registration_open(db):
         return "", 404
+    if not is_email_verification_available(db):
+        flash("当前未配置邮件服务器，注册已自动关闭邮箱验证码。", "error")
+        return redirect(url_for("register"))
 
     email = request.form.get("email", "").strip().lower()
     captcha = request.form.get("captcha", "")
@@ -7164,6 +7206,7 @@ def register():
     cooldown_seconds = get_registration_cooldown_seconds(db, client_ip)
     register_limit_minutes = REGISTER_COOLDOWN_SECONDS // 60
     email_prefill = request.values.get("email", "").strip().lower()
+    email_verification_enabled = is_email_verification_available(db)
 
     def render_register():
         return render_template(
@@ -7173,6 +7216,7 @@ def register():
             register_limit_seconds=REGISTER_COOLDOWN_SECONDS,
             register_limit_minutes=register_limit_minutes,
             email_prefill=email_prefill,
+            email_verification_enabled=email_verification_enabled,
         )
 
     if request.method == "POST":
@@ -7202,7 +7246,7 @@ def register():
         if password != confirm_password:
             flash("两次输入密码不一致。", "error")
             return render_register()
-        if not re.fullmatch(r"\d{6}", email_code):
+        if email_verification_enabled and not re.fullmatch(r"\d{6}", email_code):
             flash("邮箱验证码格式不正确。", "error")
             return render_register()
 
@@ -7218,15 +7262,16 @@ def register():
                     "error",
                 )
                 return render_register()
-            if not consume_email_verification_code(
-                db,
-                email=email,
-                purpose=EMAIL_CODE_PURPOSE_REGISTER,
-                code=email_code,
-            ):
-                db.rollback()
-                flash("邮箱验证码无效或已过期。", "error")
-                return render_register()
+            if email_verification_enabled:
+                if not consume_email_verification_code(
+                    db,
+                    email=email,
+                    purpose=EMAIL_CODE_PURPOSE_REGISTER,
+                    code=email_code,
+                ):
+                    db.rollback()
+                    flash("邮箱验证码无效或已过期。", "error")
+                    return render_register()
             db.execute(
                 """
                 INSERT INTO users (
@@ -11784,9 +11829,15 @@ def subscription_payment_qr():
 
 def bootstrap() -> None:
     ensure_directories()
-    with app.app_context():
-        init_db()
-        ensure_admin_user()
+    acquire_db_init_lock()
+    try:
+        with app.app_context():
+            init_db()
+            db = get_db()
+            db.execute("PRAGMA journal_mode=WAL")
+            ensure_admin_user()
+    finally:
+        release_db_init_lock()
 
 
 bootstrap()
