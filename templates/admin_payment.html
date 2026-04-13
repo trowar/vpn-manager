@@ -6,7 +6,7 @@
 
   <div class="section-title-row">
     <h3>套餐列表</h3>
-    <button type="button" id="open-plan-create-modal">新增套餐</button>
+    <a class="btn" href="#plan-create-inline-form">新增套餐</a>
   </div>
 
   {% if plans %}
@@ -140,39 +140,33 @@
   {% endif %}
 </section>
 
-<div class="payment-modal" id="plan-create-modal" hidden>
-  <div class="payment-modal-card plan-create-modal-card">
-    <div class="section-title-row">
-      <h4>新增套餐</h4>
-      <button type="button" class="btn secondary" id="close-plan-create-modal">关闭</button>
-    </div>
-
-    <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
-      <label>套餐名称
-        <input type="text" name="plan_name" placeholder="例如：月付基础版 / 200GB 流量包" required>
-      </label>
-      <label>收费模式
-        <select name="billing_mode" id="plan-billing-mode" required>
-          <option value="duration">按时长收费</option>
-          <option value="traffic">按流量收费</option>
-        </select>
-      </label>
-      <label id="plan-duration-row">时长（月）
-        <input type="number" name="duration_months" min="1" step="1" value="1" required>
-      </label>
-      <label id="plan-traffic-row" hidden style="display:none;">流量（GB）
-        <input type="number" name="traffic_gb" min="1" step="1" disabled>
-      </label>
-      <label>价格（USDT）
-        <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
-      </label>
-      <label>排序（数字越小越靠前）
-        <input type="number" name="sort_order" min="0" step="1" value="100">
-      </label>
-      <button type="submit">添加套餐</button>
-    </form>
-  </div>
-</div>
+<section class="card" id="plan-create-inline-form">
+  <h3>新增套餐</h3>
+  <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
+    <label>套餐名称
+      <input type="text" name="plan_name" placeholder="例如：月付基础版 / 200GB 流量包" required>
+    </label>
+    <label>收费模式
+      <select name="billing_mode" id="plan-inline-billing-mode" required>
+        <option value="duration">按时长收费</option>
+        <option value="traffic">按流量收费</option>
+      </select>
+    </label>
+    <label id="plan-inline-duration-row">时长（月）
+      <input type="number" name="duration_months" min="1" step="1" value="1" required>
+    </label>
+    <label id="plan-inline-traffic-row" hidden style="display:none;">流量（GB）
+      <input type="number" name="traffic_gb" min="1" step="1" disabled>
+    </label>
+    <label>价格（USDT）
+      <input type="text" name="price_usdt" placeholder="例如：10 或 27.50" required>
+    </label>
+    <label>排序（数字越小越靠前）
+      <input type="number" name="sort_order" min="0" step="1" value="100">
+    </label>
+    <button type="submit">添加套餐</button>
+  </form>
+</section>
 
 <div class="payment-modal" id="plan-edit-modal" hidden>
   <div class="payment-modal-card plan-create-modal-card">
@@ -224,12 +218,9 @@
 
 <script>
   (function () {
-    var createOpenBtn = document.getElementById("open-plan-create-modal");
-    var createCloseBtn = document.getElementById("close-plan-create-modal");
-    var createModal = document.getElementById("plan-create-modal");
-    var createModeSelect = document.getElementById("plan-billing-mode");
-    var createDurationRow = document.getElementById("plan-duration-row");
-    var createTrafficRow = document.getElementById("plan-traffic-row");
+    var createModeSelect = document.getElementById("plan-inline-billing-mode");
+    var createDurationRow = document.getElementById("plan-inline-duration-row");
+    var createTrafficRow = document.getElementById("plan-inline-traffic-row");
 
     var editButtons = document.querySelectorAll(".open-plan-edit-modal");
     var editModal = document.getElementById("plan-edit-modal");
@@ -313,17 +304,6 @@
       }
     }
 
-    if (createOpenBtn) {
-      createOpenBtn.addEventListener("click", function () {
-        openModal(createModal);
-      });
-    }
-    if (createCloseBtn) {
-      createCloseBtn.addEventListener("click", function () {
-        closeModal(createModal);
-      });
-    }
-    bindOverlayClose(createModal);
     if (createModeSelect) {
       createModeSelect.addEventListener("change", function () {
         refreshModeFields(createModeSelect, createDurationRow, createTrafficRow);
