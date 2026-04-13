@@ -655,7 +655,7 @@ def get_openvpn_endpoint_host(
 
     if use_server is not None:
         host = host_without_optional_port(normalize_remote_host(row_get(use_server, "host", "")))
-        if host:
+        if host and not is_non_public_host(host):
             return host
 
         domain = host_without_optional_port(normalize_domain_host(row_get(use_server, "domain", "")))
