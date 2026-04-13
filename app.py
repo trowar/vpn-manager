@@ -8707,6 +8707,27 @@ def run_server_deploy_task(server_id: int) -> None:
         row = db.execute("SELECT * FROM vpn_servers WHERE id = ?", (server_id,)).fetchone()
         if not row:
             return
+        ok, test_message = test_server_connectivity(
+            row["host"],
+            normalize_server_port(row["port"], 22),
+            row["username"],
+            row["password"],
+            row_get(row, "ssh_private_key", ""),
+        )
+        update_server_test_result(db, server_id, ok=ok, message=test_message)
+        db.commit()
+        if not ok:
+            update_server_deploy_result(
+                db,
+                server_id,
+                ok=False,
+                message=f"服务器连接测试失败：{test_message}",
+                status="deploy_failed",
+                vpn_api_token=row_get(row, "vpn_api_token", ""),
+                deploy_log=f"[deploy] 连接测试失败\n{test_message}",
+            )
+            db.commit()
+            return
         try:
             deploy_ok, deploy_message, final_token, deploy_log = deploy_vpn_node_server(
                 host=row["host"],
@@ -9426,13 +9447,6 @@ def admin_create_server():
         flash("请完整填写服务器地址、账号，并提供密码或私钥。", "error")
         return redirect(url_for("admin_servers"))
 
-    ok, test_message = test_server_connectivity(
-        host, port, username, password, ssh_private_key
-    )
-    if not ok:
-        flash(f"服务器连接测试失败：{test_message}", "error")
-        return redirect(url_for("admin_servers"))
-
     server_name = host
     deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
     server_id = create_server_record(
@@ -9451,12 +9465,11 @@ def admin_create_server():
         vpn_api_token=deploy_token,
         status="deploying",
     )
-    update_server_test_result(db, server_id, ok=True, message=test_message)
     mark_server_deploying(db, server_id)
     # 先落库再异步部署，确保部署失败/中断时服务器仍保留在列表中可查看日志。
     db.commit()
     launch_server_deploy_task(server_id)
-    flash("服务器已保存，部署已开始。可在列表查看状态并打开部署日志。", "success")
+    flash("服务器已保存，连接测试和部署已转入后台执行。可在列表查看状态并打开部署日志。", "success")
     return redirect(url_for("admin_servers"))
 
 
