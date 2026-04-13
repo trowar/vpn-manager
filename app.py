@@ -14,6 +14,7 @@ import sqlite3
 import string
 import subprocess
 import sys
+import shlex
 import tempfile
 import textwrap
 import time
@@ -75,6 +76,23 @@ AUTO_RESTART_AFTER_SELF_UPGRADE = (
     .lower()
     in {"1", "true", "yes", "on"}
 )
+HOST_WEB_UPGRADE_PROJECT_DIR = os.environ.get(
+    "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR",
+    "/opt/vpn-platform-v1",
+).strip()
+HOST_WEB_UPGRADE_BRANCH = os.environ.get(
+    "PORTAL_SELF_UPGRADE_PROJECT_BRANCH",
+    "main",
+).strip() or "main"
+HOST_WEB_UPGRADE_HELPER_IMAGE = os.environ.get(
+    "PORTAL_SELF_UPGRADE_HELPER_IMAGE",
+    "docker:27-cli",
+).strip() or "docker:27-cli"
+HOST_WEB_UPGRADE_DATA_VOLUME = os.environ.get(
+    "PORTAL_SELF_UPGRADE_DATA_VOLUME",
+    "vpn-platform-v1_portal_data",
+).strip() or "vpn-platform-v1_portal_data"
+DOCKER_SOCKET_FILE = Path("/var/run/docker.sock")
 
 WG_INTERFACE = os.environ.get("WG_INTERFACE", "wg0")
 WG_NETWORK = os.environ.get("WG_NETWORK", "10.7.0.0/24")
@@ -1281,6 +1299,115 @@ def detect_origin_default_branch() -> str:
         if ref:
             return ref
     return "main"
+
+
+def build_host_web_upgrade_script() -> str:
+    branch = shlex.quote(HOST_WEB_UPGRADE_BRANCH or "main")
+    return textwrap.dedent(
+        f"""
+        set -eu
+        LOG_FILE=/app/data/system-upgrade.log
+        DB_PATH=/app/data/portal.db
+        STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+
+        log() {{
+          printf '[%s] %s\\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" "$1" | tee -a "$LOG_FILE"
+        }}
+
+        write_state() {{
+          python3 - "$1" "$2" "$3" "$4" <<'PY'
+import sqlite3
+import sys
+from datetime import datetime, timezone
+
+status, summary, started_at, finished_at = sys.argv[1:5]
+db_path = "/app/data/portal.db"
+conn = sqlite3.connect(db_path)
+try:
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    for key, value in (
+        ("system_upgrade_status", status),
+        ("system_upgrade_summary", summary[:1000]),
+        ("system_upgrade_started_at", started_at),
+        ("system_upgrade_finished_at", finished_at),
+    ):
+        conn.execute(
+            '''
+            INSERT INTO app_settings (setting_key, setting_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value,
+                updated_at = excluded.updated_at
+            ''',
+            (key, value, now_iso),
+        )
+    conn.commit()
+finally:
+    conn.close()
+PY
+        }}
+
+        success=0
+        cleanup() {{
+          code=$?
+          if [ "$success" -ne 1 ]; then
+            log "系统升级失败，退出码: $code"
+            write_state "failed" "系统升级失败，请查看 system-upgrade.log" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+          fi
+          exit $code
+        }}
+        trap cleanup EXIT
+
+        : > "$LOG_FILE"
+        write_state "running" "系统升级进行中" "$STARTED_AT" ""
+        log "宿主机升级任务已启动"
+        apk add --no-cache git python3 >/dev/null
+        cd /workspace
+        log "git fetch origin"
+        git fetch origin
+        log "git checkout {branch}"
+        git checkout {branch}
+        log "git pull --ff-only origin {branch}"
+        git pull --ff-only origin {branch}
+        log "docker compose build web"
+        docker compose build web
+        log "docker compose up -d --no-deps web"
+        docker compose up -d --no-deps web
+        success=1
+        log "系统升级完成"
+        write_state "success" "系统升级完成，请重新登录。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        """
+    ).strip()
+
+
+def dispatch_host_web_upgrade() -> tuple[bool, str]:
+    if not DOCKER_SOCKET_FILE.exists():
+        return False, "未检测到 Docker Socket，无法派发宿主机升级任务。"
+    if not HOST_WEB_UPGRADE_PROJECT_DIR:
+        return False, "未配置宿主机项目目录，无法升级。"
+    helper_script = build_host_web_upgrade_script()
+    args = [
+        "docker",
+        "run",
+        "-d",
+        "--rm",
+        "-v",
+        f"{DOCKER_SOCKET_FILE}:{DOCKER_SOCKET_FILE}",
+        "-v",
+        f"{HOST_WEB_UPGRADE_PROJECT_DIR}:/workspace",
+        "-v",
+        f"{HOST_WEB_UPGRADE_DATA_VOLUME}:/app/data",
+        "-w",
+        "/workspace",
+        HOST_WEB_UPGRADE_HELPER_IMAGE,
+        "sh",
+        "-lc",
+        helper_script,
+    ]
+    code, output = run_local_command_with_output(args, cwd=BASE_DIR)
+    if code != 0:
+        return False, output or "宿主机升级任务派发失败。"
+    return True, output.strip() or "宿主机升级任务已派发。"
 
 
 def schedule_process_restart(delay_seconds: float = 1.5) -> None:
@@ -9732,8 +9859,11 @@ def admin_upgrade_system():
         flash("系统升级任务已在运行中，请稍后刷新查看结果。", "error")
         return redirect(url_for("admin_home"))
 
-    launch_system_upgrade_task()
-    flash("系统升级任务已启动，完成后 Web 可能会自动重启。", "success")
+    ok, message = dispatch_host_web_upgrade()
+    if not ok:
+        flash(f"系统升级任务派发失败：{message}", "error")
+        return redirect(url_for("admin_home"))
+    flash("系统升级任务已派发到宿主机，Web 会在新版本构建完成后自动重启。", "success")
     return redirect(url_for("admin_home"))
 
 

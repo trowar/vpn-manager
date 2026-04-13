@@ -62,6 +62,10 @@ services:
       WG_RELAY_PORT_END: ${WG_RELAY_PORT_END:-28999}
       OPENVPN_RELAY_PORT_START: ${OPENVPN_RELAY_PORT_START:-29000}
       OPENVPN_RELAY_PORT_END: ${OPENVPN_RELAY_PORT_END:-33999}
+      PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR: ${PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR:-/opt/vpn-platform-v1}
+      PORTAL_SELF_UPGRADE_PROJECT_BRANCH: ${PORTAL_SELF_UPGRADE_PROJECT_BRANCH:-main}
+      PORTAL_SELF_UPGRADE_HELPER_IMAGE: ${PORTAL_SELF_UPGRADE_HELPER_IMAGE:-docker:27-cli}
+      PORTAL_SELF_UPGRADE_DATA_VOLUME: ${PORTAL_SELF_UPGRADE_DATA_VOLUME:-vpn-platform-v1_portal_data}
 
       PORTAL_DATA_DIR: /app/data
       PORTAL_DB_PATH: /app/data/portal.db
@@ -90,6 +94,7 @@ services:
       - portal_data:/app/data
       - vpn_shared:/srv/vpn-shared:ro
       - ./docker/vpn/openvpn:/srv/openvpn:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${WEB_PUBLIC_PORT:-8080}:8080"
       - "${WG_RELAY_PORT_START:-24000}-${WG_RELAY_PORT_END:-28999}:${WG_RELAY_PORT_START:-24000}-${WG_RELAY_PORT_END:-28999}/udp"
