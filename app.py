@@ -196,6 +196,7 @@ SETTING_ORDER_EXPIRE_HOURS = "order_expire_hours"
 SETTING_GIFT_DURATION_MONTHS = "gift_duration_months"
 SETTING_GIFT_TRAFFIC_GB = "gift_traffic_gb"
 SETTING_TELEGRAM_CONTACT = "telegram_contact"
+SETTING_SITE_TITLE = "site_title"
 SETTING_WIREGUARD_OPEN = "wireguard_open"
 SETTING_OPENVPN_OPEN = "openvpn_open"
 SETTING_SYSTEM_UPGRADE_STATUS = "system_upgrade_status"
@@ -901,6 +902,7 @@ def ensure_default_system_settings(db: sqlite3.Connection) -> None:
         SETTING_GIFT_DURATION_MONTHS: "0",
         SETTING_GIFT_TRAFFIC_GB: "0",
         SETTING_TELEGRAM_CONTACT: "",
+        SETTING_SITE_TITLE: "新世界发展科技有限公司边际网络管理系统",
         SETTING_WIREGUARD_OPEN: "0",
         SETTING_OPENVPN_OPEN: "1",
         SETTING_SYSTEM_UPGRADE_STATUS: "idle",
@@ -1201,6 +1203,11 @@ def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
     gift_duration_months_raw = get_app_setting(db, SETTING_GIFT_DURATION_MONTHS, "0")
     gift_traffic_gb_raw = get_app_setting(db, SETTING_GIFT_TRAFFIC_GB, "0")
     telegram_contact = get_app_setting(db, SETTING_TELEGRAM_CONTACT, "")
+    site_title = get_app_setting(
+        db,
+        SETTING_SITE_TITLE,
+        "新世界发展科技有限公司边际网络管理系统",
+    )
     wireguard_open_raw = get_app_setting(db, SETTING_WIREGUARD_OPEN, "0")
     openvpn_open_raw = get_app_setting(db, SETTING_OPENVPN_OPEN, "1")
     order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
@@ -1210,6 +1217,7 @@ def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
         "gift_duration_months": parse_int_setting(gift_duration_months_raw, 0, min_value=0),
         "gift_traffic_gb": parse_int_setting(gift_traffic_gb_raw, 0, min_value=0),
         "telegram_contact": (telegram_contact or "").strip(),
+        "site_title": (site_title or "").strip() or "新世界发展科技有限公司边际网络管理系统",
         "wireguard_open": parse_bool_setting(wireguard_open_raw, False),
         "openvpn_open": parse_bool_setting(openvpn_open_raw, True),
     }
@@ -5220,6 +5228,7 @@ def inject_user():
         "openvpn_enabled": bool(OPENVPN_ENABLED and system_settings["openvpn_open"]),
         "registration_open": bool(system_settings["registration_open"]),
         "telegram_contact": str(system_settings["telegram_contact"]),
+        "site_title": str(system_settings["site_title"]),
     }
 
 
@@ -10654,6 +10663,7 @@ def admin_update_system_settings():
     gift_duration_raw = request.form.get("gift_duration_months", "").strip()
     gift_traffic_raw = request.form.get("gift_traffic_gb", "").strip()
     telegram_contact = request.form.get("telegram_contact", "").strip()
+    site_title = request.form.get("site_title", "").strip()
     wireguard_open = request.form.get("wireguard_open", "0").strip() == "1"
     openvpn_open = request.form.get("openvpn_open", "1").strip() == "1"
 
@@ -10674,6 +10684,9 @@ def admin_update_system_settings():
         flash("当前环境未启用 OpenVPN 服务，无法开启。", "error")
         return redirect(url_for("admin_settings"))
 
+    if not site_title:
+        flash("站点标题不能为空。", "error")
+        return redirect(url_for("admin_settings"))
     if order_expire_hours <= 0:
         flash("订单过期小时数必须大于 0。", "error")
         return redirect(url_for("admin_settings"))
@@ -10683,6 +10696,7 @@ def admin_update_system_settings():
     upsert_app_setting(db, SETTING_GIFT_DURATION_MONTHS, str(gift_duration_months))
     upsert_app_setting(db, SETTING_GIFT_TRAFFIC_GB, str(gift_traffic_gb))
     upsert_app_setting(db, SETTING_TELEGRAM_CONTACT, telegram_contact[:160])
+    upsert_app_setting(db, SETTING_SITE_TITLE, site_title[:120])
     upsert_app_setting(db, SETTING_WIREGUARD_OPEN, "1" if wireguard_open else "0")
     upsert_app_setting(db, SETTING_OPENVPN_OPEN, "1" if openvpn_open else "0")
     try:

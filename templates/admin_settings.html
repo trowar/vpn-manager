@@ -2,12 +2,16 @@
 {% block content %}
 <section class="card">
   <h2>系统设置</h2>
-  <p class="helper">控制注册开关、订单过期时间、新用户赠送规则、协议开放状态与 Telegram 联系方式。</p>
+  <p class="helper">控制站点标题、注册开关、订单过期时间、新用户赠送规则、协议开放状态与 Telegram 联系方式。</p>
 </section>
 
 <section class="card" id="system-settings">
   <h3>系统设置</h3>
   <form method="post" action="{{ url_for('admin_update_system_settings') }}" class="form">
+    <label>站点标题
+      <input type="text" name="site_title" value="{{ system_settings['site_title'] }}" maxlength="120" required>
+    </label>
+
     <label>开放注册
       <select name="registration_open">
         <option value="1" {% if system_settings['registration_open'] %}selected{% endif %}>开启</option>
@@ -45,6 +49,7 @@
       <input type="text" name="telegram_contact" value="{{ system_settings['telegram_contact'] }}" placeholder="@your_tg 或 t.me/xxx">
     </label>
 
+    <p class="helper">默认站点标题：新世界发展科技有限公司边际网络管理系统。</p>
     <p class="helper">默认推荐仅开放 OpenVPN。WireGuard 和 OpenVPN 至少要保留一个开启；关闭后前台将隐藏对应下载入口。</p>
     <p class="helper">赠送策略仅影响后续新注册用户；可同时赠送时长和流量。</p>
     <button type="submit">保存系统设置</button>
