@@ -10,6 +10,7 @@ LEGACY_SERVICE_NAME="vpn-platform-v1"
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-600}"
 APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
 APT_RETRY_DELAY_SECONDS="${APT_RETRY_DELAY_SECONDS:-8}"
+INSTALL_SWAP_MB="${INSTALL_SWAP_MB:-2048}"
 
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NONINTERACTIVE_SEEN=true
@@ -30,6 +31,41 @@ err() {
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+ensure_swap_if_needed() {
+  if ! has_cmd swapon || ! [ -r /proc/meminfo ]; then
+    return 0
+  fi
+  local mem_kb swap_kb
+  mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+  swap_kb="$(awk '/SwapTotal/ {print $2}' /proc/meminfo)"
+  if [ -z "${mem_kb}" ]; then
+    return 0
+  fi
+  if [ "${swap_kb:-0}" -gt 0 ]; then
+    return 0
+  fi
+  if [ "${mem_kb}" -ge 1800000 ]; then
+    return 0
+  fi
+  if [ -f /swapfile ]; then
+    warn "swapfile already exists, skipping auto swap creation"
+    return 0
+  fi
+
+  log "Low-memory host detected; creating ${INSTALL_SWAP_MB}MB swapfile to avoid OOM during install"
+  if has_cmd fallocate; then
+    fallocate -l "${INSTALL_SWAP_MB}M" /swapfile
+  else
+    dd if=/dev/zero of=/swapfile bs=1M count="${INSTALL_SWAP_MB}" status=none
+  fi
+  chmod 600 /swapfile
+  mkswap /swapfile >/dev/null
+  swapon /swapfile
+  if ! grep -q '^/swapfile ' /etc/fstab 2>/dev/null; then
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  fi
 }
 
 on_error() {
@@ -135,6 +171,27 @@ install_docker() {
   else
     service docker start || true
   fi
+
+  if ! docker compose version >/dev/null 2>&1; then
+    log "Docker Compose v2 plugin not found; installing standalone plugin"
+    local os arch plugin_dir plugin_url
+    os="linux"
+    arch="$(uname -m)"
+    case "${arch}" in
+      x86_64|amd64) arch="x86_64" ;;
+      aarch64|arm64) arch="aarch64" ;;
+      *)
+        warn "Unsupported architecture for auto-install docker compose plugin: ${arch}"
+        ;;
+    esac
+    if [ "${arch}" = "x86_64" ] || [ "${arch}" = "aarch64" ]; then
+      plugin_dir="/usr/local/lib/docker/cli-plugins"
+      mkdir -p "${plugin_dir}"
+      plugin_url="https://github.com/docker/compose/releases/download/v2.39.2/docker-compose-${os}-${arch}"
+      retry_cmd 3 5 curl -fsSL "${plugin_url}" -o "${plugin_dir}/docker-compose"
+      chmod +x "${plugin_dir}/docker-compose"
+    fi
+  fi
 }
 
 compose_cmd() {
@@ -220,6 +277,12 @@ prepare_env() {
   upsert_env "VPN_API_TOKEN" "${api_token}"
   upsert_env "WG_ENDPOINT" "${ip}:51820"
   upsert_env "OPENVPN_ENDPOINT_HOST" "${ip}"
+  upsert_env "PORTAL_ENABLE_UDP_RELAY" "1"
+  upsert_env "VPN_RELAY_PUBLIC_HOST" "${ip}"
+  upsert_env "WG_RELAY_PORT_START" "24000"
+  upsert_env "WG_RELAY_PORT_END" "24031"
+  upsert_env "OPENVPN_RELAY_PORT_START" "29000"
+  upsert_env "OPENVPN_RELAY_PORT_END" "29031"
 }
 
 start_web() {
@@ -227,7 +290,8 @@ start_web() {
   log "Starting web container"
   docker rm -f vpn-web >/dev/null 2>&1 || true
   compose_cmd down --remove-orphans >/dev/null 2>&1 || true
-  compose_cmd up -d --build web
+  compose_cmd build web
+  compose_cmd up -d --no-deps web
 }
 
 print_summary() {
@@ -256,6 +320,7 @@ EOF
 
 main() {
   require_root
+  ensure_swap_if_needed
   install_base_deps
   install_docker
   setup_repo
