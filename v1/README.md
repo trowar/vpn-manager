@@ -1,4 +1,4 @@
-# VPN Platform V1
+# 新世界发展科技有限公司边缘节点网络管理系统
 
 ```bash
 wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/install.sh | bash

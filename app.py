@@ -974,7 +974,7 @@ def ensure_default_system_settings(db: sqlite3.Connection) -> None:
         SETTING_GIFT_DURATION_MONTHS: "0",
         SETTING_GIFT_TRAFFIC_GB: "0",
         SETTING_TELEGRAM_CONTACT: "",
-        SETTING_SITE_TITLE: "新世界发展科技有限公司边际网络管理系统",
+        SETTING_SITE_TITLE: "新世界发展科技有限公司边缘节点网络管理系统",
         SETTING_WIREGUARD_OPEN: "0",
         SETTING_OPENVPN_OPEN: "1",
         SETTING_SYSTEM_UPGRADE_STATUS: "idle",
@@ -1494,6 +1494,8 @@ def ensure_shared_vpn_server_materials() -> dict[str, str]:
 
 
 def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
+    default_site_title = "新世界发展科技有限公司边缘节点网络管理系统"
+    legacy_site_title = "新世界发展科技有限公司边际网络管理系统"
     registration_open_raw = get_app_setting(db, SETTING_REGISTRATION_OPEN, "1")
     order_expire_hours_raw = get_app_setting(db, SETTING_ORDER_EXPIRE_HOURS, "24")
     gift_duration_months_raw = get_app_setting(db, SETTING_GIFT_DURATION_MONTHS, "0")
@@ -1502,8 +1504,11 @@ def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
     site_title = get_app_setting(
         db,
         SETTING_SITE_TITLE,
-        "新世界发展科技有限公司边际网络管理系统",
+        default_site_title,
     )
+    if (site_title or "").strip() == legacy_site_title:
+        site_title = default_site_title
+        upsert_app_setting(db, SETTING_SITE_TITLE, default_site_title)
     wireguard_open_raw = get_app_setting(db, SETTING_WIREGUARD_OPEN, "0")
     openvpn_open_raw = get_app_setting(db, SETTING_OPENVPN_OPEN, "1")
     order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
@@ -1513,7 +1518,7 @@ def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
         "gift_duration_months": parse_int_setting(gift_duration_months_raw, 0, min_value=0),
         "gift_traffic_gb": parse_int_setting(gift_traffic_gb_raw, 0, min_value=0),
         "telegram_contact": (telegram_contact or "").strip(),
-        "site_title": (site_title or "").strip() or "新世界发展科技有限公司边际网络管理系统",
+        "site_title": (site_title or "").strip() or default_site_title,
         "wireguard_open": parse_bool_setting(wireguard_open_raw, False),
         "openvpn_open": parse_bool_setting(openvpn_open_raw, True),
     }
