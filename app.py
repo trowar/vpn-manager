@@ -1381,6 +1381,9 @@ def build_host_web_upgrade_script() -> str:
         }}
 
         write_state() {{
+          if ! command -v python3 >/dev/null 2>&1; then
+            return 0
+          fi
           python3 - "$1" "$2" "$3" "$4" <<'PY'
 import sqlite3
 import sys
@@ -1425,9 +1428,9 @@ PY
         trap cleanup EXIT
 
         : > "$LOG_FILE"
-        write_state "running" "系统升级进行中" "$STARTED_AT" ""
         log "宿主机升级任务已启动"
         apk add --no-cache git python3 >/dev/null
+        write_state "running" "系统升级进行中" "$STARTED_AT" ""
         cd /workspace
         log "git fetch origin"
         git fetch origin
