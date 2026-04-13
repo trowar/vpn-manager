@@ -326,6 +326,7 @@ _CLIENT_ALLOWED_IPS_CACHE: str | None = None
 _SMART_ALLOWED_IPS_CACHE: str | None = None
 _OPENVPN_ROUTE_LINES_CACHE: list[str] | None = None
 _OPENVPN_ROUTE_LINES_PROFILE_CACHE: dict[str, list[str]] = {}
+SYSTEM_UPGRADE_LOG_TAIL_CHARS = 20000
 
 
 def utcnow() -> datetime:
@@ -1353,14 +1354,27 @@ def detect_origin_default_branch() -> str:
     return "main"
 
 
+def resolve_host_web_upgrade_project_name() -> str:
+    project_dir = (HOST_WEB_UPGRADE_PROJECT_DIR or "").strip().rstrip("/\\")
+    raw_name = Path(project_dir).name if project_dir else ""
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", (raw_name or "").lower()).strip("-_")
+    if not normalized:
+        normalized = "vpn-platform-v1"
+    if not normalized[0].isalnum():
+        normalized = f"vpn{normalized}"
+    return normalized
+
+
 def build_host_web_upgrade_script() -> str:
     branch = shlex.quote(HOST_WEB_UPGRADE_BRANCH or "main")
+    compose_project_name = shlex.quote(resolve_host_web_upgrade_project_name())
     return textwrap.dedent(
         f"""
         set -eu
         LOG_FILE=/app/data/system-upgrade.log
         DB_PATH=/app/data/portal.db
         STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        COMPOSE_PROJECT_NAME={compose_project_name}
 
         log() {{
           printf '[%s] %s\\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" "$1" | tee -a "$LOG_FILE"
@@ -1421,10 +1435,10 @@ PY
         git checkout {branch}
         log "git pull --ff-only origin {branch}"
         git pull --ff-only origin {branch}
-        log "docker compose build web"
-        docker compose build web
-        log "docker compose up -d --no-deps web"
-        docker compose up -d --no-deps web
+        log "docker compose --project-name $COMPOSE_PROJECT_NAME build web"
+        docker compose --project-name "$COMPOSE_PROJECT_NAME" build web
+        log "docker compose --project-name $COMPOSE_PROJECT_NAME up -d --no-deps web"
+        docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d --no-deps web
         success=1
         log "系统升级完成"
         write_state "success" "系统升级完成，请重新登录。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
@@ -2121,6 +2135,19 @@ def append_system_upgrade_log(message: str) -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     with SYSTEM_UPGRADE_LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(f"[{timestamp}] {message.rstrip()}\n")
+
+
+def read_system_upgrade_log_text(limit_chars: int = SYSTEM_UPGRADE_LOG_TAIL_CHARS) -> str:
+    if not SYSTEM_UPGRADE_LOG_FILE.exists():
+        return ""
+    try:
+        raw = SYSTEM_UPGRADE_LOG_FILE.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    text = normalize_deploy_log_text(raw)
+    if limit_chars > 0 and len(text) > limit_chars:
+        return "...(log truncated)\n" + text[-limit_chars:]
+    return text
 
 
 def run_local_command_with_output(args: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
@@ -9908,16 +9935,58 @@ def admin_upgrade_system():
     db = get_db()
     state = load_system_upgrade_state(db)
     if (state.get("status") or "").strip().lower() == "running":
-        flash("系统升级任务已在运行中，请稍后刷新查看结果。", "error")
+        flash("系统升级任务正在运行中，请稍后刷新查看结果。", "error")
         return redirect(url_for("admin_home"))
 
+    started_at = utcnow_iso()
+    save_system_upgrade_state(
+        status="running",
+        summary="系统升级任务正在启动，请稍后刷新查看日志。",
+        started_at=started_at,
+        finished_at="",
+    )
+    append_system_upgrade_log("系统升级任务已触发，正在派发宿主机升级任务。")
     ok, message = dispatch_host_web_upgrade()
     if not ok:
+        append_system_upgrade_log(f"升级任务派发失败：{message}")
+        save_system_upgrade_state(
+            status="failed",
+            summary=f"系统升级任务派发失败：{message}",
+            started_at=started_at,
+            finished_at=utcnow_iso(),
+        )
         flash(f"系统升级任务派发失败：{message}", "error")
         return redirect(url_for("admin_home"))
+
+    append_system_upgrade_log(message)
     flash("系统升级任务已派发到宿主机，Web 会在新版本构建完成后自动重启。", "success")
     return redirect(url_for("admin_home"))
 
+
+@app.route("/admin/system/upgrade/log")
+@login_required
+@admin_required
+def admin_system_upgrade_log():
+    db = get_db()
+    state = load_system_upgrade_state(db)
+    log_text = read_system_upgrade_log_text()
+    if not log_text:
+        status = (state.get("status") or "").strip().lower()
+        if status == "running":
+            log_text = "系统升级任务进行中，日志正在生成，请稍后刷新。"
+        elif status in {"success", "failed"}:
+            log_text = "暂无系统升级日志，请确认数据卷映射与权限是否正常。"
+        else:
+            log_text = "尚未触发系统升级。"
+    return {
+        "ok": True,
+        "status": state.get("status", ""),
+        "summary": state.get("summary", ""),
+        "started_at": state.get("started_at", ""),
+        "finished_at": state.get("finished_at", ""),
+        "version": state.get("version", ""),
+        "log_text": log_text,
+    }, 200
 
 @app.route("/admin/home")
 @login_required
@@ -9935,6 +10004,15 @@ def admin_home():
     expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=50)
     _, online_summary = load_admin_online_users(db)
     system_upgrade = load_system_upgrade_state(db)
+    system_upgrade_log = read_system_upgrade_log_text()
+    if not system_upgrade_log:
+        status = (system_upgrade.get("status") or "").strip().lower()
+        if status == "running":
+            system_upgrade_log = "系统升级任务进行中，日志正在生成，请稍后刷新。"
+        elif status in {"success", "failed"}:
+            system_upgrade_log = "暂无系统升级日志，请确认数据卷映射与权限是否正常。"
+        else:
+            system_upgrade_log = "尚未触发系统升级。"
     db.commit()
 
     return render_template(
@@ -9945,6 +10023,7 @@ def admin_home():
         abnormal_server_count=server_overview["abnormal"],
         expiring_count=len(expiring_subscriptions),
         system_upgrade=system_upgrade,
+        system_upgrade_log=system_upgrade_log,
         admin_page="home",
     )
 

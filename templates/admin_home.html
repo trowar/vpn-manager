@@ -34,32 +34,143 @@
 <section class="card">
   <div class="section-title-row">
     <h3>系统升级</h3>
-    <form method="post" action="{{ url_for('admin_upgrade_system') }}" class="inline-form">
-      <button type="submit" class="btn" {% if system_upgrade["status"] == "running" %}disabled{% endif %}>升级系统</button>
-    </form>
+    <div class="subscription-actions">
+      <form method="post" action="{{ url_for('admin_upgrade_system') }}" class="inline-form">
+        <button
+          type="submit"
+          class="btn"
+          id="system-upgrade-start-btn"
+          {% if system_upgrade["status"] == "running" %}disabled{% endif %}
+        >升级系统</button>
+      </form>
+      <button type="button" class="btn secondary" id="system-upgrade-refresh-btn">刷新日志</button>
+    </div>
   </div>
   <div class="stats-grid">
     <div class="stat-item">
       <span class="stat-label">当前版本</span>
-      <strong class="stat-value">{{ system_upgrade["version"] }}</strong>
+      <strong class="stat-value" id="system-upgrade-version">{{ system_upgrade["version"] }}</strong>
     </div>
     <div class="stat-item">
       <span class="stat-label">升级状态</span>
-      <strong class="stat-value">{{ system_upgrade["status"] }}</strong>
+      <strong class="stat-value" id="system-upgrade-status">{{ system_upgrade["status"] }}</strong>
     </div>
     <div class="stat-item">
       <span class="stat-label">开始时间</span>
-      <strong class="stat-value">{{ system_upgrade["started_at"] or "-" }}</strong>
+      <strong class="stat-value" id="system-upgrade-started-at">{{ system_upgrade["started_at"] or "-" }}</strong>
     </div>
     <div class="stat-item">
       <span class="stat-label">完成时间</span>
-      <strong class="stat-value">{{ system_upgrade["finished_at"] or "-" }}</strong>
+      <strong class="stat-value" id="system-upgrade-finished-at">{{ system_upgrade["finished_at"] or "-" }}</strong>
     </div>
   </div>
-  {% if system_upgrade["summary"] %}
-    <p class="helper">{{ system_upgrade["summary"] }}</p>
-  {% else %}
-    <p class="helper">点击“升级系统”后，Web 会自动从 Git 拉取默认分支最新版本，并在成功后按当前运行环境尝试重启。</p>
-  {% endif %}
+  <p class="helper" id="system-upgrade-summary">
+    {{ system_upgrade["summary"] or "点击“升级系统”后，Web 会从 Git 拉取最新版本并重建 web 服务。" }}
+  </p>
+  <p class="helper" id="system-upgrade-log-meta">系统升级日志（自动刷新）</p>
+  <pre
+    id="system-upgrade-log"
+    style="max-height:460px; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#0f172a; color:#e5e7eb; padding:12px; border-radius:8px;"
+  >{{ system_upgrade_log }}</pre>
 </section>
+
+<script>
+  (function () {
+    var logUrl = "{{ url_for('admin_system_upgrade_log') }}";
+    var defaultSummary = "点击“升级系统”后，Web 会从 Git 拉取最新版本并重建 web 服务。";
+
+    var startBtn = document.getElementById("system-upgrade-start-btn");
+    var refreshBtn = document.getElementById("system-upgrade-refresh-btn");
+    var versionNode = document.getElementById("system-upgrade-version");
+    var statusNode = document.getElementById("system-upgrade-status");
+    var startedAtNode = document.getElementById("system-upgrade-started-at");
+    var finishedAtNode = document.getElementById("system-upgrade-finished-at");
+    var summaryNode = document.getElementById("system-upgrade-summary");
+    var logMetaNode = document.getElementById("system-upgrade-log-meta");
+    var logNode = document.getElementById("system-upgrade-log");
+
+    var timerId = null;
+
+    function normalizeText(raw) {
+      if (typeof raw !== "string") return "";
+      return raw
+        .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+        .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "")
+        .replace(/\r/g, "")
+        .trim();
+    }
+
+    function scheduleNext(ms) {
+      if (timerId) {
+        clearTimeout(timerId);
+      }
+      timerId = setTimeout(function () {
+        refreshUpgradeLog(false);
+      }, ms);
+    }
+
+    async function refreshUpgradeLog(manual) {
+      if (!logUrl) return;
+      if (manual && refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = "刷新中...";
+      }
+
+      try {
+        var response = await fetch(logUrl, {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+        var payload = await response.json();
+        if (!response.ok || !payload || !payload.ok) {
+          throw new Error((payload && (payload.error || payload.message)) || ("HTTP " + response.status));
+        }
+
+        var status = (payload.status || "").trim();
+        var statusLower = status.toLowerCase();
+        var summary = normalizeText(payload.summary || "") || defaultSummary;
+        var logText = normalizeText(payload.log_text || "") || "暂无系统升级日志。";
+
+        if (versionNode) versionNode.textContent = payload.version || "-";
+        if (statusNode) statusNode.textContent = status || "-";
+        if (startedAtNode) startedAtNode.textContent = payload.started_at || "-";
+        if (finishedAtNode) finishedAtNode.textContent = payload.finished_at || "-";
+        if (summaryNode) summaryNode.textContent = summary;
+        if (logNode) {
+          logNode.textContent = logText;
+          logNode.scrollTop = logNode.scrollHeight;
+        }
+        if (logMetaNode) {
+          var now = new Date();
+          logMetaNode.textContent = "系统升级日志（最近刷新: " + now.toLocaleString() + "）";
+        }
+        if (startBtn) {
+          startBtn.disabled = statusLower === "running";
+        }
+
+        if (statusLower === "running") {
+          scheduleNext(5000);
+        }
+      } catch (err) {
+        if (logMetaNode) {
+          logMetaNode.textContent = "系统升级日志加载失败: " + err;
+        }
+        scheduleNext(10000);
+      } finally {
+        if (manual && refreshBtn) {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = "刷新日志";
+        }
+      }
+    }
+
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", function () {
+        refreshUpgradeLog(true);
+      });
+    }
+    refreshUpgradeLog(false);
+  })();
+</script>
 {% endblock %}
