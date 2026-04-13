@@ -8,24 +8,6 @@
 wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/install.sh | bash
 ```
 
-或：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/install.sh | bash
-```
-
-手动部署 VPN 节点（排障使用）：
-
-```bash
-wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/scripts/manual_deploy_vpn_node.sh | bash
-```
-
-或：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/trowar/vpn-manager/main/scripts/manual_deploy_vpn_node.sh | bash
-```
-
 ## 2. 我们系统实现了哪些功能
 
 - 管理员后台与用户门户（中文界面）
