@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>服务器管理</h2>
-  <p class="helper">管理已接入的 VPN 服务器，支持补充地区信息，便于用户按地区选择默认节点。</p>
+  <p class="helper">管理已接入的 VPN 服务器，支持补充地区信息，并可直接执行部署、升级、删除等维护操作。</p>
 
   <div class="section-title-row">
     <h3>服务器列表</h3>
@@ -51,6 +51,9 @@
                   </form>
                   <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
                     <button type="submit">部署</button>
+                  </form>
+                  <form method="post" action="{{ url_for('admin_upgrade_saved_server', server_id=s['id']) }}" class="inline-form">
+                    <button type="submit" class="btn secondary">升级</button>
                   </form>
                   <button
                     type="button"
@@ -107,7 +110,7 @@
       <label>SSH 私钥（可选）
         <textarea name="ssh_private_key" id="server-key-input" rows="6" placeholder="粘贴私钥内容，例如 -----BEGIN ... PRIVATE KEY-----"></textarea>
       </label>
-      <p class="helper">地区信息会展示给用户，用于选择默认节点。WireGuard/OpenVPN/DNS 端口仍按现有部署逻辑处理。</p>
+      <p class="helper">删除服务器只会从管理列表移除，不会重装远端系统；后续仍可重新部署或升级 Docker 服务。</p>
 
       <div class="actions">
         <button type="button" class="btn secondary" id="server-test-btn">测试连接</button>
@@ -305,7 +308,7 @@
       editDeleteBtn.addEventListener("click", function () {
         if (!editDeleteForm || !editDeleteForm.action) return;
         var targetName = editDeleteTargetName || "该服务器";
-        if (confirm("确定删除服务器“" + targetName + "”吗？此操作不可恢复。")) {
+        if (confirm("确定删除服务器“" + targetName + "”吗？远端主机不会被重装，只会从管理列表移除。")) {
           editDeleteForm.submit();
         }
       });

@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>管理员仪表盘</h2>
-  <p class="helper">运营总览：待处理订单、在线用户、异常节点、即将到期权益（7天内）与用户总数。</p>
+  <p class="helper">运营总览：待处理订单、在线用户、异常节点、即将到期权益（7 天内）与用户总数。</p>
 </section>
 
 <section class="card">
@@ -25,9 +25,41 @@
       <strong class="overview-value">{{ expiring_count }}</strong>
     </a>
     <a class="overview-link" href="{{ url_for('admin_subscriptions') }}">
-      <span class="overview-label">用户总览</span>
+      <span class="overview-label">用户总数</span>
       <strong class="overview-value">{{ total_users }}</strong>
     </a>
   </div>
+</section>
+
+<section class="card">
+  <div class="section-title-row">
+    <h3>系统升级</h3>
+    <form method="post" action="{{ url_for('admin_upgrade_system') }}" class="inline-form">
+      <button type="submit" class="btn" {% if system_upgrade["status"] == "running" %}disabled{% endif %}>升级系统</button>
+    </form>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-item">
+      <span class="stat-label">当前版本</span>
+      <strong class="stat-value">{{ system_upgrade["version"] }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">升级状态</span>
+      <strong class="stat-value">{{ system_upgrade["status"] }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">开始时间</span>
+      <strong class="stat-value">{{ system_upgrade["started_at"] or "-" }}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">完成时间</span>
+      <strong class="stat-value">{{ system_upgrade["finished_at"] or "-" }}</strong>
+    </div>
+  </div>
+  {% if system_upgrade["summary"] %}
+    <p class="helper">{{ system_upgrade["summary"] }}</p>
+  {% else %}
+    <p class="helper">点击“升级系统”后，Web 会自动从 Git 拉取默认分支最新版本，并在成功后按当前运行环境尝试重启。</p>
+  {% endif %}
 </section>
 {% endblock %}

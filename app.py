@@ -13,8 +13,10 @@ import socket
 import sqlite3
 import string
 import subprocess
+import sys
 import tempfile
 import textwrap
+import time
 import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -62,6 +64,16 @@ SHARED_OPENVPN_CA_CERT_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_ca.crt"
 SHARED_OPENVPN_SERVER_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_server.key"
 SHARED_OPENVPN_SERVER_CERT_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_server.crt"
 SHARED_OPENVPN_TLS_CRYPT_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_tls_crypt.key"
+SYSTEM_UPGRADE_LOG_FILE = DATA_DIR / "system-upgrade.log"
+AUTO_RESTART_AFTER_SELF_UPGRADE = (
+    os.environ.get(
+        "PORTAL_SELF_UPGRADE_AUTO_RESTART",
+        "1" if Path("/.dockerenv").exists() else "0",
+    )
+    .strip()
+    .lower()
+    in {"1", "true", "yes", "on"}
+)
 
 WG_INTERFACE = os.environ.get("WG_INTERFACE", "wg0")
 WG_NETWORK = os.environ.get("WG_NETWORK", "10.7.0.0/24")
@@ -185,6 +197,10 @@ SETTING_GIFT_TRAFFIC_GB = "gift_traffic_gb"
 SETTING_TELEGRAM_CONTACT = "telegram_contact"
 SETTING_WIREGUARD_OPEN = "wireguard_open"
 SETTING_OPENVPN_OPEN = "openvpn_open"
+SETTING_SYSTEM_UPGRADE_STATUS = "system_upgrade_status"
+SETTING_SYSTEM_UPGRADE_SUMMARY = "system_upgrade_summary"
+SETTING_SYSTEM_UPGRADE_STARTED_AT = "system_upgrade_started_at"
+SETTING_SYSTEM_UPGRADE_FINISHED_AT = "system_upgrade_finished_at"
 MAIL_SECURITY_STARTTLS = "starttls"
 MAIL_SECURITY_SSL = "ssl"
 MAIL_SECURITY_NONE = "none"
@@ -886,6 +902,10 @@ def ensure_default_system_settings(db: sqlite3.Connection) -> None:
         SETTING_TELEGRAM_CONTACT: "",
         SETTING_WIREGUARD_OPEN: "0",
         SETTING_OPENVPN_OPEN: "1",
+        SETTING_SYSTEM_UPGRADE_STATUS: "idle",
+        SETTING_SYSTEM_UPGRADE_SUMMARY: "",
+        SETTING_SYSTEM_UPGRADE_STARTED_AT: "",
+        SETTING_SYSTEM_UPGRADE_FINISHED_AT: "",
     }
     for key, value in defaults.items():
         current = get_app_setting(db, key, "")
@@ -1192,6 +1212,161 @@ def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
         "wireguard_open": parse_bool_setting(wireguard_open_raw, False),
         "openvpn_open": parse_bool_setting(openvpn_open_raw, True),
     }
+
+
+def get_current_app_version() -> str:
+    version_file = BASE_DIR / "VERSION"
+    if version_file.exists():
+        return version_file.read_text(encoding="utf-8").strip() or "unknown"
+    return "unknown"
+
+
+def load_system_upgrade_state(db: sqlite3.Connection) -> dict[str, str]:
+    return {
+        "status": get_app_setting(db, SETTING_SYSTEM_UPGRADE_STATUS, "idle"),
+        "summary": get_app_setting(db, SETTING_SYSTEM_UPGRADE_SUMMARY, ""),
+        "started_at": get_app_setting(db, SETTING_SYSTEM_UPGRADE_STARTED_AT, ""),
+        "finished_at": get_app_setting(db, SETTING_SYSTEM_UPGRADE_FINISHED_AT, ""),
+        "version": get_current_app_version(),
+    }
+
+
+def save_system_upgrade_state(
+    *,
+    status: str,
+    summary: str,
+    started_at: str = "",
+    finished_at: str = "",
+) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        for key, value in (
+            (SETTING_SYSTEM_UPGRADE_STATUS, status),
+            (SETTING_SYSTEM_UPGRADE_SUMMARY, summary[:1000]),
+            (SETTING_SYSTEM_UPGRADE_STARTED_AT, started_at),
+            (SETTING_SYSTEM_UPGRADE_FINISHED_AT, finished_at),
+        ):
+            conn.execute(
+                """
+                INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, utcnow_iso()),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def detect_origin_default_branch() -> str:
+    code, output = run_local_command_with_output(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        cwd=BASE_DIR,
+    )
+    if code == 0 and output:
+        ref = output.strip().split("/")[-1]
+        if ref:
+            return ref
+    return "main"
+
+
+def schedule_process_restart(delay_seconds: float = 1.5) -> None:
+    if not AUTO_RESTART_AFTER_SELF_UPGRADE:
+        return
+
+    def _restart() -> None:
+        time.sleep(delay_seconds)
+        os._exit(0)
+
+    threading.Thread(target=_restart, daemon=True, name="self-upgrade-restart").start()
+
+
+def run_system_upgrade_task() -> None:
+    started_at = utcnow_iso()
+    save_system_upgrade_state(
+        status="running",
+        summary="系统升级进行中",
+        started_at=started_at,
+        finished_at="",
+    )
+    SYSTEM_UPGRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SYSTEM_UPGRADE_LOG_FILE.write_text("", encoding="utf-8")
+    append_system_upgrade_log(f"当前版本: {get_current_app_version()}")
+
+    if not (BASE_DIR / ".git").exists():
+        message = "当前运行目录缺少 .git，无法自动升级。"
+        append_system_upgrade_log(message)
+        save_system_upgrade_state(
+            status="failed",
+            summary=message,
+            started_at=started_at,
+            finished_at=utcnow_iso(),
+        )
+        return
+
+    default_branch = detect_origin_default_branch()
+    commands = [
+        ["git", "status", "--porcelain"],
+        ["git", "fetch", "origin"],
+        ["git", "checkout", default_branch],
+        ["git", "pull", "--ff-only", "origin", default_branch],
+        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+    ]
+    for args in commands:
+        append_system_upgrade_log("$ " + " ".join(args))
+        code, output = run_local_command_with_output(args, cwd=BASE_DIR)
+        if output:
+            append_system_upgrade_log(output)
+        if args[:3] == ["git", "status", "--porcelain"]:
+            if output.strip():
+                message = "当前工作区存在未提交修改，已停止自动升级。"
+                append_system_upgrade_log(message)
+                save_system_upgrade_state(
+                    status="failed",
+                    summary=message,
+                    started_at=started_at,
+                    finished_at=utcnow_iso(),
+                )
+                return
+            continue
+        if code != 0:
+            message = f"命令执行失败：{' '.join(args)}"
+            append_system_upgrade_log(message)
+            save_system_upgrade_state(
+                status="failed",
+                summary=message,
+                started_at=started_at,
+                finished_at=utcnow_iso(),
+            )
+            return
+
+    version_after = get_current_app_version()
+    summary = f"系统升级完成，当前版本 {version_after}。"
+    if AUTO_RESTART_AFTER_SELF_UPGRADE:
+        summary += " Web 进程将自动重启。"
+    else:
+        summary += " 请手动重启 Web 服务使代码完全生效。"
+    append_system_upgrade_log(summary)
+    save_system_upgrade_state(
+        status="success",
+        summary=summary,
+        started_at=started_at,
+        finished_at=utcnow_iso(),
+    )
+    schedule_process_restart()
+
+
+def launch_system_upgrade_task() -> None:
+    thread = threading.Thread(
+        target=run_system_upgrade_task,
+        daemon=True,
+        name="system-upgrade",
+    )
+    thread.start()
 
 
 def is_registration_open(db: sqlite3.Connection | None = None) -> bool:
@@ -1751,6 +1926,27 @@ def normalize_relay_port(value, default: int) -> int:
     if port <= 1024 or port > 65535:
         return default
     return port
+
+
+def append_system_upgrade_log(message: str) -> None:
+    SYSTEM_UPGRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    with SYSTEM_UPGRADE_LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {message.rstrip()}\n")
+
+
+def run_local_command_with_output(args: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
+    completed = subprocess.run(
+        args,
+        cwd=str(cwd or BASE_DIR),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    merged = "\n".join(
+        part.strip() for part in [completed.stdout or "", completed.stderr or ""] if part.strip()
+    ).strip()
+    return completed.returncode, merged
 
 
 def mask_secret(raw: str, visible: int = 2) -> str:
@@ -9406,7 +9602,7 @@ def admin_delete_saved_server(server_id: int):
     server_label = (row_get(row, "host", "") or "").strip() or (
         row_get(row, "server_name", "") or ""
     ).strip()
-    flash(f"服务器 {server_label} 已删除。", "success")
+    flash(f"服务器 {server_label} 已从管理列表删除；远端主机和已安装 Docker 会保留，可随时重新部署。", "success")
     return redirect(url_for("admin_servers"))
 
 
@@ -9427,6 +9623,47 @@ def admin_deploy_saved_server(server_id: int):
     return redirect(url_for("admin_servers"))
 
 
+@app.route("/admin/servers/<int:server_id>/upgrade", methods=["POST"])
+@login_required
+@admin_required
+def admin_upgrade_saved_server(server_id: int):
+    db = get_db()
+    row = db.execute(
+        "SELECT id, server_name, host FROM vpn_servers WHERE id = ? LIMIT 1",
+        (server_id,),
+    ).fetchone()
+    if not row:
+        flash("服务器不存在。", "error")
+        return redirect(url_for("admin_servers"))
+
+    mark_server_deploying(db, server_id)
+    db.commit()
+    launch_server_deploy_task(server_id)
+    server_label = (row_get(row, "server_name", "") or "").strip() or (
+        row_get(row, "host", "") or ""
+    ).strip()
+    flash(
+        f"服务器 {server_label} 升级任务已启动，会在原主机拉取 GitHub 最新代码并重建 vpnserver Docker。",
+        "success",
+    )
+    return redirect(url_for("admin_servers"))
+
+
+@app.route("/admin/system/upgrade", methods=["POST"])
+@login_required
+@admin_required
+def admin_upgrade_system():
+    db = get_db()
+    state = load_system_upgrade_state(db)
+    if (state.get("status") or "").strip().lower() == "running":
+        flash("系统升级任务已在运行中，请稍后刷新查看结果。", "error")
+        return redirect(url_for("admin_home"))
+
+    launch_system_upgrade_task()
+    flash("系统升级任务已启动，完成后 Web 可能会自动重启。", "success")
+    return redirect(url_for("admin_home"))
+
+
 @app.route("/admin/home")
 @login_required
 @admin_required
@@ -9442,6 +9679,7 @@ def admin_home():
     server_overview = refresh_server_health_status(db)
     expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=50)
     _, online_summary = load_admin_online_users(db)
+    system_upgrade = load_system_upgrade_state(db)
     db.commit()
 
     return render_template(
@@ -9451,6 +9689,7 @@ def admin_home():
         online_user_count=int(online_summary.get("online_users", 0) or 0),
         abnormal_server_count=server_overview["abnormal"],
         expiring_count=len(expiring_subscriptions),
+        system_upgrade=system_upgrade,
         admin_page="home",
     )
 
