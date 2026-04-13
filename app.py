@@ -9414,24 +9414,30 @@ def admin_servers():
 @login_required
 @admin_required
 def admin_test_server_connection():
-    payload = request.get_json(silent=True) or request.form
-    host = normalize_remote_host(payload.get("host", ""))
-    port = normalize_server_port(payload.get("port", "22"), 22)
-    username = (payload.get("username", "") or "").strip()
-    password = payload.get("password", "") or ""
-    private_key_text = payload.get("private_key", "") or ""
+    try:
+        payload = request.get_json(silent=True) or request.form
+        host = normalize_remote_host(payload.get("host", ""))
+        port = normalize_server_port(payload.get("port", "22"), 22)
+        username = (payload.get("username", "") or "").strip()
+        password = payload.get("password", "") or ""
+        private_key_text = payload.get("private_key", "") or ""
 
-    ok, message = test_server_connectivity(
-        host, port, username, password, private_key_text
-    )
-    status_code = 200 if ok else 400
-    return {"ok": ok, "message": message}, status_code
+        ok, message = test_server_connectivity(
+            host, port, username, password, private_key_text
+        )
+        status_code = 200 if ok else 400
+        return {"ok": ok, "message": message}, status_code
+    except Exception as exc:
+        app.logger.exception("server connection test failed: %s", exc)
+        return {"ok": False, "message": f"测试请求失败：{exc}"}, 500
 
 
-@app.route("/admin/servers/create", methods=["POST"])
+@app.route("/admin/servers/create", methods=["GET", "POST"])
 @login_required
 @admin_required
 def admin_create_server():
+    if request.method == "GET":
+        return redirect(url_for("admin_servers"))
     db = get_db()
     server_region = normalize_server_region(request.form.get("server_region", ""))
     host = normalize_remote_host(request.form.get("host", ""))
