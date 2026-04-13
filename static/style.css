@@ -405,6 +405,31 @@ td {
   flex-wrap: nowrap;
 }
 
+.subscription-edit-panel {
+  min-width: 280px;
+}
+
+.subscription-edit-panel > summary {
+  display: inline-block;
+  cursor: pointer;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f6f9ff;
+  color: var(--text);
+  user-select: none;
+}
+
+.subscription-edit-panel[open] > summary {
+  margin-bottom: 8px;
+}
+
+.subscription-edit-panel .subscription-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
 .admin-reset-password-input {
   min-width: 170px;
 }
