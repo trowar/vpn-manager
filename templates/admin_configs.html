@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>配置下载</h2>
-  <p class="helper">管理员自用 VPN 配置（无限期、无限流量）。支持 WireGuard 与 OpenVPN。</p>
+  <p class="helper">管理员自用 VPN 配置。协议是否可下载受“系统设置”中的 WireGuard / OpenVPN 开关控制。</p>
 </section>
 
 <section class="card">
@@ -34,30 +34,34 @@
       <strong class="stat-value">{{ target_server_host }}</strong>
     </div>
     <div class="stat-item">
-      <span class="stat-label">WireGuard 端点</span>
+      <span class="stat-label">WireGuard 入口</span>
       <strong class="stat-value table-code-wrap">{{ endpoint_display }}</strong>
     </div>
   </div>
 
   <div class="actions">
-    {% if admin_vpn_ready %}
+    {% if admin_vpn_ready and wireguard_enabled %}
       <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载管理员 WireGuard 配置</a>
-      {% if openvpn_enabled %}
-        <a class="btn secondary" href="{{ url_for('admin_download_openvpn_config', mode='global') }}">下载管理员 OpenVPN 配置</a>
-      {% endif %}
+    {% elif not wireguard_enabled %}
+      <button type="button" disabled>WireGuard 已关闭</button>
     {% else %}
       <button type="button" disabled>管理员 WireGuard 配置未就绪</button>
-      {% if openvpn_enabled %}
-        <button type="button" class="secondary" disabled>管理员 OpenVPN 配置未就绪</button>
-      {% endif %}
+    {% endif %}
+
+    {% if admin_vpn_ready and openvpn_enabled %}
+      <a class="btn secondary" href="{{ url_for('admin_download_openvpn_config', mode='global') }}">下载管理员 OpenVPN 配置</a>
+    {% elif not openvpn_enabled %}
+      <button type="button" class="secondary" disabled>OpenVPN 已关闭</button>
+    {% else %}
+      <button type="button" class="secondary" disabled>管理员 OpenVPN 配置未就绪</button>
     {% endif %}
   </div>
 
-  {% if admin_vpn_ready %}
+  {% if admin_vpn_ready and wireguard_enabled %}
     <div class="payment-qr-wrap" id="admin-inline-qr">
       <img src="{{ url_for('admin_download_qr', mode='global') }}" alt="管理员 WireGuard 二维码">
     </div>
-    <p class="helper">管理员 WireGuard 二维码已默认显示，可直接扫码导入。</p>
+    <p class="helper">管理员 WireGuard 二维码仅在 WireGuard 开启时显示。</p>
   {% endif %}
 </section>
 {% endblock %}

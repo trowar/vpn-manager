@@ -23,6 +23,7 @@
           <a class="site-nav-link {% if admin_page == 'online_users' %}active{% endif %}" href="{{ url_for('admin_online_users') }}">在线用户</a>
           <a class="site-nav-link {% if admin_page == 'configs' %}active{% endif %}" href="{{ url_for('admin_configs') }}">配置下载</a>
           <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器</a>
+          <a class="site-nav-link {% if admin_page == 'mail_servers' %}active{% endif %}" href="{{ url_for('admin_mail_servers') }}">邮件服务器配置</a>
           <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_settings') }}">设置</a>
         {% else %}
           <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>

@@ -11,6 +11,7 @@ from werkzeug.security import check_password_hash
 DB_PATH = os.environ.get("PORTAL_DB_PATH", "/opt/vpn-portal/data/portal.db")
 WG_INTERFACE = os.environ.get("WG_INTERFACE", "wg0")
 OPENVPN_STATUS_FILE = os.environ.get("OPENVPN_STATUS_FILE", "/tmp/openvpn-status.log")
+SETTING_OPENVPN_OPEN = "openvpn_open"
 SESSION_REJECT_MESSAGE = "已有连接未断开，请稍后再试"
 WG_ACTIVE_HANDSHAKE_SECONDS_RAW = os.environ.get(
     "VPN_SINGLE_SESSION_WG_HANDSHAKE_SECONDS", "180"
@@ -149,6 +150,19 @@ def authenticate(username: str, password: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
+        setting_row = conn.execute(
+            """
+            SELECT setting_value
+            FROM app_settings
+            WHERE setting_key = ?
+            LIMIT 1
+            """,
+            (SETTING_OPENVPN_OPEN,),
+        ).fetchone()
+        if setting_row is not None:
+            raw_setting = (setting_row["setting_value"] or "").strip().lower()
+            if raw_setting in {"0", "false", "off", "no"}:
+                return False
         row = conn.execute(
             """
             SELECT

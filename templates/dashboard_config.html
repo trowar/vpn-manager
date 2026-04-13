@@ -2,17 +2,76 @@
 {% block content %}
 <div class="dashboard-main">
   <section class="card">
-    <h3>配置</h3>
+    <h3>配置与节点</h3>
     {% if node_alert_text %}
       <div class="alert alert-error">{{ node_alert_text }}</div>
     {% endif %}
 
+    <div class="stats-grid">
+      <div class="stat-item">
+        <span class="stat-label">当前服务器</span>
+        <strong class="stat-value" style="font-size:18px;">
+          {% if current_server %}
+            {{ current_server["display_name"] }}
+          {% else %}
+            暂未分配
+          {% endif %}
+        </strong>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">当前出口</span>
+        <strong class="stat-value" style="font-size:18px;">
+          {% if current_server %}
+            {{ current_server["endpoint_host"] }}
+          {% else %}
+            -
+          {% endif %}
+        </strong>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">默认服务器</span>
+        <strong class="stat-value" style="font-size:18px;">
+          {% if preferred_server %}
+            {{ preferred_server["display_name"] }}
+          {% elif current_server %}
+            跟随当前节点
+          {% else %}
+            暂未设置
+          {% endif %}
+        </strong>
+      </div>
+    </div>
+
+    <section class="feature-item" style="margin-bottom:12px;">
+      <h4>切换默认服务器</h4>
+      <p>可以按地区选择默认服务器节点，用于连接不同地区的线路达到加速目的。切换后请重新下载配置并重新连接。</p>
+      {% if available_servers %}
+        <form method="post" action="{{ url_for('dashboard_select_server') }}" class="form">
+          <label>默认服务器
+            <select name="preferred_server_id" required>
+              {% for server in available_servers %}
+                <option value="{{ server['id'] }}" {% if server['is_preferred'] or (not preferred_server and server['is_current']) %}selected{% endif %}>
+                  {{ server["server_region_display"] }} / {{ server["server_name"] }} / {{ server["endpoint_host"] }}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <p class="helper">仅展示当前在线节点。切换节点时，动态 IP 模式下会重新分配新的内网地址。</p>
+          <div class="actions">
+            <button type="submit">保存并切换节点</button>
+          </div>
+        </form>
+      {% else %}
+        <p class="helper">当前没有可选的在线节点，请联系管理员检查服务器状态。</p>
+      {% endif %}
+    </section>
+
     <div class="feature-grid guide-grid">
       <div class="feature-item">
         <h4>WireGuard</h4>
-        <p>速度快，支持二维码导入，配置统一为全局代理模式。</p>
+        <p>速度快，适合大多数设备。切换节点或重建配置后，请重新导入最新配置。</p>
         <div class="actions">
-          {% if active %}
+          {% if active and wireguard_enabled %}
             <a class="btn" href="{{ url_for('download_config', mode='global') }}">下载 WireGuard 配置</a>
             <form
               method="post"
@@ -22,25 +81,30 @@
             >
               <button type="submit" class="btn secondary">重新生成配置</button>
             </form>
+          {% elif not wireguard_enabled %}
+            <button type="button" disabled>WireGuard 已关闭</button>
+            <button type="button" class="secondary" disabled>重建配置已关闭</button>
           {% else %}
             <button type="button" disabled>下载 WireGuard 配置（未生效）</button>
             <button type="button" class="secondary" disabled>重新生成配置（未生效）</button>
           {% endif %}
-          <a class="btn secondary" href="{{ url_for('wireguard_download_auto') }}">一键下载客户端</a>
-          <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部下载入口</a>
+          {% if wireguard_enabled %}
+            <a class="btn secondary" href="{{ url_for('wireguard_download_auto') }}">一键下载客户端</a>
+            <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部下载入口</a>
+          {% endif %}
         </div>
-        {% if active %}
+        {% if active and wireguard_enabled %}
           <div class="payment-qr-wrap payment-qr-wrap-inline">
-            <img src="{{ url_for('download_qr', mode='global') }}" alt="WireGuard 全局代理二维码" loading="eager">
+            <img src="{{ url_for('download_qr', mode='global') }}" alt="WireGuard 二维码" loading="eager">
           </div>
-          <p class="helper">二维码为 WireGuard 全局代理配置，手机端可直接扫码导入。</p>
+          <p class="helper">二维码会使用当前默认节点生成，请在切换服务器后重新扫码或重新导入配置。</p>
         {% endif %}
       </div>
 
       <div class="feature-item">
         <h4>OpenVPN</h4>
         {% if openvpn_enabled %}
-          <p>兼容性广，使用 `.ovpn` 全局代理配置导入。</p>
+          <p>兼容性更广，适合旧设备或特殊网络环境，同样会跟随当前默认服务器生成。</p>
           <div class="actions">
             {% if active %}
               <a class="btn" href="{{ url_for('download_openvpn_config', mode='global') }}">下载 OpenVPN 配置</a>
@@ -51,7 +115,7 @@
             <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">全部下载入口</a>
           </div>
         {% else %}
-          <p>当前系统未启用 OpenVPN 协议。</p>
+          <p>当前系统未启用 OpenVPN 支持。</p>
           <div class="actions">
             <button type="button" disabled>OpenVPN 未启用</button>
           </div>
@@ -63,11 +127,11 @@
 
     <h4>使用说明</h4>
     <ol class="guide-steps">
-      <li>选择客户端类型：WireGuard 或 OpenVPN。</li>
-      <li>确认账号状态为“已生效”。</li>
-      <li>下载对应配置文件（WireGuard `.conf` / OpenVPN `.ovpn`）。</li>
+      <li>先选择默认服务器节点，再下载对应配置。</li>
+      <li>确认账号订阅状态为“已生效”。</li>
+      <li>下载对应配置文件：WireGuard `.conf` 或 OpenVPN `.ovpn`。</li>
       <li>在客户端导入配置文件并连接。</li>
-      <li>连接成功后即可使用。</li>
+      <li>如果切换了节点或重建了配置，请删除旧隧道后重新导入。</li>
     </ol>
 
     <div class="guide-image-grid">
@@ -77,10 +141,10 @@
       </figure>
       <figure class="guide-image-card">
         <img src="{{ url_for('static', filename='openvpn_import_step2.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤2">
-        <figcaption>OpenVPN 导入步骤 2：选择下载的 `.ovpn` 文件，点击“打开”完成导入。</figcaption>
+        <figcaption>OpenVPN 导入步骤 2：选择下载好的 `.ovpn` 文件，点击“打开”完成导入。</figcaption>
       </figure>
     </div>
-    <p class="helper">常见问题：连接失败时先检查套餐状态、系统时间、以及本地网络是否拦截 VPN。</p>
+    <p class="helper">常见问题：如果切换节点后无法连接，请先删除旧配置、重新下载，并确认本地客户端里导入的是最新配置。</p>
   </section>
 </div>
 {% endblock %}

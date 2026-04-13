@@ -18,7 +18,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 COPY . /app
+RUN chmod +x /app/docker/web/entrypoint.sh
 
 EXPOSE 8080
 
-CMD ["gunicorn", "--workers", "2", "--bind", "0.0.0.0:8080", "wsgi:app"]
+CMD ["/app/docker/web/entrypoint.sh"]

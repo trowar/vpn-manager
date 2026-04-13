@@ -2,88 +2,96 @@
 {% block content %}
 <section class="card">
   <h2>服务器管理</h2>
-  <p class="helper">按行管理已接入服务器。新增服务器时可先测试 SSH 连通，再保存并自动部署 VPN 服务端。</p>
+  <p class="helper">管理已接入的 VPN 服务器，支持补充地区信息，便于用户按地区选择默认节点。</p>
 
   <div class="section-title-row">
     <h3>服务器列表</h3>
-    <button type="button" id="open-server-modal">新增服务器</button>
+    <button type="button" id="open-server-modal">新建服务器</button>
   </div>
 
   {% if servers %}
-    <table class="subscriptions-table server-table">
-      <thead>
-        <tr>
-          <th>地址</th>
-          <th>账号</th>
-          <th>状态</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for s in servers %}
+    <div class="table-scroll">
+      <table class="subscriptions-table server-table">
+        <thead>
           <tr>
-            <td><strong>{{ s["host"] }}</strong></td>
-            <td>{{ s["username"] }}</td>
-            <td>
-              {% if s["status"] == "online" %}
-                <span class="tag tag-ok">在线</span>
-              {% elif s["status"] == "deploy_failed" %}
-                <span class="tag tag-warn">部署失败</span>
-              {% elif s["status"] == "deploying" %}
-                <span class="tag tag-warn">部署中</span>
-              {% else %}
-                <span class="tag tag-warn">{{ s["status"] }}</span>
-              {% endif %}
-            </td>
-            <td class="server-actions-cell">
-              <div class="subscription-actions">
-                <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
-                  <button type="submit" class="btn secondary">测试</button>
-                </form>
-                <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='disable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器关闭 IPv6 吗？');">
-                  <button type="submit" class="btn secondary">关闭 IPv6</button>
-                </form>
-                <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='enable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器开启 IPv6 吗？');">
-                  <button type="submit" class="btn secondary">开启 IPv6</button>
-                </form>
-                <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
-                  <button type="submit">部署</button>
-                </form>
-                <button
-                  type="button"
-                  class="btn secondary open-server-log-modal"
-                  data-log-url="{{ url_for('admin_server_deploy_log', server_id=s['id']) }}"
-                  data-server-name="{{ s['host'] }}"
-                >部署日志</button>
-                <button
-                  type="button"
-                  class="btn secondary open-server-edit-modal"
-                  data-update-url="{{ url_for('admin_update_saved_server', server_id=s['id']) }}"
-                  data-delete-url="{{ url_for('admin_delete_saved_server', server_id=s['id']) }}"
-                  data-server-name="{{ s['host'] }}"
-                  data-host="{{ s['host'] }}"
-                  data-port="{{ s['port'] }}"
-                  data-username="{{ s['username'] }}"
-                >修改</button>
-              </div>
-            </td>
+            <th>地址</th>
+            <th>地区</th>
+            <th>账号</th>
+            <th>状态</th>
+            <th>操作</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for s in servers %}
+            <tr>
+              <td><strong>{{ s["host"] }}</strong></td>
+              <td>{{ s["server_region_display"] }}</td>
+              <td>{{ s["username"] }}</td>
+              <td>
+                {% if s["status"] == "online" %}
+                  <span class="tag tag-ok">在线</span>
+                {% elif s["status"] == "deploy_failed" %}
+                  <span class="tag tag-warn">部署失败</span>
+                {% elif s["status"] == "deploying" %}
+                  <span class="tag tag-warn">部署中</span>
+                {% else %}
+                  <span class="tag tag-warn">{{ s["status"] }}</span>
+                {% endif %}
+              </td>
+              <td class="server-actions-cell">
+                <div class="subscription-actions">
+                  <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
+                    <button type="submit" class="btn secondary">测试</button>
+                  </form>
+                  <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='disable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器关闭 IPv6 吗？');">
+                    <button type="submit" class="btn secondary">关闭 IPv6</button>
+                  </form>
+                  <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='enable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器开启 IPv6 吗？');">
+                    <button type="submit" class="btn secondary">开启 IPv6</button>
+                  </form>
+                  <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
+                    <button type="submit">部署</button>
+                  </form>
+                  <button
+                    type="button"
+                    class="btn secondary open-server-log-modal"
+                    data-log-url="{{ url_for('admin_server_deploy_log', server_id=s['id']) }}"
+                    data-server-name="{{ s['server_name'] }}"
+                  >部署日志</button>
+                  <button
+                    type="button"
+                    class="btn secondary open-server-edit-modal"
+                    data-update-url="{{ url_for('admin_update_saved_server', server_id=s['id']) }}"
+                    data-delete-url="{{ url_for('admin_delete_saved_server', server_id=s['id']) }}"
+                    data-server-name="{{ s['server_name'] }}"
+                    data-region="{{ s['server_region'] }}"
+                    data-host="{{ s['host'] }}"
+                    data-port="{{ s['port'] }}"
+                    data-username="{{ s['username'] }}"
+                  >修改</button>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
-    <p class="helper">暂无服务器，点击右上角“新增服务器”开始。</p>
+    <p class="helper">暂无服务器，点击右上角“新建服务器”开始。</p>
   {% endif %}
 </section>
 
 <div class="payment-modal" id="server-modal" hidden>
   <div class="payment-modal-card plan-create-modal-card">
     <div class="section-title-row">
-      <h4>新增服务器</h4>
+      <h4>新建服务器</h4>
       <button type="button" class="btn secondary modal-close-x" id="close-server-modal">×</button>
     </div>
 
     <form method="post" action="{{ url_for('admin_create_server') }}" class="form" id="server-create-form">
+      <label>服务器地区（可选）
+        <input type="text" name="server_region" id="server-region-input" placeholder="例如：香港 / 日本东京 / 新加坡">
+      </label>
       <label>服务器 IP/域名
         <input type="text" name="host" id="server-host-input" placeholder="例如：193.134.209.54" required>
       </label>
@@ -97,12 +105,12 @@
         <input type="password" name="password" id="server-pass-input" placeholder="可留空，使用私钥登录">
       </label>
       <label>SSH 私钥（可选）
-        <textarea name="ssh_private_key" id="server-key-input" rows="6" placeholder="粘贴私钥内容（-----BEGIN ... PRIVATE KEY-----）"></textarea>
+        <textarea name="ssh_private_key" id="server-key-input" rows="6" placeholder="粘贴私钥内容，例如 -----BEGIN ... PRIVATE KEY-----"></textarea>
       </label>
-      <p class="helper">WireGuard 端口固定为 51820，OpenVPN 端口固定为 1194，DNS 端口固定为 53。</p>
+      <p class="helper">地区信息会展示给用户，用于选择默认节点。WireGuard/OpenVPN/DNS 端口仍按现有部署逻辑处理。</p>
 
       <div class="actions">
-        <button type="button" class="btn secondary" id="server-test-btn">测试连通</button>
+        <button type="button" class="btn secondary" id="server-test-btn">测试连接</button>
         <button type="submit">保存并部署</button>
       </div>
       <p class="helper" id="server-test-result">未测试</p>
@@ -118,6 +126,9 @@
     </div>
 
     <form method="post" id="server-edit-form" class="form">
+      <label>服务器地区（可选）
+        <input type="text" name="server_region" id="server-edit-region">
+      </label>
       <label>服务器 IP/域名
         <input type="text" name="host" id="server-edit-host" required>
       </label>
@@ -131,9 +142,8 @@
         <input type="password" name="password" id="server-edit-password" placeholder="不修改可留空">
       </label>
       <label>SSH 私钥（可选，留空则保持不变）
-        <textarea name="ssh_private_key" id="server-edit-key" rows="6" placeholder="需改为私钥登录时粘贴完整私钥"></textarea>
+        <textarea name="ssh_private_key" id="server-edit-key" rows="6" placeholder="需要改为私钥登录时再粘贴完整私钥"></textarea>
       </label>
-      <p class="helper">WireGuard 端口固定为 51820，OpenVPN 端口固定为 1194，DNS 端口固定为 53。</p>
       <div class="actions">
         <button type="submit">保存修改</button>
         <button type="button" class="danger" id="server-edit-delete-btn">删除服务器</button>
@@ -167,6 +177,7 @@
     var editCloseBtn = document.getElementById("close-server-edit-modal");
     var editButtons = document.querySelectorAll(".open-server-edit-modal");
     var editForm = document.getElementById("server-edit-form");
+    var editRegion = document.getElementById("server-edit-region");
     var editHost = document.getElementById("server-edit-host");
     var editPort = document.getElementById("server-edit-port");
     var editUser = document.getElementById("server-edit-username");
@@ -268,7 +279,7 @@
         }
       } finally {
         createTestBtn.disabled = false;
-        createTestBtn.textContent = "测试连通";
+        createTestBtn.textContent = "测试连接";
       }
     }
     if (createTestBtn) createTestBtn.addEventListener("click", testServerConnection);
@@ -279,6 +290,7 @@
       btn.addEventListener("click", function () {
         if (!editForm) return;
         editForm.action = btn.dataset.updateUrl || "";
+        if (editRegion) editRegion.value = btn.dataset.region || "";
         if (editHost) editHost.value = btn.dataset.host || "";
         if (editPort) editPort.value = btn.dataset.port || "22";
         if (editUser) editUser.value = btn.dataset.username || "root";
@@ -293,7 +305,7 @@
       editDeleteBtn.addEventListener("click", function () {
         if (!editDeleteForm || !editDeleteForm.action) return;
         var targetName = editDeleteTargetName || "该服务器";
-        if (confirm("确定删除服务器“" + targetName + "”吗？该操作不可恢复。")) {
+        if (confirm("确定删除服务器“" + targetName + "”吗？此操作不可恢复。")) {
           editDeleteForm.submit();
         }
       });
@@ -334,10 +346,10 @@
           if (logContent) {
             var deployLogText = normalizeDeployLogText(data.deploy_log || "");
             var infoBlock =
-              "[历史记录]\\n" +
-              "最近测试： " + (data.last_test_at || "-") + " | " + (data.last_test_message || "-") + "\\n" +
+              "[历史记录]\n" +
+              "最近测试： " + (data.last_test_at || "-") + " | " + (data.last_test_message || "-") + "\n" +
               "最近部署： " + (data.last_deploy_at || "-") + " | " + (data.last_deploy_message || "-");
-            logContent.textContent = infoBlock + "\\n\\n" + (deployLogText || "部署任务已创建，日志暂未写入，请稍后刷新。");
+            logContent.textContent = infoBlock + "\n\n" + (deployLogText || "部署任务已创建，日志暂未写入，请稍后刷新。");
             logContent.scrollTop = logContent.scrollHeight;
           }
         } catch (err) {

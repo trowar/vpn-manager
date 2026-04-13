@@ -7,6 +7,9 @@ from flask import Flask, jsonify, request
 
 
 WG_INTERFACE = os.environ.get("WG_INTERFACE", "wg0")
+WG_CONF_PATH = Path(
+    os.environ.get("WG_CONF_PATH", f"/etc/wireguard/{WG_INTERFACE}.conf")
+)
 WG_SERVER_PUBLIC_KEY_FILE = Path(
     os.environ.get("WG_SERVER_PUBLIC_KEY_FILE", "/srv/vpn-shared/server_public.key")
 )
@@ -19,6 +22,9 @@ OPENVPN_TLS_CRYPT_KEY_FILE = Path(
 )
 OPENVPN_STATUS_FILE = Path(
     os.environ.get("OPENVPN_STATUS_FILE", "/tmp/openvpn-status.log")
+)
+OPENVPN_PID_FILE = Path(
+    os.environ.get("OPENVPN_PID_FILE", "/run/openvpn-server.pid")
 )
 
 app = Flask(__name__)
@@ -40,6 +46,30 @@ def run_command(args, input_text=None, check=True) -> str:
 
 def unauthorized():
     return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+
+def is_wireguard_up() -> bool:
+    return subprocess.run(
+        ["wg", "show", WG_INTERFACE],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).returncode == 0
+
+
+def is_openvpn_running() -> bool:
+    if OPENVPN_PID_FILE.exists():
+        try:
+            pid = int((OPENVPN_PID_FILE.read_text(encoding="utf-8") or "").strip())
+        except Exception:
+            pid = 0
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+                return True
+            except Exception:
+                pass
+    return False
 
 
 @app.before_request
@@ -194,6 +224,67 @@ def wireguard_remove_peer():
     )
     run_command(["wg-quick", "save", interface], check=False)
     return {"ok": True}
+
+
+@app.route("/wireguard/control", methods=["POST"])
+def wireguard_control():
+    payload = request.get_json(silent=True) or {}
+    action = (payload.get("action") or "").strip().lower()
+    if action not in {"up", "down"}:
+        return {"ok": False, "error": "invalid action"}, 400
+
+    if action == "down":
+        if not is_wireguard_up():
+            return {"ok": True, "message": "wireguard already down"}
+        run_command(["wg-quick", "down", WG_INTERFACE], check=False)
+        return {"ok": True, "message": "wireguard stopped"}
+
+    if is_wireguard_up():
+        return {"ok": True, "message": "wireguard already up"}
+    if not WG_CONF_PATH.exists():
+        return {"ok": False, "error": "wireguard config not found"}, 404
+    run_command(["wg-quick", "up", WG_INTERFACE], check=False)
+    return {"ok": True, "message": "wireguard started"}
+
+
+@app.route("/openvpn/control", methods=["POST"])
+def openvpn_control():
+    payload = request.get_json(silent=True) or {}
+    action = (payload.get("action") or "").strip().lower()
+    if action not in {"start", "stop"}:
+        return {"ok": False, "error": "invalid action"}, 400
+
+    if action == "stop":
+        if is_openvpn_running():
+            try:
+                pid = int((OPENVPN_PID_FILE.read_text(encoding="utf-8") or "").strip())
+            except Exception:
+                pid = 0
+            if pid > 0:
+                try:
+                    os.kill(pid, 15)
+                except Exception:
+                    pass
+        OPENVPN_PID_FILE.unlink(missing_ok=True)
+        return {"ok": True, "message": "openvpn stopped"}
+
+    if is_openvpn_running():
+        return {"ok": True, "message": "openvpn already running"}
+    if not OPENVPN_SERVER_CONF.exists():
+        return {"ok": False, "error": f"openvpn config not found: {OPENVPN_SERVER_CONF}"}, 404
+    run_command(
+        [
+            "openvpn",
+            "--config",
+            str(OPENVPN_SERVER_CONF),
+            "--daemon",
+            "ovpn-server",
+            "--writepid",
+            str(OPENVPN_PID_FILE),
+        ],
+        check=False,
+    )
+    return {"ok": True, "message": "openvpn started"}
 
 
 @app.errorhandler(Exception)

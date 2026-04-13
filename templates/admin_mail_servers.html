@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>邮件服务器配置</h2>
+  <p class="helper">管理注册和找回密码使用的 SMTP 邮件服务器。系统会优先使用当前启用的后台配置发送验证码。</p>
+  {% if active_mail_server %}
+    <p><span class="tag tag-ok">当前启用：{{ active_mail_server["server_name"] }} / {{ active_mail_server["sender_display"] }}</span></p>
+  {% elif env_mail_server %}
+    <p><span class="tag tag-warn">当前回退到环境变量 SMTP_*：{{ env_mail_server["host"] }} / {{ env_mail_server["sender_display"] }}</span></p>
+  {% else %}
+    <p><span class="tag tag-warn">当前未配置邮件服务器，用户将无法收到邮件验证码。</span></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="section-title-row">
+    <h3>邮件服务器列表</h3>
+    <button type="button" id="open-mail-server-create-modal">新建邮件服务器</button>
+  </div>
+
+  {% if mail_servers %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>SMTP 地址</th>
+            <th>认证账号</th>
+            <th>发件人</th>
+            <th>安全方式</th>
+            <th>状态</th>
+            <th>排序</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for server in mail_servers %}
+            <tr>
+              <td>{{ server["server_name"] }}</td>
+              <td>
+                <strong>{{ server["host"] }}</strong><br>
+                <span class="helper">端口 {{ server["port"] }}</span>
+              </td>
+              <td>
+                {% if server["username"] %}
+                  {{ server["username"] }}
+                {% else %}
+                  <span class="helper">未启用认证</span>
+                {% endif %}
+              </td>
+              <td>{{ server["sender_display"] }}</td>
+              <td>{{ server["security_label"] }}</td>
+              <td>
+                {% if server["is_active"] == 1 %}
+                  <span class="tag tag-ok">已启用</span>
+                {% else %}
+                  <span class="tag tag-warn">已停用</span>
+                {% endif %}
+              </td>
+              <td>{{ server["sort_order"] }}</td>
+              <td>
+                <div class="subscription-actions">
+                  <form method="post" action="{{ url_for('admin_toggle_mail_server', mail_server_id=server['id']) }}" class="inline-form">
+                    {% if server["is_active"] == 1 %}
+                      <button type="submit">停用</button>
+                    {% else %}
+                      <button type="submit">启用</button>
+                    {% endif %}
+                  </form>
+                  <button
+                    type="button"
+                    class="btn secondary open-mail-server-edit-modal"
+                    data-update-url="{{ url_for('admin_update_mail_server', mail_server_id=server['id']) }}"
+                    data-delete-url="{{ url_for('admin_delete_mail_server', mail_server_id=server['id']) }}"
+                    data-server-name="{{ server['server_name'] }}"
+                    data-host="{{ server['host'] }}"
+                    data-port="{{ server['port'] }}"
+                    data-username="{{ server['username'] }}"
+                    data-from-email="{{ server['from_email'] }}"
+                    data-from-name="{{ server['from_name'] }}"
+                    data-security="{{ server['security'] }}"
+                    data-sort-order="{{ server['sort_order'] }}"
+                    data-is-active="{{ server['is_active'] }}"
+                  >编辑</button>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="helper">暂无邮件服务器，请点击右上角“新建邮件服务器”开始配置。</p>
+  {% endif %}
+</section>
+
+<div class="payment-modal" id="mail-server-create-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>新建邮件服务器</h4>
+      <button type="button" class="btn secondary modal-close-x" id="close-mail-server-create-modal">×</button>
+    </div>
+    <form method="post" action="{{ url_for('admin_create_mail_server') }}" class="form">
+      <label>服务器名称
+        <input type="text" name="server_name" placeholder="例如：QQ 邮箱 / 企业邮箱 / 本机 Postfix" required>
+      </label>
+      <label>SMTP 地址
+        <input type="text" name="host" placeholder="例如：smtp.qq.com" required>
+      </label>
+      <label>SMTP 端口
+        <input type="number" name="port" min="1" max="65535" value="587" required>
+      </label>
+      <label>安全方式
+        <select name="security">
+          {% for value, label in mail_security_choices %}
+            <option value="{{ value }}" {% if value == 'starttls' %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>SMTP 账号（可选）
+        <input type="text" name="username" placeholder="未启用认证时可留空">
+      </label>
+      <label>SMTP 密码（可选）
+        <input type="password" name="password" placeholder="未启用认证时可留空">
+      </label>
+      <label>发件邮箱
+        <input type="email" name="from_email" placeholder="例如：no-reply@example.com" required>
+      </label>
+      <label>发件人名称（可选）
+        <input type="text" name="from_name" placeholder="例如：VPN 门户">
+      </label>
+      <label>状态
+        <select name="is_active">
+          <option value="1" selected>保存后立即启用</option>
+          <option value="0">仅保存，暂不启用</option>
+        </select>
+      </label>
+      <label>排序
+        <input type="number" name="sort_order" min="0" step="1" value="100">
+      </label>
+      <p class="helper">如果需要 SMTP 登录认证，请同时填写账号和密码；如果是本机无认证中继，可两项都留空。</p>
+      <button type="submit">保存邮件服务器</button>
+    </form>
+  </div>
+</div>
+
+<div class="payment-modal" id="mail-server-edit-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>编辑邮件服务器</h4>
+      <button type="button" class="btn secondary modal-close-x" id="close-mail-server-edit-modal">×</button>
+    </div>
+    <form method="post" id="mail-server-edit-form" class="form">
+      <label>服务器名称
+        <input type="text" name="server_name" id="mail-server-edit-name" required>
+      </label>
+      <label>SMTP 地址
+        <input type="text" name="host" id="mail-server-edit-host" required>
+      </label>
+      <label>SMTP 端口
+        <input type="number" name="port" id="mail-server-edit-port" min="1" max="65535" required>
+      </label>
+      <label>安全方式
+        <select name="security" id="mail-server-edit-security">
+          {% for value, label in mail_security_choices %}
+            <option value="{{ value }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>SMTP 账号（可选）
+        <input type="text" name="username" id="mail-server-edit-username" placeholder="留空表示关闭认证">
+      </label>
+      <label>SMTP 密码（可选）
+        <input type="password" name="password" id="mail-server-edit-password" placeholder="留空则保持原密码；如账号留空则关闭认证">
+      </label>
+      <label>发件邮箱
+        <input type="email" name="from_email" id="mail-server-edit-from-email" required>
+      </label>
+      <label>发件人名称（可选）
+        <input type="text" name="from_name" id="mail-server-edit-from-name">
+      </label>
+      <label>状态
+        <select name="is_active" id="mail-server-edit-active">
+          <option value="1">启用</option>
+          <option value="0">停用</option>
+        </select>
+      </label>
+      <label>排序
+        <input type="number" name="sort_order" id="mail-server-edit-sort-order" min="0" step="1" value="100">
+      </label>
+      <div class="actions">
+        <button type="submit">保存修改</button>
+        <button type="button" class="danger" id="mail-server-delete-btn">删除邮件服务器</button>
+      </div>
+    </form>
+    <form method="post" id="mail-server-delete-form" class="inline-form" style="display:none;"></form>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var createOpenBtn = document.getElementById("open-mail-server-create-modal");
+    var createCloseBtn = document.getElementById("close-mail-server-create-modal");
+    var createModal = document.getElementById("mail-server-create-modal");
+
+    var editButtons = document.querySelectorAll(".open-mail-server-edit-modal");
+    var editModal = document.getElementById("mail-server-edit-modal");
+    var editCloseBtn = document.getElementById("close-mail-server-edit-modal");
+    var editForm = document.getElementById("mail-server-edit-form");
+    var editName = document.getElementById("mail-server-edit-name");
+    var editHost = document.getElementById("mail-server-edit-host");
+    var editPort = document.getElementById("mail-server-edit-port");
+    var editSecurity = document.getElementById("mail-server-edit-security");
+    var editUsername = document.getElementById("mail-server-edit-username");
+    var editPassword = document.getElementById("mail-server-edit-password");
+    var editFromEmail = document.getElementById("mail-server-edit-from-email");
+    var editFromName = document.getElementById("mail-server-edit-from-name");
+    var editActive = document.getElementById("mail-server-edit-active");
+    var editSortOrder = document.getElementById("mail-server-edit-sort-order");
+    var deleteBtn = document.getElementById("mail-server-delete-btn");
+    var deleteForm = document.getElementById("mail-server-delete-form");
+    var deleteTargetName = "";
+
+    function openModal(modal) {
+      if (!modal) return;
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal(modal) {
+      if (!modal) return;
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    function bindOverlayClose(modal) {
+      if (!modal) return;
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) {
+          closeModal(modal);
+        }
+      });
+    }
+
+    if (createOpenBtn) createOpenBtn.addEventListener("click", function () { openModal(createModal); });
+    if (createCloseBtn) createCloseBtn.addEventListener("click", function () { closeModal(createModal); });
+    bindOverlayClose(createModal);
+
+    if (editCloseBtn) editCloseBtn.addEventListener("click", function () { closeModal(editModal); });
+    bindOverlayClose(editModal);
+
+    editButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!editForm) return;
+        editForm.action = btn.dataset.updateUrl || "";
+        if (deleteForm) deleteForm.action = btn.dataset.deleteUrl || "";
+        if (editName) editName.value = btn.dataset.serverName || "";
+        if (editHost) editHost.value = btn.dataset.host || "";
+        if (editPort) editPort.value = btn.dataset.port || "587";
+        if (editSecurity) editSecurity.value = btn.dataset.security || "starttls";
+        if (editUsername) editUsername.value = btn.dataset.username || "";
+        if (editPassword) editPassword.value = "";
+        if (editFromEmail) editFromEmail.value = btn.dataset.fromEmail || "";
+        if (editFromName) editFromName.value = btn.dataset.fromName || "";
+        if (editActive) editActive.value = btn.dataset.isActive || "0";
+        if (editSortOrder) editSortOrder.value = btn.dataset.sortOrder || "100";
+        deleteTargetName = btn.dataset.serverName || "该邮件服务器";
+        openModal(editModal);
+      });
+    });
+
+    if (deleteBtn) {
+      deleteBtn.addEventListener("click", function () {
+        if (!deleteForm || !deleteForm.action) return;
+        if (confirm("确定删除邮件服务器“" + deleteTargetName + "”吗？此操作不可恢复。")) {
+          deleteForm.submit();
+        }
+      });
+    }
+  })();
+</script>
+{% endblock %}

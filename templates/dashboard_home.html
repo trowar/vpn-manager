@@ -10,6 +10,14 @@
     <p><strong>当前套餐：</strong>{{ current_plan_display }}</p>
     <p><strong>分配 IP：</strong>{{ assigned_ip_display }}</p>
     <p>
+      <strong>当前服务器：</strong>
+      {% if current_server %}
+        {{ current_server["display_name"] }} / {{ current_server["endpoint_host"] }}
+      {% else %}
+        暂未分配
+      {% endif %}
+    </p>
+    <p>
       <strong>订阅状态：</strong>
       {% if active %}
         <span class="tag tag-ok">已生效</span>
@@ -55,7 +63,7 @@
     <div class="actions">
       <a class="btn" href="{{ url_for('dashboard_plans') }}">查看套餐</a>
       <a class="btn secondary" href="{{ url_for('dashboard_orders') }}">订单管理</a>
-      <a class="btn secondary" href="{{ url_for('dashboard_config') }}">下载配置与使用说明</a>
+      <a class="btn secondary" href="{{ url_for('dashboard_config') }}">下载配置与切换节点</a>
     </div>
     {% if telegram_contact %}
       <p class="helper">技术支持（Telegram）：{{ telegram_contact }}</p>
