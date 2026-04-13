@@ -1365,15 +1365,18 @@ def resolve_host_web_upgrade_project_name() -> str:
     return normalized
 
 
-def build_host_web_upgrade_script() -> str:
+def build_host_web_upgrade_script(current_version: str) -> str:
     branch = shlex.quote(HOST_WEB_UPGRADE_BRANCH or "main")
     compose_project_name = shlex.quote(resolve_host_web_upgrade_project_name())
+    quoted_current_version = shlex.quote((current_version or "").strip() or "0")
     return textwrap.dedent(
         f"""
         set -eu
         LOG_FILE=/app/data/system-upgrade.log
         DB_PATH=/app/data/portal.db
         STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        TARGET_BRANCH={branch}
+        CURRENT_VERSION={quoted_current_version}
         COMPOSE_PROJECT_NAME={compose_project_name}
 
         log() {{
@@ -1434,10 +1437,48 @@ PY
         cd /workspace
         log "git fetch origin"
         git fetch origin
-        log "git checkout {branch}"
-        git checkout {branch}
-        log "git pull --ff-only origin {branch}"
-        git pull --ff-only origin {branch}
+        REMOTE_VERSION="$(git show "origin/$TARGET_BRANCH:VERSION" 2>/dev/null | head -n 1 | tr -d '\\r' || true)"
+        if [ -n "$REMOTE_VERSION" ]; then
+          log "版本检查: 当前=$CURRENT_VERSION, 远端=$REMOTE_VERSION"
+          if python3 - "$CURRENT_VERSION" "$REMOTE_VERSION" <<'PY'
+import re
+import sys
+
+current_raw = sys.argv[1]
+remote_raw = sys.argv[2]
+
+def parse_parts(raw: str) -> list[int]:
+    nums = [int(part) for part in re.findall(r"[0-9]+", (raw or "").strip())]
+    return nums or [0]
+
+def compare_parts(a: list[int], b: list[int]) -> int:
+    size = max(len(a), len(b))
+    for idx in range(size):
+        av = a[idx] if idx < len(a) else 0
+        bv = b[idx] if idx < len(b) else 0
+        if av != bv:
+            return 1 if av > bv else -1
+    return 0
+
+current_parts = parse_parts(current_raw)
+remote_parts = parse_parts(remote_raw)
+sys.exit(0 if compare_parts(remote_parts, current_parts) > 0 else 1)
+PY
+          then
+            log "检测到更高版本，继续执行升级"
+          else
+            log "远端版本未高于当前版本，跳过升级"
+            write_state "success" "远端版本($REMOTE_VERSION) 未高于当前版本($CURRENT_VERSION)，已跳过升级。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+            success=1
+            exit 0
+          fi
+        else
+          log "未读取到远端 VERSION，继续执行升级"
+        fi
+        log "git checkout $TARGET_BRANCH"
+        git checkout "$TARGET_BRANCH"
+        log "git pull --ff-only origin $TARGET_BRANCH"
+        git pull --ff-only origin "$TARGET_BRANCH"
         log "docker compose --project-name $COMPOSE_PROJECT_NAME build web"
         docker compose --project-name "$COMPOSE_PROJECT_NAME" build web
         log "docker compose --project-name $COMPOSE_PROJECT_NAME up -d --no-deps web"
@@ -1454,7 +1495,7 @@ def dispatch_host_web_upgrade() -> tuple[bool, str]:
         return False, "未检测到 Docker Socket，无法派发宿主机升级任务。"
     if not HOST_WEB_UPGRADE_PROJECT_DIR:
         return False, "未配置宿主机项目目录，无法升级。"
-    helper_script = build_host_web_upgrade_script()
+    helper_script = build_host_web_upgrade_script(get_current_app_version())
     args = [
         "docker",
         "run",
