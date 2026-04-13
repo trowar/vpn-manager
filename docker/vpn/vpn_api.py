@@ -14,6 +14,9 @@ WG_SERVER_PUBLIC_KEY_FILE = Path(
     os.environ.get("WG_SERVER_PUBLIC_KEY_FILE", "/srv/vpn-shared/server_public.key")
 )
 VPN_API_TOKEN = os.environ.get("VPN_API_TOKEN", "").strip()
+OPENVPN_SERVER_CONF = Path(
+    os.environ.get("OPENVPN_SERVER_CONF", "/etc/openvpn/server/server.conf")
+)
 OPENVPN_CA_CERT_FILE = Path(
     os.environ.get("OPENVPN_CA_CERT_FILE", "/etc/openvpn/server/ca.crt")
 )
