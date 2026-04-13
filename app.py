@@ -10642,10 +10642,14 @@ def admin_delete_mail_server(mail_server_id: int):
 @admin_required
 def admin_payment_settings():
     db = get_db()
+    reconcile_expired_subscriptions(db)
     plans = load_subscription_plans(db, active_only=False)
+    pending_orders = load_admin_pending_orders(db)
     return render_template(
         "admin_payment.html",
         plans=plans,
+        pending_orders=pending_orders,
+        usdt_explorer_link=usdt_explorer_link,
         admin_page="payment",
     )
 
@@ -11221,6 +11225,17 @@ def redirect_admin_subscriptions():
     if search_email:
         return redirect(url_for("admin_subscriptions", q=search_email))
     return redirect(url_for("admin_subscriptions"))
+
+
+def redirect_admin_order_page(default_page: str = "pending_orders"):
+    page = (request.values.get("redirect_to", "") or "").strip().lower()
+    if page == "payment":
+        return redirect(url_for("admin_payment_settings"))
+    if page == "pending_orders":
+        return redirect(url_for("admin_pending_orders"))
+    if default_page == "payment":
+        return redirect(url_for("admin_payment_settings"))
+    return redirect(url_for("admin_pending_orders"))
 
 
 @app.route("/admin/settings/system", methods=["POST"])
@@ -11989,10 +12004,10 @@ def admin_cancel_pending_order(order_id: int):
     ).fetchone()
     if not order:
         flash("未找到订单。", "error")
-        return redirect(url_for("admin_pending_orders"))
+        return redirect_admin_order_page()
     if (order["status"] or "").strip().lower() != "pending":
         flash("仅待处理订单可取消。", "error")
-        return redirect(url_for("admin_pending_orders"))
+        return redirect_admin_order_page()
 
     cancel_note = f"[管理员取消] {utcnow_iso()}"
     merged_note = cancel_note if not order["note"] else f"{order['note']}\n{cancel_note}"
@@ -12007,7 +12022,7 @@ def admin_cancel_pending_order(order_id: int):
     )
     db.commit()
     flash(f"订单 {order_id} 已取消。", "success")
-    return redirect(url_for("admin_pending_orders"))
+    return redirect_admin_order_page()
 
 
 @app.route("/admin/orders/<int:order_id>/mark-paid", methods=["POST"])
@@ -12037,7 +12052,7 @@ def admin_mark_order_paid(order_id: int):
         except Exception:
             pass
         flash(f"处理订单失败：{exc}", "error")
-    return redirect(url_for("admin_pending_orders"))
+    return redirect_admin_order_page()
 
 
 

@@ -79,6 +79,67 @@
   {% endif %}
 </section>
 
+<section class="card">
+  <h3>用户购买待确认（{{ pending_orders|length }}）</h3>
+  <p class="helper">用户下单后可在这里手动确认到账，确认后套餐会立即生效。</p>
+  {% if pending_orders %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
+          <tr>
+            <th>订单号</th>
+            <th>用户邮箱</th>
+            <th>套餐</th>
+            <th>金额</th>
+            <th>过期时间</th>
+            <th>网络</th>
+            <th>收款地址</th>
+            <th>TxHash</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for o in pending_orders %}
+            <tr>
+              <td>{{ o["id"] }}</td>
+              <td>{{ o["email"] }}</td>
+              <td>{{ o|fmt_order_plan }}</td>
+              <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
+              <td>{{ o["expires_at"]|fmt_utc }}</td>
+              <td>{{ o["usdt_network"] }}</td>
+              <td><code class="table-code-wrap">{{ o["pay_to_address"] }}</code></td>
+              <td>
+                {% if o["tx_hash"] %}
+                  <a href="{{ usdt_explorer_link(o['usdt_network'], o['tx_hash']) }}" target="_blank">{{ o["tx_hash"][:12] }}...</a>
+                {% else %}
+                  <span class="tag tag-warn">未提交</span>
+                {% endif %}
+              </td>
+              <td>
+                <form method="post" action="{{ url_for('admin_mark_order_paid', order_id=o['id']) }}" class="inline-form">
+                  <input type="hidden" name="redirect_to" value="payment">
+                  <button type="submit">确认已支付</button>
+                </form>
+                <form
+                  method="post"
+                  action="{{ url_for('admin_cancel_pending_order', order_id=o['id']) }}"
+                  class="inline-form"
+                  onsubmit="return confirm('确定取消该待处理订单吗？');"
+                >
+                  <input type="hidden" name="redirect_to" value="payment">
+                  <button type="submit" class="danger">取消订单</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="helper">暂无待确认订单。</p>
+  {% endif %}
+</section>
+
 <div class="payment-modal" id="plan-create-modal" hidden>
   <div class="payment-modal-card plan-create-modal-card">
     <div class="section-title-row">
