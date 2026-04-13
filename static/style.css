@@ -434,6 +434,24 @@ td {
   min-width: 170px;
 }
 
+.user-edit-modal-card {
+  width: min(560px, 100%);
+}
+
+.user-edit-modal-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.user-edit-modal-actions .form {
+  margin: 0;
+}
+
+.user-edit-modal-actions .admin-reset-password-input {
+  width: 100%;
+  min-width: 0;
+}
+
 .dashboard-shell {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);

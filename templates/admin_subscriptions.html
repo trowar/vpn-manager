@@ -81,61 +81,16 @@
                 {% if u["role"] == "admin" %}
                   <span class="helper">管理员账号，不可修改</span>
                 {% else %}
-                  <details class="subscription-edit-panel">
-                    <summary>编辑</summary>
-                    <div class="subscription-actions">
-                      <form
-                        method="post"
-                        action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
-                        class="expiry-form"
-                      >
-                        <input type="hidden" name="q" value="{{ search_email or '' }}">
-                        <input
-                          type="datetime-local"
-                          name="expires_at_local"
-                          value="{{ u['subscription_expires_at']|fmt_local_input }}"
-                          required
-                        >
-                        <button type="submit">保存期限</button>
-                      </form>
-                      <form
-                        method="post"
-                        action="{{ url_for('admin_disable_user', user_id=u['id']) }}"
-                        class="inline-form"
-                        onsubmit="return confirm('确定停用该用户吗？停用后将立刻断开 VPN。');"
-                      >
-                        <input type="hidden" name="q" value="{{ search_email or '' }}">
-                        <button type="submit">停用用户</button>
-                      </form>
-                      <form
-                        method="post"
-                        action="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
-                        class="inline-form"
-                        onsubmit="return confirm('确定重置该用户密码吗？重置后会断开其旧 VPN 会话。');"
-                      >
-                        <input type="hidden" name="q" value="{{ search_email or '' }}">
-                        <input
-                          type="password"
-                          class="admin-reset-password-input"
-                          name="new_password"
-                          placeholder="新密码（至少8位）"
-                          minlength="8"
-                          required
-                        >
-                        <button type="submit" class="btn secondary">重置密码</button>
-                      </form>
-                      <form
-                        method="post"
-                        action="{{ url_for('admin_delete_user', user_id=u['id']) }}"
-                        class="inline-form delete-user-form"
-                        data-user-email="{{ u['email'] }}"
-                      >
-                        <input type="hidden" name="q" value="{{ search_email or '' }}">
-                        <input type="hidden" name="confirm_email" value="">
-                        <button type="submit" class="danger">删除用户</button>
-                      </form>
-                    </div>
-                  </details>
+                  <button
+                    type="button"
+                    class="btn secondary open-user-edit-modal"
+                    data-user-email="{{ u['email'] }}"
+                    data-expires-local="{{ u['subscription_expires_at']|fmt_local_input }}"
+                    data-set-expiry-url="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
+                    data-disable-url="{{ url_for('admin_disable_user', user_id=u['id']) }}"
+                    data-reset-url="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
+                    data-delete-url="{{ url_for('admin_delete_user', user_id=u['id']) }}"
+                  >编辑</button>
                 {% endif %}
               </td>
             </tr>
@@ -154,12 +109,140 @@
   {% endif %}
 </section>
 
+<div class="payment-modal" id="user-edit-modal" hidden>
+  <div class="payment-modal-card user-edit-modal-card">
+    <div class="section-title-row">
+      <h4>编辑用户</h4>
+      <button type="button" class="btn secondary" id="close-user-edit-modal">关闭</button>
+    </div>
+    <p class="helper">当前用户：<strong id="user-edit-email">-</strong></p>
+
+    <div class="user-edit-modal-actions">
+      <form method="post" id="user-edit-expiry-form" class="form expiry-form">
+        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <label>保存期限
+          <input
+            type="datetime-local"
+            id="user-edit-expiry-input"
+            name="expires_at_local"
+            required
+          >
+        </label>
+        <button type="submit">保存期限</button>
+      </form>
+
+      <form
+        method="post"
+        id="user-edit-disable-form"
+        class="form"
+        onsubmit="return confirm('确定停用该用户吗？停用后将立刻断开 VPN。');"
+      >
+        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <button type="submit">停用用户</button>
+      </form>
+
+      <form
+        method="post"
+        id="user-edit-reset-form"
+        class="form"
+        onsubmit="return confirm('确定重置该用户密码吗？重置后会断开其旧 VPN 会话。');"
+      >
+        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <input
+          type="password"
+          class="admin-reset-password-input"
+          name="new_password"
+          placeholder="新密码（至少8位）"
+          minlength="8"
+          required
+        >
+        <button type="submit" class="btn secondary">重置密码</button>
+      </form>
+
+      <form method="post" id="user-edit-delete-form" class="form">
+        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <input type="hidden" name="confirm_email" value="">
+        <button type="submit" class="danger">删除用户</button>
+      </form>
+    </div>
+  </div>
+</div>
+
 <script>
   (function () {
-    var forms = document.querySelectorAll(".delete-user-form");
-    forms.forEach(function (form) {
-      form.addEventListener("submit", function (event) {
-        var expected = (form.dataset.userEmail || "").trim();
+    var editModal = document.getElementById("user-edit-modal");
+    var openButtons = document.querySelectorAll(".open-user-edit-modal");
+    var closeButton = document.getElementById("close-user-edit-modal");
+    var userEmailText = document.getElementById("user-edit-email");
+    var expiryForm = document.getElementById("user-edit-expiry-form");
+    var expiryInput = document.getElementById("user-edit-expiry-input");
+    var disableForm = document.getElementById("user-edit-disable-form");
+    var resetForm = document.getElementById("user-edit-reset-form");
+    var deleteForm = document.getElementById("user-edit-delete-form");
+
+    function openModal(modal) {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal(modal) {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    if (closeButton) {
+      closeButton.addEventListener("click", function () {
+        closeModal(editModal);
+      });
+    }
+
+    if (editModal) {
+      editModal.addEventListener("click", function (event) {
+        if (event.target === editModal) {
+          closeModal(editModal);
+        }
+      });
+    }
+
+    openButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var userEmail = (button.dataset.userEmail || "").trim();
+        if (userEmailText) {
+          userEmailText.textContent = userEmail || "-";
+        }
+        if (expiryForm) {
+          expiryForm.action = button.dataset.setExpiryUrl || "";
+        }
+        if (expiryInput) {
+          expiryInput.value = button.dataset.expiresLocal || "";
+        }
+        if (disableForm) {
+          disableForm.action = button.dataset.disableUrl || "";
+        }
+        if (resetForm) {
+          resetForm.action = button.dataset.resetUrl || "";
+        }
+        if (deleteForm) {
+          deleteForm.action = button.dataset.deleteUrl || "";
+          deleteForm.dataset.userEmail = userEmail;
+          var confirmEmailInput = deleteForm.querySelector("input[name='confirm_email']");
+          if (confirmEmailInput) {
+            confirmEmailInput.value = "";
+          }
+        }
+        openModal(editModal);
+      });
+    });
+
+    if (deleteForm) {
+      deleteForm.addEventListener("submit", function (event) {
+        var expected = (deleteForm.dataset.userEmail || "").trim();
         var entered = window.prompt("请输入该用户邮箱以确认删除：", "");
         if (!entered) {
           event.preventDefault();
@@ -171,12 +254,12 @@
           window.alert("邮箱不匹配，已取消删除。");
           return;
         }
-        var hidden = form.querySelector("input[name='confirm_email']");
+        var hidden = deleteForm.querySelector("input[name='confirm_email']");
         if (hidden) {
           hidden.value = entered.trim();
         }
       });
-    });
+    }
   })();
 </script>
 {% endblock %}
