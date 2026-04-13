@@ -145,21 +145,74 @@ install_base_deps() {
   exit 1
 }
 
+install_compose_standalone() {
+  local os arch version bin_url plugin_dir
+  os="linux"
+  version="${DOCKER_COMPOSE_VERSION:-v2.39.2}"
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *)
+      warn "Unsupported architecture for docker compose standalone install: ${arch}"
+      return 1
+      ;;
+  esac
+
+  bin_url="https://github.com/docker/compose/releases/download/${version}/docker-compose-${os}-${arch}"
+  log "Installing Docker Compose standalone (${version})"
+  retry_cmd 3 5 curl -fsSL "${bin_url}" -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+
+  plugin_dir="/usr/local/lib/docker/cli-plugins"
+  mkdir -p "${plugin_dir}"
+  cp /usr/local/bin/docker-compose "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
+  chmod +x "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
+  hash -r || true
+}
+
+ensure_docker_compose() {
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
+    return 0
+  fi
+
+  if has_cmd apt-get; then
+    retry_cmd 2 5 apt_cmd install -y docker-compose-plugin || true
+    if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
+      retry_cmd 2 5 apt_cmd install -y docker-compose-v2 || true
+    fi
+    if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
+      retry_cmd 2 5 apt_cmd install -y docker-compose || true
+    fi
+  elif has_cmd yum; then
+    retry_cmd 2 5 yum install -y docker-compose-plugin || true
+    if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
+      retry_cmd 2 5 yum install -y docker-compose || true
+    fi
+  fi
+
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
+    return 0
+  fi
+
+  install_compose_standalone || true
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
+    return 0
+  fi
+
+  err "Docker Compose not found."
+  return 1
+}
+
 install_docker() {
   if has_cmd docker; then
     log "Docker already installed"
   elif has_cmd apt-get; then
     log "Installing docker via apt"
     retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y docker.io
-    if ! retry_cmd 2 5 apt_cmd install -y docker-compose-plugin; then
-      retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y docker-compose
-    fi
   elif has_cmd yum; then
     log "Installing docker via yum"
     retry_cmd 3 5 yum install -y docker
-    if ! retry_cmd 2 5 yum install -y docker-compose-plugin; then
-      retry_cmd 3 5 yum install -y docker-compose
-    fi
   else
     err "Cannot install docker: unsupported package manager."
     exit 1
@@ -172,26 +225,7 @@ install_docker() {
     service docker start || true
   fi
 
-  if ! docker compose version >/dev/null 2>&1; then
-    log "Docker Compose v2 plugin not found; installing standalone plugin"
-    local os arch plugin_dir plugin_url
-    os="linux"
-    arch="$(uname -m)"
-    case "${arch}" in
-      x86_64|amd64) arch="x86_64" ;;
-      aarch64|arm64) arch="aarch64" ;;
-      *)
-        warn "Unsupported architecture for auto-install docker compose plugin: ${arch}"
-        ;;
-    esac
-    if [ "${arch}" = "x86_64" ] || [ "${arch}" = "aarch64" ]; then
-      plugin_dir="/usr/local/lib/docker/cli-plugins"
-      mkdir -p "${plugin_dir}"
-      plugin_url="https://github.com/docker/compose/releases/download/v2.39.2/docker-compose-${os}-${arch}"
-      retry_cmd 3 5 curl -fsSL "${plugin_url}" -o "${plugin_dir}/docker-compose"
-      chmod +x "${plugin_dir}/docker-compose"
-    fi
-  fi
+  ensure_docker_compose
 }
 
 compose_cmd() {

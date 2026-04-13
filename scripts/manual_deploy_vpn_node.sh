@@ -166,6 +166,56 @@ install_base_deps() {
   fi
 }
 
+install_compose_standalone() {
+  local os arch version bin_url plugin_dir
+  os="linux"
+  version="${DOCKER_COMPOSE_VERSION:-v2.39.2}"
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *)
+      warn "unsupported architecture for compose standalone install: ${arch}"
+      return 1
+      ;;
+  esac
+
+  bin_url="https://github.com/docker/compose/releases/download/${version}/docker-compose-${os}-${arch}"
+  log "安装 Docker Compose standalone (${version})"
+  retry_cmd 3 5 curl -fsSL "${bin_url}" -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+
+  plugin_dir="/usr/local/lib/docker/cli-plugins"
+  mkdir -p "${plugin_dir}"
+  cp /usr/local/bin/docker-compose "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
+  chmod +x "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
+  hash -r || true
+}
+
+ensure_docker_compose() {
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
+    return 0
+  fi
+
+  if [ "$PM" = "apt" ]; then
+    pkg_install docker-compose-plugin || pkg_install docker-compose-v2 || pkg_install docker-compose || true
+  else
+    pkg_install docker-compose-plugin || pkg_install docker-compose || true
+  fi
+
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
+    return 0
+  fi
+
+  install_compose_standalone || true
+  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
+    return 0
+  fi
+
+  err "Docker Compose 不可用"
+  return 1
+}
+
 install_docker() {
   if ! has_cmd docker; then
     log "安装 Docker"
@@ -193,18 +243,7 @@ install_docker() {
     service docker start || true
   fi
 
-  if ! docker compose version >/dev/null 2>&1; then
-    if [ "$PM" = "apt" ]; then
-      pkg_install docker-compose-plugin || pkg_install docker-compose-v2 || pkg_install docker-compose || true
-    else
-      pkg_install docker-compose-plugin || pkg_install docker-compose || true
-    fi
-  fi
-
-  if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
-    err "Docker Compose 不可用"
-    exit 1
-  fi
+  ensure_docker_compose
 }
 
 compose() {
