@@ -653,48 +653,47 @@ def get_openvpn_endpoint_host(
         except Exception:
             use_server = None
 
+    def prefer_public_host(candidate: str | None) -> str:
+        host = host_without_optional_port(candidate)
+        if not host:
+            return ""
+        if is_non_public_host(host):
+            return ""
+        return host
+
     if use_server is not None:
-        host = host_without_optional_port(normalize_remote_host(row_get(use_server, "host", "")))
-        if host and not is_non_public_host(host):
-            return host
+        preferred_host = prefer_public_host(
+            normalize_remote_host(row_get(use_server, "host", ""))
+        )
+        if preferred_host:
+            return preferred_host
+        preferred_domain = prefer_public_host(
+            normalize_domain_host(row_get(use_server, "domain", ""))
+        )
+        if preferred_domain:
+            return preferred_domain
 
-        domain = host_without_optional_port(normalize_domain_host(row_get(use_server, "domain", "")))
-        if domain:
-            if domain.startswith("[") and "]" in domain:
-                end = domain.find("]")
-                if end > 1:
-                    return domain[1:end]
-            if domain.count(":") == 1:
-                host_part, port_part = domain.rsplit(":", 1)
-                if host_part and port_part.isdigit():
-                    return host_part
-            return domain
+    preferred_portal_domain = prefer_public_host(get_portal_domain_setting())
+    if preferred_portal_domain:
+        return preferred_portal_domain
 
-    portal_domain = get_portal_domain_setting()
-    if portal_domain:
-        if portal_domain.startswith("["):
-            idx = portal_domain.find("]")
-            if idx > 1:
-                return portal_domain[1:idx]
-        if portal_domain.count(":") == 1:
-            host_part, port_part = portal_domain.rsplit(":", 1)
-            if host_part and port_part.isdigit():
-                return host_part
-        return portal_domain
-
-    if OPENVPN_ENDPOINT_HOST:
-        return OPENVPN_ENDPOINT_HOST
+    preferred_openvpn_host = prefer_public_host(OPENVPN_ENDPOINT_HOST)
+    if preferred_openvpn_host:
+        return preferred_openvpn_host
 
     wg_endpoint = (get_wireguard_endpoint_for_clients(user=user, server_row=server_row) or "").strip()
-    if not wg_endpoint:
-        return "127.0.0.1"
-    if wg_endpoint.startswith("["):
-        idx = wg_endpoint.find("]")
-        if idx > 1:
-            return wg_endpoint[1:idx]
-    if wg_endpoint.count(":") == 1:
-        return wg_endpoint.rsplit(":", 1)[0]
-    return wg_endpoint
+    preferred_wg_host = prefer_public_host(wg_endpoint)
+    if preferred_wg_host:
+        return preferred_wg_host
+
+    try:
+        preferred_request_host = prefer_public_host(request.host)
+        if preferred_request_host:
+            return preferred_request_host
+    except Exception:
+        pass
+
+    return ""
 
 
 def get_openvpn_route_lines() -> list[str]:
@@ -808,6 +807,8 @@ def build_openvpn_client_config(
                     row_get(resolved_server, "openvpn_port", OPENVPN_ENDPOINT_PORT),
                     OPENVPN_ENDPOINT_PORT,
                 )
+    if not remote_host or is_non_public_host(remote_host):
+        raise RuntimeError("未配置可用公网 OpenVPN 地址，请先设置服务器公网 IP 或域名。")
     lines = [
         "client",
         "dev tun",
@@ -1037,21 +1038,27 @@ def is_non_public_host(raw_host: str | None) -> bool:
 
 
 def get_relay_public_host() -> str:
-    if VPN_RELAY_PUBLIC_HOST:
-        explicit_host = host_without_optional_port(VPN_RELAY_PUBLIC_HOST)
-        if explicit_host:
-            return explicit_host
-    portal_domain = host_without_optional_port(get_portal_domain_setting())
+    def prefer_public_host(candidate: str | None) -> str:
+        host = host_without_optional_port(candidate)
+        if not host or is_non_public_host(host):
+            return ""
+        return host
+
+    explicit_host = prefer_public_host(VPN_RELAY_PUBLIC_HOST)
+    if explicit_host:
+        return explicit_host
+
+    portal_domain = prefer_public_host(get_portal_domain_setting())
     if portal_domain:
         return portal_domain
-    if OPENVPN_ENDPOINT_HOST:
-        ovpn_host = host_without_optional_port(OPENVPN_ENDPOINT_HOST)
-        if ovpn_host:
-            return ovpn_host
-    if WG_ENDPOINT:
-        wg_host = host_without_optional_port(WG_ENDPOINT)
-        if wg_host:
-            return wg_host
+
+    ovpn_host = prefer_public_host(OPENVPN_ENDPOINT_HOST)
+    if ovpn_host:
+        return ovpn_host
+
+    wg_host = prefer_public_host(WG_ENDPOINT)
+    if wg_host:
+        return wg_host
     try:
         host = host_without_optional_port(request.host)
         if host and not is_non_public_host(host):
