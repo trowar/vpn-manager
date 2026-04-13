@@ -633,7 +633,11 @@ def get_openvpn_endpoint_host(
             use_server = None
 
     if use_server is not None:
-        domain = normalize_domain_host(row_get(use_server, "domain", ""))
+        host = host_without_optional_port(normalize_remote_host(row_get(use_server, "host", "")))
+        if host:
+            return host
+
+        domain = host_without_optional_port(normalize_domain_host(row_get(use_server, "domain", "")))
         if domain:
             if domain.startswith("[") and "]" in domain:
                 end = domain.find("]")
@@ -644,10 +648,6 @@ def get_openvpn_endpoint_host(
                 if host_part and port_part.isdigit():
                     return host_part
             return domain
-
-        host = normalize_remote_host(row_get(use_server, "host", ""))
-        if host:
-            return host
 
     portal_domain = get_portal_domain_setting()
     if portal_domain:
@@ -747,17 +747,40 @@ def build_openvpn_client_config(
         server_row=server_row,
     )
 
-    relay_endpoint = get_openvpn_relay_endpoint(user)
-    if relay_endpoint is not None:
-        remote_host, remote_port = relay_endpoint
-    else:
-        remote_host = get_openvpn_endpoint_host(user=user, server_row=server_row)
-        remote_port = OPENVPN_ENDPOINT_PORT
-        if server_row is not None:
-            remote_port = normalize_server_port(
-                row_get(server_row, "openvpn_port", OPENVPN_ENDPOINT_PORT),
-                OPENVPN_ENDPOINT_PORT,
-            )
+    resolved_server = server_row
+    if resolved_server is None and user is not None:
+        try:
+            db = get_db()
+            resolved_server = get_persisted_runtime_server_for_account(db, user)
+        except Exception:
+            resolved_server = None
+
+    remote_host = ""
+    remote_port = OPENVPN_ENDPOINT_PORT
+    if resolved_server is not None:
+        candidate_host = host_without_optional_port(
+            normalize_remote_host(row_get(resolved_server, "host", ""))
+        )
+        candidate_port = normalize_server_port(
+            row_get(resolved_server, "openvpn_port", OPENVPN_ENDPOINT_PORT),
+            OPENVPN_ENDPOINT_PORT,
+        )
+        # 用户输入了公网服务器地址时，客户端配置优先直连该地址，避免被反向代理/内网地址覆盖。
+        if candidate_host and not is_non_public_host(candidate_host):
+            remote_host = candidate_host
+            remote_port = candidate_port
+
+    if not remote_host:
+        relay_endpoint = get_openvpn_relay_endpoint(user)
+        if relay_endpoint is not None:
+            remote_host, remote_port = relay_endpoint
+        else:
+            remote_host = get_openvpn_endpoint_host(user=user, server_row=server_row)
+            if resolved_server is not None:
+                remote_port = normalize_server_port(
+                    row_get(resolved_server, "openvpn_port", OPENVPN_ENDPOINT_PORT),
+                    OPENVPN_ENDPOINT_PORT,
+                )
     lines = [
         "client",
         "dev tun",
@@ -956,26 +979,55 @@ def format_sender_display(from_name: str | None, from_email: str | None) -> str:
     return sender_email or "-"
 
 
+def host_without_optional_port(raw_host: str | None) -> str:
+    host = normalize_domain_host(raw_host)
+    if not host:
+        return ""
+    if host.startswith("[") and "]" in host:
+        end = host.find("]")
+        if end > 1:
+            return host[1:end]
+    if host.count(":") == 1:
+        host_part, port_part = host.rsplit(":", 1)
+        if host_part and port_part.isdigit():
+            return host_part
+    return host
+
+
+def is_non_public_host(raw_host: str | None) -> bool:
+    host = host_without_optional_port(raw_host).strip().lower().rstrip(".")
+    if not host:
+        return False
+    if host in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
+
+
 def get_relay_public_host() -> str:
     if VPN_RELAY_PUBLIC_HOST:
-        return normalize_domain_host(VPN_RELAY_PUBLIC_HOST)
+        explicit_host = host_without_optional_port(VPN_RELAY_PUBLIC_HOST)
+        if explicit_host:
+            return explicit_host
+    portal_domain = host_without_optional_port(get_portal_domain_setting())
+    if portal_domain:
+        return portal_domain
+    if OPENVPN_ENDPOINT_HOST:
+        ovpn_host = host_without_optional_port(OPENVPN_ENDPOINT_HOST)
+        if ovpn_host:
+            return ovpn_host
+    if WG_ENDPOINT:
+        wg_host = host_without_optional_port(WG_ENDPOINT)
+        if wg_host:
+            return wg_host
     try:
-        host = normalize_domain_host(request.host)
-        if host:
+        host = host_without_optional_port(request.host)
+        if host and not is_non_public_host(host):
             return host
     except Exception:
         pass
-    portal_domain = get_portal_domain_setting()
-    if portal_domain:
-        return portal_domain
-    if WG_ENDPOINT:
-        wg_host = normalize_domain_host(WG_ENDPOINT.rsplit(":", 1)[0] if WG_ENDPOINT.count(":") == 1 else WG_ENDPOINT)
-        if wg_host:
-            return wg_host
-    if OPENVPN_ENDPOINT_HOST:
-        ovpn_host = normalize_domain_host(OPENVPN_ENDPOINT_HOST)
-        if ovpn_host:
-            return ovpn_host
     return ""
 
 
