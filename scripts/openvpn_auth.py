@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 import os
+import re
 import sqlite3
-import subprocess
 import sys
 from datetime import datetime, timezone
 
-from werkzeug.security import check_password_hash
 
-
-DB_PATH = os.environ.get("PORTAL_DB_PATH", "/opt/vpn-portal/data/portal.db")
-WG_INTERFACE = os.environ.get("WG_INTERFACE", "wg0")
-OPENVPN_STATUS_FILE = os.environ.get("OPENVPN_STATUS_FILE", "/tmp/openvpn-status.log")
+DB_PATH = os.environ.get("PORTAL_DB_PATH", "/app/data/portal.db")
 SETTING_OPENVPN_OPEN = "openvpn_open"
-SESSION_REJECT_MESSAGE = "已有连接未断开，请稍后再试"
-WG_ACTIVE_HANDSHAKE_SECONDS_RAW = os.environ.get(
-    "VPN_SINGLE_SESSION_WG_HANDSHAKE_SECONDS", "180"
-).strip()
-try:
-    WG_ACTIVE_HANDSHAKE_SECONDS = max(5, int(WG_ACTIVE_HANDSHAKE_SECONDS_RAW or 180))
-except ValueError:
-    WG_ACTIVE_HANDSHAKE_SECONDS = 180
+OPENVPN_COMMON_NAME_PREFIX = os.environ.get("OPENVPN_COMMON_NAME_PREFIX", "vpn-user-").strip()
 
 
 def parse_iso(value: str | None):
     if not value:
         return None
-    dt = datetime.fromisoformat(value)
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
@@ -42,109 +34,46 @@ def is_active_subscription(row: sqlite3.Row) -> bool:
     return quota > 0 and used < quota
 
 
-def normalize_identity(value: str | None) -> str:
-    return (value or "").strip().lower()
-
-
-def load_credentials(auth_file: str) -> tuple[str, str]:
-    with open(auth_file, "r", encoding="utf-8") as f:
-        lines = f.read().splitlines()
-    if len(lines) < 2:
-        return "", ""
-    username = (lines[0] or "").strip()
-    password = lines[1] or ""
-    return username, password
-
-
-def parse_openvpn_active_identities(status_file: str) -> set[str]:
-    if not status_file or not os.path.exists(status_file):
-        return set()
-    identities: set[str] = set()
-    in_client_section = False
+def parse_user_id_from_common_name(common_name: str) -> int | None:
+    value = (common_name or "").strip()
+    if not value:
+        return None
+    pattern = rf"{re.escape(OPENVPN_COMMON_NAME_PREFIX)}(\d+)"
+    match = re.fullmatch(pattern, value)
+    if not match:
+        return None
     try:
-        with open(status_file, "r", encoding="utf-8", errors="ignore") as f:
-            for raw in f:
-                line = (raw or "").strip()
-                if not line:
-                    continue
-
-                # status-version 2/3 csv lines
-                if line.startswith("CLIENT_LIST,"):
-                    parts = line.split(",")
-                    if len(parts) > 1:
-                        candidate = normalize_identity(parts[1])
-                        if candidate and candidate != "common name":
-                            identities.add(candidate)
-                    continue
-
-                # status-version 1 section markers
-                if line.startswith("Common Name,"):
-                    in_client_section = True
-                    continue
-                if line.startswith("ROUTING TABLE") or line.startswith("GLOBAL STATS"):
-                    in_client_section = False
-                    continue
-                if in_client_section and "," in line:
-                    candidate = normalize_identity(line.split(",", 1)[0])
-                    if candidate and candidate != "common name":
-                        identities.add(candidate)
+        user_id = int(match.group(1))
     except Exception:
-        return set()
-    return identities
+        return None
+    return user_id if user_id > 0 else None
 
 
-def is_wireguard_session_active(public_key: str | None) -> bool:
-    key = (public_key or "").strip()
-    if not key:
-        return False
-    try:
-        completed = subprocess.run(
-            ["wg", "show", WG_INTERFACE, "dump"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return False
-    if completed.returncode != 0:
-        return False
-
-    dump = completed.stdout or ""
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    for raw_line in dump.splitlines()[1:]:
-        parts = raw_line.split("\t")
-        if len(parts) < 7:
-            continue
-        if parts[0].strip() != key:
-            continue
-        endpoint = (parts[2] or "").strip() if len(parts) > 2 else ""
-        try:
-            latest_handshake = int(parts[4])
-        except Exception:
-            latest_handshake = 0
-        if not endpoint or latest_handshake <= 0:
-            return False
-        if now_ts - latest_handshake <= max(5, WG_ACTIVE_HANDSHAKE_SECONDS):
-            return True
-        return False
-    return False
+def parse_common_name_from_subject(subject: str) -> str:
+    value = (subject or "").strip()
+    if not value:
+        return ""
+    # Supports formats like '/CN=vpn-user-1/...' or 'CN=vpn-user-1,...'
+    match = re.search(r"(?:^|/|,)CN\s*=\s*([^,/]+)", value)
+    if not match:
+        return ""
+    return (match.group(1) or "").strip()
 
 
-def has_conflicting_active_session(row: sqlite3.Row) -> bool:
-    username = normalize_identity(row["username"])
-    email = normalize_identity(row["email"])
-    active_identities = parse_openvpn_active_identities(OPENVPN_STATUS_FILE)
-    if username and username in active_identities:
-        return True
-    if email and email in active_identities:
-        return True
-    if is_wireguard_session_active(row["client_public_key"]):
-        return True
-    return False
+def load_common_name_from_tls_verify(argv: list[str]) -> tuple[str, bool]:
+    if len(argv) < 3:
+        return "", False
+    depth = (argv[1] or "").strip()
+    subject = argv[2] or ""
+    if depth and depth != "0":
+        return "", True
+    return parse_common_name_from_subject(subject), True
 
 
-def authenticate(username: str, password: str) -> bool:
-    if not username or not password:
+def authenticate_common_name(common_name: str) -> bool:
+    user_id = parse_user_id_from_common_name(common_name)
+    if user_id is None:
+        print(f"[openvpn-auth] invalid common name: {common_name}", file=sys.stderr, flush=True)
         return False
 
     conn = sqlite3.connect(DB_PATH)
@@ -162,35 +91,43 @@ def authenticate(username: str, password: str) -> bool:
         if setting_row is not None:
             raw_setting = (setting_row["setting_value"] or "").strip().lower()
             if raw_setting in {"0", "false", "off", "no"}:
+                print("[openvpn-auth] openvpn disabled by setting", file=sys.stderr, flush=True)
                 return False
+
         row = conn.execute(
             """
             SELECT
-                email,
-                username,
-                password_hash,
+                id,
                 role,
-                client_public_key,
-                subscription_expires_at,
                 wg_enabled,
+                subscription_expires_at,
                 traffic_quota_bytes,
-                traffic_used_bytes
+                traffic_used_bytes,
+                openvpn_common_name
             FROM users
-            WHERE (email = ? OR username = ?) AND role IN ('user', 'admin')
+            WHERE id = ?
             LIMIT 1
             """,
-            (username.lower(), username),
+            (user_id,),
         ).fetchone()
         if not row:
+            print(f"[openvpn-auth] user not found for id={user_id}", file=sys.stderr, flush=True)
             return False
-        if not check_password_hash(row["password_hash"], password):
+
+        stored_common_name = (row["openvpn_common_name"] or "").strip()
+        if stored_common_name and stored_common_name != common_name:
+            print(
+                f"[openvpn-auth] common name mismatch: expected={stored_common_name} got={common_name}",
+                file=sys.stderr,
+                flush=True,
+            )
             return False
-        if (row["role"] or "").strip().lower() == "admin":
+
+        role = (row["role"] or "").strip().lower()
+        if role == "admin":
             return True
         if not is_active_subscription(row):
-            return False
-        if has_conflicting_active_session(row):
-            print(f"[openvpn-auth] {SESSION_REJECT_MESSAGE}", file=sys.stderr, flush=True)
+            print(f"[openvpn-auth] inactive subscription for user id={user_id}", file=sys.stderr, flush=True)
             return False
         return True
     finally:
@@ -198,11 +135,12 @@ def authenticate(username: str, password: str) -> bool:
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
-        return 1
-    auth_file = sys.argv[1]
-    username, password = load_credentials(auth_file)
-    return 0 if authenticate(username, password) else 1
+    common_name, known_mode = load_common_name_from_tls_verify(sys.argv)
+    if known_mode:
+        if not common_name:
+            return 1
+        return 0 if authenticate_common_name(common_name) else 1
+    return 1
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ import paramiko
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, x25519
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from flask import (
     Flask,
     Response,
@@ -143,6 +143,26 @@ OPENVPN_PROTO = os.environ.get("OPENVPN_PROTO", "udp").strip().lower() or "udp"
 OPENVPN_CLIENT_DNS = os.environ.get("OPENVPN_CLIENT_DNS", WG_CLIENT_DNS).strip()
 OPENVPN_CIPHER = os.environ.get("OPENVPN_CIPHER", "AES-256-GCM").strip() or "AES-256-GCM"
 OPENVPN_AUTH = os.environ.get("OPENVPN_AUTH", "SHA256").strip() or "SHA256"
+OPENVPN_CLIENT_CERT_VALID_DAYS_RAW = os.environ.get(
+    "OPENVPN_CLIENT_CERT_VALID_DAYS",
+    "3650",
+).strip()
+try:
+    OPENVPN_CLIENT_CERT_VALID_DAYS = max(30, int(OPENVPN_CLIENT_CERT_VALID_DAYS_RAW or 3650))
+except ValueError:
+    OPENVPN_CLIENT_CERT_VALID_DAYS = 3650
+OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS_RAW = os.environ.get(
+    "OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS",
+    "30",
+).strip()
+try:
+    OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS = max(
+        1,
+        int(OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS_RAW or 30),
+    )
+except ValueError:
+    OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS = 30
+OPENVPN_COMMON_NAME_PREFIX = "vpn-user-"
 OPENVPN_CA_CERT_FILE = Path(
     os.environ.get("OPENVPN_CA_CERT_FILE", "/etc/openvpn/server/ca.crt")
 )
@@ -747,6 +767,12 @@ def build_openvpn_client_config(
         user=user,
         server_row=server_row,
     )
+    if user is None:
+        raise RuntimeError("OpenVPN 配置生成需要用户上下文。")
+    client_cert_text = (row_get(user, "openvpn_client_cert", "") or "").strip()
+    client_key_text = (row_get(user, "openvpn_client_key", "") or "").strip()
+    if not client_cert_text or not client_key_text:
+        raise RuntimeError("用户 OpenVPN 证书不存在，请先重新下载配置生成证书。")
 
     resolved_server = server_row
     if resolved_server is None and user is not None:
@@ -791,13 +817,10 @@ def build_openvpn_client_config(
         "nobind",
         "persist-key",
         "persist-tun",
-        "auth-user-pass",
-        "auth-nocache",
         "remote-cert-tls server",
         f"cipher {OPENVPN_CIPHER}",
         f"auth {OPENVPN_AUTH}",
         "verb 3",
-        f"setenv PORTAL_USER {safe_name(username)}",
     ]
     if OPENVPN_PROTO == "udp":
         lines.append("explicit-exit-notify 1")
@@ -809,6 +832,12 @@ def build_openvpn_client_config(
     lines.append("<ca>")
     lines.append(ca_text)
     lines.append("</ca>")
+    lines.append("<cert>")
+    lines.append(client_cert_text)
+    lines.append("</cert>")
+    lines.append("<key>")
+    lines.append(client_key_text)
+    lines.append("</key>")
     if tls_crypt_text:
         lines.append("<tls-crypt>")
         lines.append(tls_crypt_text)
@@ -1256,6 +1285,195 @@ def ensure_shared_openvpn_materials() -> dict[str, str]:
     for key, path in required_files.items():
         path.write_text(materials[key].strip() + "\n", encoding="utf-8")
     return materials
+
+
+def build_openvpn_common_name(user: sqlite3.Row) -> str:
+    user_id = int(row_get(user, "id", 0) or 0)
+    if user_id <= 0:
+        raise RuntimeError("无法为用户生成 OpenVPN 身份。")
+    return f"{OPENVPN_COMMON_NAME_PREFIX}{user_id}"
+
+
+def parse_openvpn_user_id_from_common_name(common_name: str | None) -> int | None:
+    value = (common_name or "").strip()
+    if not value:
+        return None
+    match = re.fullmatch(rf"{re.escape(OPENVPN_COMMON_NAME_PREFIX)}(\d+)", value)
+    if not match:
+        return None
+    try:
+        user_id = int(match.group(1))
+    except Exception:
+        return None
+    return user_id if user_id > 0 else None
+
+
+def certificate_not_valid_before_utc(cert: x509.Certificate) -> datetime:
+    value = getattr(cert, "not_valid_before_utc", None)
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc)
+    value = cert.not_valid_before
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def certificate_not_valid_after_utc(cert: x509.Certificate) -> datetime:
+    value = getattr(cert, "not_valid_after_utc", None)
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc)
+    value = cert.not_valid_after
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def should_rotate_openvpn_client_identity(
+    *,
+    common_name: str,
+    cert_text: str,
+    key_text: str,
+) -> bool:
+    cert_raw = (cert_text or "").strip()
+    key_raw = (key_text or "").strip()
+    if not cert_raw or not key_raw:
+        return True
+    try:
+        cert = x509.load_pem_x509_certificate(cert_raw.encode("utf-8"))
+        private_key = serialization.load_pem_private_key(
+            key_raw.encode("utf-8"),
+            password=None,
+        )
+    except Exception:
+        return True
+    try:
+        subject_cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+    except Exception:
+        return True
+    if (subject_cn or "").strip() != common_name:
+        return True
+    now = utcnow()
+    if certificate_not_valid_before_utc(cert) > now + timedelta(minutes=5):
+        return True
+    renew_before = now + timedelta(days=max(1, OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS))
+    if certificate_not_valid_after_utc(cert) <= renew_before:
+        return True
+    try:
+        cert_public_bytes = cert.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        key_public_bytes = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    except Exception:
+        return True
+    return cert_public_bytes != key_public_bytes
+
+
+def issue_openvpn_client_identity(common_name: str) -> dict[str, str]:
+    materials = ensure_shared_openvpn_materials()
+    ca_key = serialization.load_pem_private_key(
+        materials["ca_key"].encode("utf-8"),
+        password=None,
+    )
+    ca_cert = x509.load_pem_x509_certificate(materials["ca_cert"].encode("utf-8"))
+    client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = utcnow()
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "vpn-manager-client"),
+        ]
+    )
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=OPENVPN_CLIENT_CERT_VALID_DAYS))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(private_key=ca_key, algorithm=hashes.SHA256())
+    )
+    return {
+        "openvpn_common_name": common_name,
+        "openvpn_client_cert": cert.public_bytes(serialization.Encoding.PEM)
+        .decode("utf-8")
+        .strip(),
+        "openvpn_client_key": client_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        .decode("utf-8")
+        .strip(),
+    }
+
+
+def ensure_user_openvpn_client_identity(
+    db: sqlite3.Connection,
+    user: sqlite3.Row,
+) -> sqlite3.Row:
+    common_name = build_openvpn_common_name(user)
+    cert_text = (row_get(user, "openvpn_client_cert", "") or "").strip()
+    key_text = (row_get(user, "openvpn_client_key", "") or "").strip()
+    stored_common_name = (row_get(user, "openvpn_common_name", "") or "").strip()
+    needs_rotate = stored_common_name != common_name or should_rotate_openvpn_client_identity(
+        common_name=common_name,
+        cert_text=cert_text,
+        key_text=key_text,
+    )
+    if needs_rotate:
+        bundle = issue_openvpn_client_identity(common_name)
+        db.execute(
+            """
+            UPDATE users
+            SET openvpn_common_name = ?,
+                openvpn_client_cert = ?,
+                openvpn_client_key = ?
+            WHERE id = ?
+            """,
+            (
+                bundle["openvpn_common_name"],
+                bundle["openvpn_client_cert"],
+                bundle["openvpn_client_key"],
+                int(user["id"]),
+            ),
+        )
+        refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+        if not refreshed:
+            raise RuntimeError("OpenVPN 证书更新后用户不存在。")
+        return refreshed
+    if not stored_common_name:
+        db.execute(
+            "UPDATE users SET openvpn_common_name = ? WHERE id = ?",
+            (common_name, int(user["id"])),
+        )
+        refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+        if refreshed:
+            return refreshed
+    return user
 
 
 def ensure_shared_vpn_server_materials() -> dict[str, str]:
@@ -4671,6 +4889,9 @@ def init_db() -> None:
             client_private_key TEXT,
             client_public_key TEXT,
             client_psk TEXT,
+            openvpn_common_name TEXT,
+            openvpn_client_cert TEXT,
+            openvpn_client_key TEXT,
             config_path TEXT,
             qr_path TEXT,
             created_at TEXT NOT NULL,
@@ -4915,6 +5136,13 @@ def init_db() -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_openvpn_ingress_port ON users(openvpn_ingress_port) WHERE openvpn_ingress_port IS NOT NULL"
     )
     db.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_openvpn_common_name
+        ON users(openvpn_common_name)
+        WHERE openvpn_common_name IS NOT NULL AND trim(openvpn_common_name) <> ''
+        """
+    )
+    db.execute(
         "CREATE INDEX IF NOT EXISTS idx_orders_user_status ON payment_orders(user_id, status)"
     )
     db.execute(
@@ -4997,6 +5225,12 @@ def migrate_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE users ADD COLUMN wg_ingress_port INTEGER")
     if "openvpn_ingress_port" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN openvpn_ingress_port INTEGER")
+    if "openvpn_common_name" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN openvpn_common_name TEXT")
+    if "openvpn_client_cert" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN openvpn_client_cert TEXT")
+    if "openvpn_client_key" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN openvpn_client_key TEXT")
     if "session_version" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
 
@@ -11999,6 +12233,7 @@ def download_openvpn_config():
     try:
         vpn_data = ensure_user_vpn_ready(db, user)
         user = persist_user_vpn_state(db, user, vpn_data)
+        user = ensure_user_openvpn_client_identity(db, user)
         db.commit()
         config_text = build_openvpn_client_config(
             user["username"],
@@ -12035,6 +12270,8 @@ def admin_download_openvpn_config():
     normalized_mode = normalize_wg_profile_mode(requested_mode)
     try:
         admin, _ = ensure_admin_self_vpn_profile(db, admin)
+        admin = ensure_user_openvpn_client_identity(db, admin)
+        db.commit()
         config_text = build_openvpn_client_config(
             admin["username"],
             profile_mode=normalized_mode,

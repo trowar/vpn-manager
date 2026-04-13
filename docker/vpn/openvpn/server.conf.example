@@ -24,9 +24,9 @@ user nobody
 group nogroup
 
 script-security 3
-auth-user-pass-verify "/usr/local/bin/python /opt/vpn-service/openvpn_auth.py" via-file
-username-as-common-name
-verify-client-cert none
+verify-client-cert require
+tls-verify "/usr/local/bin/python /opt/vpn-service/openvpn_auth.py"
+management 127.0.0.1 7505
 
 push "redirect-gateway def1"
 push "dhcp-option DNS 10.8.0.1"
