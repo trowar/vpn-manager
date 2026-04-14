@@ -4681,6 +4681,25 @@ def build_vpn_node_deploy_script(
         export NEEDRESTART_MODE=a
 
         log() {{ echo "[deploy] $1"; }}
+        retry_cmd() {{
+          local retries="$1"
+          local delay="$2"
+          shift 2
+
+          local attempt=1
+          while true; do
+            if "$@"; then
+              return 0
+            fi
+            local code=$?
+            if [ "$attempt" -ge "$retries" ]; then
+              return "$code"
+            fi
+            log "命令失败 (exit=$code)，${{delay}}s 后重试 ${{attempt}}/${{retries}}: $*"
+            attempt=$((attempt + 1))
+            sleep "$delay"
+          done
+        }}
 
         PM=""
         if command -v apt-get >/dev/null 2>&1; then
@@ -4934,7 +4953,14 @@ VPN_ENABLE_DNSMASQ=1
 VPN_ENABLE_OPENVPN=1
 EOF
 
-        compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpnmanager-server >/dev/null
+        export COMPOSE_BAKE=0
+        export DOCKER_BUILDKIT=1
+        export COMPOSE_HTTP_TIMEOUT=300
+        export DOCKER_CLIENT_TIMEOUT=300
+
+        retry_cmd 5 8 docker pull python:3.12-slim >/dev/null 2>&1 || log "预拉取 python:3.12-slim 失败，继续构建"
+        retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server >/dev/null
+        retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server >/dev/null
         compose -f docker-compose.vpn-node.yml --env-file .env ps
         log "completed"
         """

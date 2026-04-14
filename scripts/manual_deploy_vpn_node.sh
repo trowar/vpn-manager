@@ -53,11 +53,10 @@ retry_cmd() {
 
   local attempt=1
   while true; do
-    "$@"
-    local code=$?
-    if [ "$code" -eq 0 ]; then
+    if "$@"; then
       return 0
     fi
+    local code=$?
     if [ "$attempt" -ge "$retries" ]; then
       return "$code"
     fi
@@ -397,7 +396,14 @@ EOF
 }
 
 start_vpn_service() {
-  compose -f docker-compose.vpn-node.yml --env-file .env up -d --build vpnmanager-server
+  export COMPOSE_BAKE=0
+  export DOCKER_BUILDKIT=1
+  export COMPOSE_HTTP_TIMEOUT=300
+  export DOCKER_CLIENT_TIMEOUT=300
+
+  retry_cmd 5 8 docker pull python:3.12-slim >/dev/null 2>&1 || warn "预拉取 python:3.12-slim 失败，继续构建"
+  retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server
+  retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server
 }
 
 print_summary() {
