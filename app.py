@@ -235,6 +235,18 @@ except ValueError:
     SESSION_IDLE_TIMEOUT_MINUTES = 30
 SESSION_IDLE_TIMEOUT_SECONDS = SESSION_IDLE_TIMEOUT_MINUTES * 60
 SESSION_LAST_ACTIVITY_KEY = "last_activity_ts"
+SSH_CONNECT_MAX_RETRIES_RAW = os.environ.get("PORTAL_SSH_CONNECT_MAX_RETRIES", "3").strip()
+try:
+    SSH_CONNECT_MAX_RETRIES = max(1, int(SSH_CONNECT_MAX_RETRIES_RAW))
+except ValueError:
+    SSH_CONNECT_MAX_RETRIES = 3
+SSH_CONNECT_RETRY_DELAY_SECONDS_RAW = os.environ.get(
+    "PORTAL_SSH_CONNECT_RETRY_DELAY_SECONDS", "2"
+).strip()
+try:
+    SSH_CONNECT_RETRY_DELAY_SECONDS = max(0.0, float(SSH_CONNECT_RETRY_DELAY_SECONDS_RAW))
+except ValueError:
+    SSH_CONNECT_RETRY_DELAY_SECONDS = 2.0
 REGISTER_COOLDOWN_SECONDS = 5 * 60
 EMAIL_CODE_TTL_MINUTES = 10
 EMAIL_CODE_RESEND_SECONDS = 60
@@ -4293,6 +4305,54 @@ def load_ssh_private_key(private_key_text: str) -> paramiko.PKey:
     raise ValueError(f"私钥格式无效：{last_error}")
 
 
+def is_ssh_auth_error(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (
+            paramiko.AuthenticationException,
+            paramiko.BadAuthenticationType,
+            paramiko.PasswordRequiredException,
+        ),
+    )
+
+
+def connect_ssh_with_retry(
+    client: paramiko.SSHClient,
+    *,
+    host: str,
+    port: int,
+    username: str,
+    timeout: int,
+    password: str | None = None,
+    pkey: paramiko.PKey | None = None,
+) -> None:
+    last_exc: Exception | None = None
+    for attempt in range(1, SSH_CONNECT_MAX_RETRIES + 1):
+        try:
+            client.connect(
+                hostname=host,
+                port=port,
+                username=username,
+                password=password,
+                pkey=pkey,
+                timeout=timeout,
+                auth_timeout=timeout,
+                banner_timeout=timeout,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            return
+        except Exception as exc:
+            last_exc = exc
+            if is_ssh_auth_error(exc) or attempt >= SSH_CONNECT_MAX_RETRIES:
+                break
+            if SSH_CONNECT_RETRY_DELAY_SECONDS > 0:
+                time.sleep(SSH_CONNECT_RETRY_DELAY_SECONDS)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("SSH connection failed")
+
+
 def open_ssh_client(
     host: str,
     port: int,
@@ -4318,16 +4378,13 @@ def open_ssh_client(
         else:
             client = _new_client()
             try:
-                client.connect(
-                    hostname=host,
+                connect_ssh_with_retry(
+                    client,
+                    host=host,
                     port=port,
                     username=username,
                     pkey=private_key,
                     timeout=timeout,
-                    auth_timeout=timeout,
-                    banner_timeout=timeout,
-                    look_for_keys=False,
-                    allow_agent=False,
                 )
                 return client
             except Exception as exc:
@@ -4337,16 +4394,13 @@ def open_ssh_client(
     if password:
         client = _new_client()
         try:
-            client.connect(
-                hostname=host,
+            connect_ssh_with_retry(
+                client,
+                host=host,
                 port=port,
                 username=username,
                 password=password,
                 timeout=timeout,
-                auth_timeout=timeout,
-                banner_timeout=timeout,
-                look_for_keys=False,
-                allow_agent=False,
             )
             return client
         except Exception as exc:
