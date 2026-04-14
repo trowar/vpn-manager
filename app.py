@@ -4934,23 +4934,15 @@ EOF
         chmod 600 "$OVPN_DIR/server.key" "$OVPN_DIR/tls-crypt.key"
 
         PORT_IN_USE=0
-        ACTUAL_DNS_PORT={dns_port}
+        ACTUAL_DNS_PORT=53
         if command -v ss >/dev/null 2>&1; then
           if ss -H -lnut "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null | grep -q .; then
             PORT_IN_USE=1
           fi
         fi
         if [ "$PORT_IN_USE" -eq 1 ]; then
-          for candidate in 5353 1053 2053 3053; do
-            if command -v ss >/dev/null 2>&1; then
-              if ss -H -lnut "( sport = :$candidate )" 2>/dev/null | grep -q .; then
-                continue
-              fi
-            fi
-            ACTUAL_DNS_PORT="$candidate"
-            break
-          done
-          log "DNS 端口 {dns_port} 已占用，回退到 $ACTUAL_DNS_PORT"
+          log "DNS port 53 is already in use. Please free port 53 and retry."
+          exit 1
         fi
 
         cat > .env <<EOF
@@ -4966,7 +4958,8 @@ VPN_ENABLE_OPENVPN=1
 EOF
 
         export COMPOSE_BAKE=0
-        export DOCKER_BUILDKIT=1
+        export DOCKER_BUILDKIT=0
+        export COMPOSE_DOCKER_CLI_BUILD=0
         export COMPOSE_HTTP_TIMEOUT=300
         export DOCKER_CLIENT_TIMEOUT=300
 
