@@ -225,6 +225,16 @@ WG_PROFILE_MODES = (WG_PROFILE_SMART, WG_PROFILE_GLOBAL)
 PAYMENT_METHOD_USDT = "usdt"
 PAYMENT_METHOD_CHOICES = (PAYMENT_METHOD_USDT,)
 BYTES_PER_GB = 1024 * 1024 * 1024
+SESSION_IDLE_TIMEOUT_MINUTES_RAW = os.environ.get(
+    "PORTAL_SESSION_IDLE_TIMEOUT_MINUTES",
+    "30",
+).strip()
+try:
+    SESSION_IDLE_TIMEOUT_MINUTES = max(1, int(SESSION_IDLE_TIMEOUT_MINUTES_RAW))
+except ValueError:
+    SESSION_IDLE_TIMEOUT_MINUTES = 30
+SESSION_IDLE_TIMEOUT_SECONDS = SESSION_IDLE_TIMEOUT_MINUTES * 60
+SESSION_LAST_ACTIVITY_KEY = "last_activity_ts"
 REGISTER_COOLDOWN_SECONDS = 5 * 60
 EMAIL_CODE_TTL_MINUTES = 10
 EMAIL_CODE_RESEND_SECONDS = 60
@@ -5961,6 +5971,7 @@ def login_user_session(user) -> None:
     session.clear()
     session["user_id"] = user["id"]
     session["session_version"] = int(row_get(user, "session_version", 1) or 1)
+    session[SESSION_LAST_ACTIVITY_KEY] = int(time.time())
 
 
 def user_api_payload(user) -> dict:
@@ -5991,6 +6002,39 @@ def inject_user():
         "telegram_contact": str(system_settings["telegram_contact"]),
         "site_title": str(system_settings["site_title"]),
     }
+
+
+@app.before_request
+def enforce_session_idle_timeout():
+    endpoint = request.endpoint or ""
+    if endpoint == "static":
+        return None
+
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+
+    now_ts = int(time.time())
+    last_activity_raw = session.get(SESSION_LAST_ACTIVITY_KEY)
+    last_activity_ts = 0
+    if last_activity_raw is not None:
+        try:
+            last_activity_ts = int(last_activity_raw)
+        except Exception:
+            last_activity_ts = 0
+
+    if (
+        last_activity_ts > 0
+        and now_ts - last_activity_ts >= SESSION_IDLE_TIMEOUT_SECONDS
+    ):
+        session.clear()
+        if request.path.startswith("/api/"):
+            return {"ok": False, "error": "session_expired"}, 401
+        flash("会话超时，请重新登录。", "error")
+        return redirect(url_for("login"))
+
+    session[SESSION_LAST_ACTIVITY_KEY] = now_ts
+    return None
 
 
 @app.before_request
