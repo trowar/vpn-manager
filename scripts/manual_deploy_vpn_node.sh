@@ -269,13 +269,13 @@ PY
 setup_repo() {
   if [ -d "${APP_DIR}/.git" ]; then
     log "更新代码：${APP_DIR}"
-    retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C "$5" remote set-url origin "$u" >/dev/null 2>&1 || true; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 -C "$5" fetch --depth 1 origin "$6" && exit 0; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
+    retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C "$5" remote set-url origin "$u" >/dev/null 2>&1 || true; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C "$5" fetch --depth 1 origin "$6" && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C "$5" fetch --depth 1 origin "$6" && exit 0; fi; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
     retry_cmd 4 8 git -C "${APP_DIR}" checkout -f "${BRANCH}"
     retry_cmd 4 8 git -C "${APP_DIR}" reset --hard "origin/${BRANCH}"
   else
     log "拉取代码到：${APP_DIR}"
     rm -rf "${APP_DIR}"
-    retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf "$5"; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
+    retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf "$5"; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; fi; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
   fi
 }
 

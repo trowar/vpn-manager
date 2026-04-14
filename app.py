@@ -4849,10 +4849,10 @@ def build_vpn_node_deploy_script(
         if [ ! -d /opt/vpn-node/.git ]; then
           log "拉取 GitHub 仓库（全新克隆）"
           rm -rf /opt/vpn-node
-          retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf /opt/vpn-node; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 clone --depth 1 --branch main "$u" /opt/vpn-node && exit 0; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
+          retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf /opt/vpn-node; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch main "$u" /opt/vpn-node && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch main "$u" /opt/vpn-node && exit 0; fi; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
         else
           log "更新 GitHub 仓库（origin/main）"
-          retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C /opt/vpn-node remote set-url origin "$u" >/dev/null 2>&1 || true; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 -C /opt/vpn-node fetch --depth 1 origin main && exit 0; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
+          retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C /opt/vpn-node remote set-url origin "$u" >/dev/null 2>&1 || true; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C /opt/vpn-node fetch --depth 1 origin main && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C /opt/vpn-node fetch --depth 1 origin main && exit 0; fi; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
           retry_cmd 4 8 git -C /opt/vpn-node checkout -f main || \
           retry_cmd 4 8 git -C /opt/vpn-node checkout -B main origin/main
           retry_cmd 4 8 git -C /opt/vpn-node reset --hard origin/main
@@ -5042,7 +5042,7 @@ def deploy_vpn_node_server(
             private_key_text=private_key_text,
             timeout=12,
         )
-        stdin, stdout, stderr = client.exec_command("bash -s", timeout=2400)
+        stdin, stdout, stderr = client.exec_command("bash -s", timeout=900)
         stdin.write(script)
         stdin.channel.shutdown_write()
         out = stdout.read().decode("utf-8", errors="ignore")
