@@ -4849,10 +4849,10 @@ def build_vpn_node_deploy_script(
         if [ ! -d /opt/vpn-node/.git ]; then
           log "拉取 GitHub 仓库（全新克隆）"
           rm -rf /opt/vpn-node
-          retry_cmd 4 8 git clone --depth 1 https://github.com/trowar/vpn-manager.git /opt/vpn-node
+          retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf /opt/vpn-node; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 clone --depth 1 --branch main "$u" /opt/vpn-node && exit 0; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
         else
           log "更新 GitHub 仓库（origin/main）"
-          retry_cmd 4 8 git -C /opt/vpn-node fetch --depth 1 origin main
+          retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C /opt/vpn-node remote set-url origin "$u" >/dev/null 2>&1 || true; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 -C /opt/vpn-node fetch --depth 1 origin main && exit 0; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
           retry_cmd 4 8 git -C /opt/vpn-node checkout -f main || \
           retry_cmd 4 8 git -C /opt/vpn-node checkout -B main origin/main
           retry_cmd 4 8 git -C /opt/vpn-node reset --hard origin/main
@@ -4975,7 +4975,7 @@ EOF
         export DOCKER_CLIENT_TIMEOUT=300
 
         log "启动 Docker Compose 构建与部署"
-        retry_cmd 5 8 docker pull python:3.12-slim >/dev/null 2>&1 || log "预拉取 python:3.12-slim 失败，继续构建"
+        retry_cmd 5 8 docker pull docker.m.daocloud.io/library/python:3.12-slim >/dev/null 2>&1 || log "Pre-pull failed, continuing with build."
         retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server
         retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server
         compose -f docker-compose.vpn-node.yml --env-file .env ps

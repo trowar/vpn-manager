@@ -269,13 +269,13 @@ PY
 setup_repo() {
   if [ -d "${APP_DIR}/.git" ]; then
     log "更新代码：${APP_DIR}"
-    retry_cmd 4 8 git -C "${APP_DIR}" fetch --depth 1 origin "${BRANCH}"
+    retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C "$5" remote set-url origin "$u" >/dev/null 2>&1 || true; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 -C "$5" fetch --depth 1 origin "$6" && exit 0; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
     retry_cmd 4 8 git -C "${APP_DIR}" checkout -f "${BRANCH}"
     retry_cmd 4 8 git -C "${APP_DIR}" reset --hard "origin/${BRANCH}"
   else
     log "拉取代码到：${APP_DIR}"
     rm -rf "${APP_DIR}"
-    retry_cmd 4 8 git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${APP_DIR}"
+    retry_cmd 4 8 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf "$5"; git -c http.connectTimeout=20 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
   fi
 }
 
@@ -406,7 +406,7 @@ start_vpn_service() {
   export COMPOSE_HTTP_TIMEOUT=300
   export DOCKER_CLIENT_TIMEOUT=300
 
-  retry_cmd 5 8 docker pull python:3.12-slim >/dev/null 2>&1 || warn "预拉取 python:3.12-slim 失败，继续构建"
+  retry_cmd 5 8 docker pull docker.m.daocloud.io/library/python:3.12-slim >/dev/null 2>&1 || warn "Pre-pull failed, continuing with build"
   retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server
   retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server
 }
