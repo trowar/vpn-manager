@@ -887,9 +887,6 @@ def read_required_text(path: Path, label: str) -> str:
 def get_openvpn_client_materials(
     *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
 ) -> tuple[str, str]:
-    if VPN_RELAY_ENABLED and user is not None and row_get(user, "role") == "user":
-        shared = ensure_shared_openvpn_materials()
-        return shared["ca_cert"], shared["tls_crypt_key"]
     if use_vpn_api(user=user, server_row=server_row):
         result = vpn_api_request(
             "GET",
@@ -955,16 +952,15 @@ def build_openvpn_client_config(
             remote_port = candidate_port
 
     if not remote_host:
-        relay_endpoint = get_openvpn_relay_endpoint(user)
-        if relay_endpoint is not None:
-            remote_host, remote_port = relay_endpoint
-        else:
-            remote_host = get_openvpn_endpoint_host(user=user, server_row=server_row)
-            if resolved_server is not None:
-                remote_port = normalize_server_port(
-                    row_get(resolved_server, "openvpn_port", OPENVPN_ENDPOINT_PORT),
-                    OPENVPN_ENDPOINT_PORT,
-                )
+        remote_host = get_openvpn_endpoint_host(
+            user=user,
+            server_row=resolved_server or server_row,
+        )
+        if resolved_server is not None:
+            remote_port = normalize_server_port(
+                row_get(resolved_server, "openvpn_port", OPENVPN_ENDPOINT_PORT),
+                OPENVPN_ENDPOINT_PORT,
+            )
     if not remote_host or is_non_public_host(remote_host):
         raise RuntimeError("未配置可用公网 OpenVPN 地址，请先设置服务器公网 IP 或域名。")
     lines = [
@@ -6462,13 +6458,6 @@ def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]
 def get_wireguard_server_public_key(
     *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
 ) -> str:
-    if (
-        VPN_RELAY_ENABLED
-        and user is not None
-        and row_get(user, "role") == "user"
-        and server_row is None
-    ):
-        return ensure_shared_wireguard_materials()[1]
     if use_vpn_api(user=user, server_row=server_row):
         result = vpn_api_request(
             "GET",
@@ -6664,14 +6653,12 @@ def build_client_config(
     resolved_allowed_ips = (allowed_ips or get_client_allowed_ips()).strip()
     if not resolved_allowed_ips:
         raise RuntimeError("WireGuard AllowedIPs 为空，无法生成配置。")
-    # Prefer the user's currently selected runtime node endpoint.
-    # Relay is only used as a fallback when no direct endpoint is available.
+    # Always use direct endpoint from the selected runtime node.
     direct_endpoint = (endpoint or "").strip() or get_wireguard_endpoint_for_clients(
         user=user,
         server_row=server_row,
     )
-    relay_endpoint = get_wireguard_relay_endpoint(user)
-    resolved_endpoint = direct_endpoint or relay_endpoint
+    resolved_endpoint = direct_endpoint
     if not resolved_endpoint:
         raise RuntimeError("WireGuard Endpoint 为空，无法生成配置。")
     return "\n".join(
