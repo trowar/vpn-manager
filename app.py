@@ -4687,11 +4687,13 @@ def build_vpn_node_deploy_script(
           shift 2
 
           local attempt=1
+          local code=0
           while true; do
-            if "$@"; then
+            code=0
+            "$@" || code=$?
+            if [ "$code" -eq 0 ]; then
               return 0
             fi
-            local code=$?
             if [ "$attempt" -ge "$retries" ]; then
               return "$code"
             fi
@@ -4699,6 +4701,14 @@ def build_vpn_node_deploy_script(
             attempt=$((attempt + 1))
             sleep "$delay"
           done
+        }}
+
+        apt_cmd() {{
+          DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get \
+            -o DPkg::Lock::Timeout=600 \
+            -o Acquire::Retries=3 \
+            -o Dpkg::Use-Pty=0 \
+            "$@"
         }}
 
         PM=""
@@ -4719,11 +4729,11 @@ def build_vpn_node_deploy_script(
             return 0
           fi
           if [ "$PM" = "apt" ]; then
-            DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 update -y -qq >/dev/null
+            retry_cmd 5 8 apt_cmd update
           elif [ "$PM" = "dnf" ]; then
-            dnf -y -q makecache >/dev/null || true
+            retry_cmd 4 6 dnf -y -q makecache
           else
-            yum -y -q makecache >/dev/null || true
+            retry_cmd 4 6 yum -y -q makecache
           fi
           PKG_CACHE_READY=1
         }}
@@ -4732,11 +4742,11 @@ def build_vpn_node_deploy_script(
           log "升级系统组件（$PM）"
           if [ "$PM" = "apt" ]; then
             pkg_update
-            DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 upgrade -y -qq >/dev/null || DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 dist-upgrade -y -qq >/dev/null
+            retry_cmd 5 8 apt_cmd upgrade -y || retry_cmd 5 8 apt_cmd dist-upgrade -y
           elif [ "$PM" = "dnf" ]; then
-            dnf -y -q upgrade --refresh >/dev/null || dnf -y -q update >/dev/null
+            retry_cmd 4 8 dnf -y -q upgrade --refresh || retry_cmd 4 8 dnf -y -q update
           else
-            yum -y -q update >/dev/null
+            retry_cmd 4 8 yum -y -q update
           fi
         }}
 
@@ -4746,11 +4756,11 @@ def build_vpn_node_deploy_script(
           fi
           pkg_update
           if [ "$PM" = "apt" ]; then
-            DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get -o Dpkg::Use-Pty=0 install -y -qq --no-install-recommends "$@" >/dev/null
+            retry_cmd 5 8 apt_cmd install -y --no-install-recommends "$@"
           elif [ "$PM" = "dnf" ]; then
-            dnf -y -q install "$@" >/dev/null
+            retry_cmd 4 6 dnf -y -q install "$@"
           else
-            yum -y -q install "$@" >/dev/null
+            retry_cmd 4 6 yum -y -q install "$@"
           fi
         }}
 
@@ -4837,13 +4847,15 @@ def build_vpn_node_deploy_script(
         fi
 
         if [ ! -d /opt/vpn-node/.git ]; then
+          log "拉取 GitHub 仓库（全新克隆）"
           rm -rf /opt/vpn-node
-          git clone --depth 1 https://github.com/trowar/vpn-manager.git /opt/vpn-node >/dev/null 2>&1
+          retry_cmd 4 8 git clone --depth 1 https://github.com/trowar/vpn-manager.git /opt/vpn-node
         else
-          git -C /opt/vpn-node fetch --depth 1 origin main >/dev/null 2>&1
-          git -C /opt/vpn-node checkout -f main >/dev/null 2>&1 || \
-          git -C /opt/vpn-node checkout -B main origin/main >/dev/null 2>&1
-          git -C /opt/vpn-node reset --hard origin/main >/dev/null 2>&1
+          log "更新 GitHub 仓库（origin/main）"
+          retry_cmd 4 8 git -C /opt/vpn-node fetch --depth 1 origin main
+          retry_cmd 4 8 git -C /opt/vpn-node checkout -f main || \
+          retry_cmd 4 8 git -C /opt/vpn-node checkout -B main origin/main
+          retry_cmd 4 8 git -C /opt/vpn-node reset --hard origin/main
         fi
 
         cd /opt/vpn-node
@@ -4958,9 +4970,10 @@ EOF
         export COMPOSE_HTTP_TIMEOUT=300
         export DOCKER_CLIENT_TIMEOUT=300
 
+        log "启动 Docker Compose 构建与部署"
         retry_cmd 5 8 docker pull python:3.12-slim >/dev/null 2>&1 || log "预拉取 python:3.12-slim 失败，继续构建"
-        retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server >/dev/null
-        retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server >/dev/null
+        retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server
+        retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server
         compose -f docker-compose.vpn-node.yml --env-file .env ps
         log "completed"
         """

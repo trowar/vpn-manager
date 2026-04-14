@@ -52,11 +52,13 @@ retry_cmd() {
   shift 2
 
   local attempt=1
+  local code=0
   while true; do
-    if "$@"; then
+    code=0
+    "$@" || code=$?
+    if [ "$code" -eq 0 ]; then
       return 0
     fi
-    local code=$?
     if [ "$attempt" -ge "$retries" ]; then
       return "$code"
     fi
@@ -267,13 +269,13 @@ PY
 setup_repo() {
   if [ -d "${APP_DIR}/.git" ]; then
     log "更新代码：${APP_DIR}"
-    git -C "${APP_DIR}" fetch --depth 1 origin "${BRANCH}"
-    git -C "${APP_DIR}" checkout -f "${BRANCH}"
-    git -C "${APP_DIR}" reset --hard "origin/${BRANCH}"
+    retry_cmd 4 8 git -C "${APP_DIR}" fetch --depth 1 origin "${BRANCH}"
+    retry_cmd 4 8 git -C "${APP_DIR}" checkout -f "${BRANCH}"
+    retry_cmd 4 8 git -C "${APP_DIR}" reset --hard "origin/${BRANCH}"
   else
     log "拉取代码到：${APP_DIR}"
     rm -rf "${APP_DIR}"
-    git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${APP_DIR}"
+    retry_cmd 4 8 git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${APP_DIR}"
   fi
 }
 
