@@ -6462,7 +6462,12 @@ def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]
 def get_wireguard_server_public_key(
     *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
 ) -> str:
-    if VPN_RELAY_ENABLED and user is not None and row_get(user, "role") == "user":
+    if (
+        VPN_RELAY_ENABLED
+        and user is not None
+        and row_get(user, "role") == "user"
+        and server_row is None
+    ):
         return ensure_shared_wireguard_materials()[1]
     if use_vpn_api(user=user, server_row=server_row):
         result = vpn_api_request(
@@ -6659,10 +6664,16 @@ def build_client_config(
     resolved_allowed_ips = (allowed_ips or get_client_allowed_ips()).strip()
     if not resolved_allowed_ips:
         raise RuntimeError("WireGuard AllowedIPs 为空，无法生成配置。")
-    relay_endpoint = get_wireguard_relay_endpoint(user)
-    resolved_endpoint = (endpoint or "").strip() or relay_endpoint or get_wireguard_endpoint_for_clients(
-        user=user, server_row=server_row
+    # Prefer the user's currently selected runtime node endpoint.
+    # Relay is only used as a fallback when no direct endpoint is available.
+    direct_endpoint = (endpoint or "").strip() or get_wireguard_endpoint_for_clients(
+        user=user,
+        server_row=server_row,
     )
+    relay_endpoint = get_wireguard_relay_endpoint(user)
+    resolved_endpoint = direct_endpoint or relay_endpoint
+    if not resolved_endpoint:
+        raise RuntimeError("WireGuard Endpoint 为空，无法生成配置。")
     return "\n".join(
         [
             "[Interface]",
