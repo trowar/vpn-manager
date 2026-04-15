@@ -9564,6 +9564,11 @@ def load_admin_online_users(
                 server_row = servers_by_id.get(int(assigned_server_id))
             except Exception:
                 server_row = None
+        if server_row is None:
+            try:
+                server_row = get_persisted_runtime_server_for_account(db, user)
+            except Exception:
+                server_row = None
 
         if server_row is not None:
             source_key = f"server:{int(server_row['id'])}"
@@ -11257,7 +11262,7 @@ def admin_set_default_server():
     ).fetchone()
 
     try:
-        admin, _ = ensure_admin_self_vpn_profile(db, admin)
+        admin, _ = ensure_admin_self_vpn_profile(db, admin, force_prepare=True)
         build_user_wireguard_config(admin, profile_mode=WG_PROFILE_GLOBAL)
         db.commit()
     except Exception as exc:
@@ -13164,7 +13169,7 @@ def admin_download_config():
 
     requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
     try:
-        admin, _ = ensure_admin_self_vpn_profile(db, admin)
+        admin, _ = ensure_admin_self_vpn_profile(db, admin, force_prepare=True)
         config_text, normalized_mode = build_user_wireguard_config(
             admin,
             profile_mode=requested_mode,

@@ -13,6 +13,8 @@ VPN_ENABLE_OPENVPN="${VPN_ENABLE_OPENVPN:-1}"
 VPN_ENABLE_DNSMASQ="${VPN_ENABLE_DNSMASQ:-1}"
 OPENVPN_MANAGEMENT_HOST="${OPENVPN_MANAGEMENT_HOST:-127.0.0.1}"
 OPENVPN_MANAGEMENT_PORT="${OPENVPN_MANAGEMENT_PORT:-7505}"
+WG_NETWORK_CIDR="${WG_NETWORK_CIDR:-10.7.0.0/24}"
+OPENVPN_NETWORK_CIDR="${OPENVPN_NETWORK_CIDR:-10.8.0.0/24}"
 
 ensure_openvpn_cert_auth_mode() {
   local conf_file="$1"
@@ -40,6 +42,45 @@ ensure_openvpn_cert_auth_mode() {
   echo "management ${OPENVPN_MANAGEMENT_HOST} ${OPENVPN_MANAGEMENT_PORT}" >> "${conf_file}"
 }
 
+detect_uplink_interface() {
+  local iface
+  iface="$(ip -o route show default 2>/dev/null | awk 'NR==1 {print $5}')"
+  if [[ -z "${iface}" ]]; then
+    iface="eth0"
+  fi
+  printf '%s' "${iface}"
+}
+
+ensure_iptables_rule() {
+  local table="$1"
+  shift
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "[vpn] warning: iptables not found, skip rule in table ${table}: $*"
+    return
+  fi
+  if iptables -t "${table}" -C "$@" >/dev/null 2>&1; then
+    return
+  fi
+  iptables -t "${table}" -A "$@" >/dev/null 2>&1 || \
+    echo "[vpn] warning: failed to add iptables ${table} rule: $*"
+}
+
+ensure_vpn_nat_rules() {
+  local uplink_if
+  uplink_if="$(detect_uplink_interface)"
+  if [[ -z "${uplink_if}" ]]; then
+    echo "[vpn] warning: uplink interface not found, skip NAT setup"
+    return
+  fi
+  echo "[vpn] ensuring NAT rules via ${uplink_if} (WG=${WG_NETWORK_CIDR}, OVPN=${OPENVPN_NETWORK_CIDR})"
+  ensure_iptables_rule filter FORWARD -s "${WG_NETWORK_CIDR}" -j ACCEPT
+  ensure_iptables_rule filter FORWARD -d "${WG_NETWORK_CIDR}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  ensure_iptables_rule nat POSTROUTING -s "${WG_NETWORK_CIDR}" -o "${uplink_if}" -j MASQUERADE
+  ensure_iptables_rule filter FORWARD -s "${OPENVPN_NETWORK_CIDR}" -j ACCEPT
+  ensure_iptables_rule filter FORWARD -d "${OPENVPN_NETWORK_CIDR}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  ensure_iptables_rule nat POSTROUTING -s "${OPENVPN_NETWORK_CIDR}" -o "${uplink_if}" -j MASQUERADE
+}
+
 echo "[vpn] booting vpn service container..."
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
@@ -56,6 +97,8 @@ if [[ "${VPN_ENABLE_WIREGUARD}" == "1" ]]; then
     echo "[vpn] warning: missing wireguard config ${WG_CONF_PATH}"
   fi
 fi
+
+ensure_vpn_nat_rules
 
 mkdir -p "$(dirname "${WG_SERVER_PUBLIC_KEY_FILE}")"
 if wg show "${WG_INTERFACE}" >/dev/null 2>&1; then
