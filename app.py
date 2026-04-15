@@ -4985,25 +4985,22 @@ EOF
         echo "{openvpn_tls_crypt_key_b64}" | base64 -d > "$OVPN_DIR/tls-crypt.key"
         chmod 600 "$OVPN_DIR/server.key" "$OVPN_DIR/tls-crypt.key"
 
-        ACTUAL_DNS_PORT=53
+        ACTUAL_DNS_PORT=5353
         if command -v ss >/dev/null 2>&1; then
-          if ss -H -lnut "( sport = :53 )" 2>/dev/null | grep -q .; then
-            if ss -H -lnptu "( sport = :53 )" 2>/dev/null | grep -q "systemd-resolved"; then
-              log "Detected systemd-resolved on port 53, disabling DNS stub listener."
-              mkdir -p /etc/systemd/resolved.conf.d
-              cat > /etc/systemd/resolved.conf.d/99-vpnmanager-dns.conf <<'EOF'
-[Resolve]
-DNSStubListener=no
-EOF
-              if command -v systemctl >/dev/null 2>&1; then
-                systemctl restart systemd-resolved >/dev/null 2>&1 || true
+          if ss -H -lnut "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null | grep -q .; then
+            log "DNS port $ACTUAL_DNS_PORT is in use, trying fallback ports."
+            for candidate in 1053 2053 3053 4053; do
+              if ss -H -lnut "( sport = :$candidate )" 2>/dev/null | grep -q .; then
+                continue
               fi
-              sleep 1
-            fi
+              ACTUAL_DNS_PORT="$candidate"
+              log "Using DNS fallback port $ACTUAL_DNS_PORT."
+              break
+            done
           fi
-          if ss -H -lnut "( sport = :53 )" 2>/dev/null | grep -q .; then
-            log "DNS port 53 is already in use. Please free port 53 and retry."
-            ss -H -lnptu "( sport = :53 )" 2>/dev/null || true
+          if ss -H -lnut "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null | grep -q .; then
+            log "No available DNS port found (tried 5353/1053/2053/3053/4053)."
+            ss -H -lnptu "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null || true
             exit 1
           fi
         fi

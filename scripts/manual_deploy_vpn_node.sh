@@ -12,7 +12,7 @@ BRANCH="${BRANCH:-main}"
 
 WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-51820}"
 OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-1194}"
-DNS_PUBLIC_PORT="53"
+DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-5353}"
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 VPN_API_TOKEN="${VPN_API_TOKEN:-}"
 
@@ -21,7 +21,7 @@ APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
 APT_RETRY_DELAY_SECONDS="${APT_RETRY_DELAY_SECONDS:-8}"
 
 PM=""
-ACTUAL_DNS_PORT="53"
+ACTUAL_DNS_PORT="${DNS_PUBLIC_PORT}"
 
 log() {
   echo "[manual-deploy] $*"
@@ -364,19 +364,26 @@ EOF
 }
 
 pick_dns_port_if_needed() {
-  ACTUAL_DNS_PORT="53"
+  ACTUAL_DNS_PORT="${DNS_PUBLIC_PORT}"
   if has_cmd ss; then
     if ss -H -lnut "( sport = :${ACTUAL_DNS_PORT} )" 2>/dev/null | grep -q .; then
-      err "DNS 端口 53 已被占用，请先释放 53 端口后重试"
-      exit 1
-      for candidate in 5353 1053 2053 3053; do
+      warn "DNS port ${ACTUAL_DNS_PORT} is in use, trying fallback ports."
+      for candidate in 5353 1053 2053 3053 4053; do
+        if [ "${candidate}" = "${ACTUAL_DNS_PORT}" ]; then
+          continue
+        fi
         if ss -H -lnut "( sport = :${candidate} )" 2>/dev/null | grep -q .; then
           continue
         fi
         ACTUAL_DNS_PORT="${candidate}"
-        warn "DNS 端口 ${DNS_PUBLIC_PORT} 已占用，自动改用 ${ACTUAL_DNS_PORT}"
+        log "Using DNS fallback port ${ACTUAL_DNS_PORT}."
         break
       done
+    fi
+    if ss -H -lnut "( sport = :${ACTUAL_DNS_PORT} )" 2>/dev/null | grep -q .; then
+      err "No available DNS port found (tried ${DNS_PUBLIC_PORT}, 5353, 1053, 2053, 3053, 4053)."
+      ss -H -lnptu "( sport = :${ACTUAL_DNS_PORT} )" 2>/dev/null || true
+      exit 1
     fi
   fi
 }
@@ -391,7 +398,7 @@ VPN_API_TOKEN=${VPN_API_TOKEN}
 WG_INTERFACE=wg0
 WG_PUBLIC_PORT=${WG_PUBLIC_PORT}
 OPENVPN_PUBLIC_PORT=${OPENVPN_PUBLIC_PORT}
-DNS_PUBLIC_PORT=53
+DNS_PUBLIC_PORT=${ACTUAL_DNS_PORT}
 VPN_API_PUBLIC_PORT=${VPN_API_PUBLIC_PORT}
 VPN_ENABLE_WIREGUARD=1
 VPN_ENABLE_DNSMASQ=1
