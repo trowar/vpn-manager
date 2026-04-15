@@ -6,7 +6,11 @@
 
   <div class="section-title-row">
     <h3>套餐列表</h3>
-    <button type="button" id="open-plan-create-modal">新增套餐</button>
+    <button
+      type="button"
+      id="open-plan-create-modal"
+      onclick="(function(){var m=document.getElementById('plan-create-modal');if(m){m.hidden=false;}document.body.classList.add('modal-open');})(); return false;"
+    >新增套餐</button>
   </div>
 
   {% if plans %}
@@ -146,7 +150,12 @@
   <div class="payment-modal-card plan-create-modal-card">
     <div class="section-title-row">
       <h4>新增套餐</h4>
-      <button type="button" class="btn secondary" id="close-plan-create-modal">关闭</button>
+      <button
+        type="button"
+        class="btn secondary"
+        id="close-plan-create-modal"
+        onclick="(function(){var m=document.getElementById('plan-create-modal');if(m){m.hidden=true;}document.body.classList.remove('modal-open');})(); return false;"
+      >关闭</button>
     </div>
 
     <form method="post" action="{{ url_for('admin_create_plan') }}" class="form plan-create-form">
