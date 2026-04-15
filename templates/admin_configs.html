@@ -39,6 +39,29 @@
     </div>
   </div>
 
+  <section class="feature-item" style="margin-bottom:12px;">
+    <h4>默认节点</h4>
+    <p>管理员下载 WireGuard / OpenVPN 配置时，将使用此默认节点生成出口地址。</p>
+    {% if available_servers %}
+      <form method="post" action="{{ url_for('admin_set_default_server') }}" class="form">
+        <label>选择默认节点
+          <select name="server_id" required>
+            {% for server in available_servers %}
+              <option value="{{ server['id'] }}" {% if selected_default_server_id == server['id'] %}selected{% endif %}>
+                {{ server["server_region_display"] }} / {{ server["server_name"] }} / {{ server["endpoint_host"] }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="actions">
+          <button type="submit">保存默认节点</button>
+        </div>
+      </form>
+    {% else %}
+      <p class="helper">当前没有可用在线节点，请先到服务器管理检查节点状态。</p>
+    {% endif %}
+  </section>
+
   <div class="actions">
     {% if admin_vpn_ready and wireguard_enabled %}
       <a class="btn" href="{{ url_for('admin_download_config', mode='global') }}">下载管理员 WireGuard 配置</a>

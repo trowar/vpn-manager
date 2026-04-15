@@ -3062,15 +3062,6 @@ def choose_runtime_server_for_admin(
 ) -> sqlite3.Row | None:
     candidate_ids: list[int] = []
 
-    preferred_server_id_raw = ""
-    try:
-        settings = load_onboarding_settings(db)
-        preferred_server_id_raw = str(settings.get("last_server_id", "") or "").strip()
-    except Exception:
-        preferred_server_id_raw = ""
-    if preferred_server_id_raw.isdigit():
-        candidate_ids.append(int(preferred_server_id_raw))
-
     assigned_server_id = row_get(admin_user, "assigned_server_id")
     if assigned_server_id is not None and str(assigned_server_id).strip():
         try:
@@ -3079,6 +3070,17 @@ def choose_runtime_server_for_admin(
                 candidate_ids.append(assigned_id)
         except Exception:
             pass
+
+    preferred_server_id_raw = ""
+    try:
+        settings = load_onboarding_settings(db)
+        preferred_server_id_raw = str(settings.get("last_server_id", "") or "").strip()
+    except Exception:
+        preferred_server_id_raw = ""
+    if preferred_server_id_raw.isdigit():
+        preferred_id = int(preferred_server_id_raw)
+        if preferred_id not in candidate_ids:
+            candidate_ids.append(preferred_id)
 
     for server_id in candidate_ids:
         row = get_server_by_id(db, server_id)
@@ -10823,19 +10825,8 @@ def admin_configs():
         (current_user()["id"],),
     ).fetchone()
     if not admin:
-        flash("管理员账号不存在。", "error")
+        flash("管理员账户不存在。", "error")
         return redirect(url_for("admin_home"))
-
-    target_server = choose_runtime_server_for_admin(db, admin)
-    target_server_name = "-"
-    target_server_host = "-"
-    if target_server is not None:
-        target_server_name = (
-            (row_get(target_server, "server_name", "") or "").strip()
-            or (row_get(target_server, "host", "") or "").strip()
-            or "-"
-        )
-        target_server_host = (row_get(target_server, "host", "") or "").strip() or "-"
 
     admin_vpn_ready = False
     admin_vpn_status_text = "未生成"
@@ -10847,13 +10838,37 @@ def admin_configs():
         build_user_wireguard_config(admin, profile_mode=WG_PROFILE_GLOBAL)
         admin_vpn_ready = True
         admin_vpn_status_text = "已自动生成（无限期）" if prepared_now else "已就绪（无限期）"
-        endpoint_display = (
-            get_wireguard_endpoint_for_clients(user=admin, server_row=target_server) or "-"
-        ).strip() or "-"
     except Exception as exc:
         admin_vpn_ready = False
         admin_vpn_status_text = "未生成"
         admin_vpn_error = str(exc)
+
+    target_server = choose_runtime_server_for_admin(db, admin)
+    target_server_name = "-"
+    target_server_host = "-"
+    if target_server is not None:
+        target_server_name = (
+            (row_get(target_server, "server_name", "") or "").strip()
+            or (row_get(target_server, "host", "") or "").strip()
+            or "-"
+        )
+        target_server_host = (row_get(target_server, "host", "") or "").strip() or "-"
+        if admin_vpn_ready:
+            endpoint_display = (
+                get_wireguard_endpoint_for_clients(user=admin, server_row=target_server) or "-"
+            ).strip() or "-"
+
+    available_servers = load_user_selectable_servers(db, admin)
+    selected_default_server_id = 0
+    assigned_server_id = row_get(admin, "assigned_server_id")
+    if assigned_server_id is not None and str(assigned_server_id).strip():
+        try:
+            selected_default_server_id = int(assigned_server_id)
+        except Exception:
+            selected_default_server_id = 0
+    if selected_default_server_id <= 0 and target_server is not None:
+        selected_default_server_id = int(row_get(target_server, "id", 0) or 0)
+
     db.commit()
 
     return render_template(
@@ -10865,8 +10880,69 @@ def admin_configs():
         target_server_name=target_server_name,
         target_server_host=target_server_host,
         endpoint_display=endpoint_display,
+        available_servers=available_servers,
+        selected_default_server_id=selected_default_server_id,
         admin_page="configs",
     )
+
+
+@app.route("/admin/configs/server", methods=["POST"])
+@login_required
+@admin_required
+def admin_set_default_server():
+    db = get_db()
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    if not admin:
+        flash("管理员账户不存在。", "error")
+        return redirect(url_for("admin_home"))
+
+    server_id_raw = (request.form.get("server_id", "") or "").strip()
+    if not server_id_raw.isdigit():
+        flash("请选择有效的默认节点。", "error")
+        return redirect(url_for("admin_configs"))
+
+    server_id = int(server_id_raw)
+    target_server = get_server_by_id(db, server_id)
+    if not is_runtime_server_ready(target_server):
+        flash("所选节点不可用，请选择在线节点。", "error")
+        return redirect(url_for("admin_configs"))
+
+    db.execute(
+        """
+        UPDATE users
+        SET assigned_server_id = ?,
+            preferred_server_id = ?
+        WHERE id = ? AND role = 'admin'
+        """,
+        (server_id, server_id, int(admin["id"])),
+    )
+    upsert_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, str(server_id))
+    db.commit()
+
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (int(admin["id"]),),
+    ).fetchone()
+
+    try:
+        admin, _ = ensure_admin_self_vpn_profile(db, admin)
+        build_user_wireguard_config(admin, profile_mode=WG_PROFILE_GLOBAL)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        flash(f"默认节点已切换，但配置预生成失败：{exc}", "error")
+        return redirect(url_for("admin_configs"))
+
+    region = normalize_server_region(row_get(target_server, "server_region", ""))
+    name = (row_get(target_server, "server_name", "") or "").strip() or (
+        row_get(target_server, "host", "") or ""
+    ).strip()
+    label = f"{region} / {name}" if region else name
+    flash(f"管理员默认节点已更新为：{label}", "success")
+    return redirect(url_for("admin_configs"))
 
 
 @app.route("/admin/settings")
