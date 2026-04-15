@@ -380,8 +380,12 @@ start_web() {
   log "Starting web container"
   docker rm -f vpn-web >/dev/null 2>&1 || true
   compose_cmd down --remove-orphans >/dev/null 2>&1 || true
+  if grep -Eq '^PORTAL_DB_BACKEND=postgres$' "${ENV_FILE}"; then
+    log "Starting postgres service"
+    compose_cmd up -d postgres
+  fi
   compose_cmd build web
-  compose_cmd up -d --no-deps web
+  compose_cmd up -d web
 }
 
 print_summary() {
