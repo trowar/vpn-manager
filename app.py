@@ -897,26 +897,54 @@ def read_required_text(path: Path, label: str) -> str:
     return content
 
 
+def read_first_existing_text(paths: list[Path]) -> str:
+    for path in paths:
+        try:
+            if path.exists():
+                content = path.read_text(encoding="utf-8").strip()
+                if content:
+                    return content
+        except Exception:
+            continue
+    return ""
+
+
 def get_openvpn_client_materials(
     *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
 ) -> tuple[str, str]:
+    api_error: Exception | None = None
     if use_vpn_api(user=user, server_row=server_row):
-        result = vpn_api_request(
-            "GET",
-            "/openvpn/client-materials",
-            user=user,
-            server_row=server_row,
-        )
-        ca_text = (result.get("ca_cert") or "").strip()
-        tls_crypt_text = (result.get("tls_crypt_key") or "").strip()
-        if not ca_text:
-            raise RuntimeError("VPN API 未返回 OpenVPN CA 证书。")
-        return ca_text, tls_crypt_text
+        try:
+            result = vpn_api_request(
+                "GET",
+                "/openvpn/client-materials",
+                user=user,
+                server_row=server_row,
+            )
+            ca_text = (result.get("ca_cert") or "").strip()
+            tls_crypt_text = (result.get("tls_crypt_key") or "").strip()
+            if ca_text:
+                return ca_text, tls_crypt_text
+            api_error = RuntimeError("VPN API 未返回 OpenVPN CA 证书。")
+        except Exception as exc:
+            api_error = exc
 
-    ca_text = read_required_text(OPENVPN_CA_CERT_FILE, "OpenVPN CA 证书")
-    tls_crypt_text = ""
-    if OPENVPN_TLS_CRYPT_KEY_FILE.exists():
-        tls_crypt_text = OPENVPN_TLS_CRYPT_KEY_FILE.read_text(encoding="utf-8").strip()
+    # Fallback to locally mounted/shared cert materials when remote API is
+    # temporarily unavailable, so profile downloads remain available.
+    ca_text = read_first_existing_text(
+        [OPENVPN_CA_CERT_FILE, SHARED_OPENVPN_CA_CERT_FILE]
+    )
+    tls_crypt_text = read_first_existing_text(
+        [OPENVPN_TLS_CRYPT_KEY_FILE, SHARED_OPENVPN_TLS_CRYPT_KEY_FILE]
+    )
+    if not ca_text:
+        if api_error:
+            raise RuntimeError(f"OpenVPN 材料获取失败：{api_error}")
+        raise RuntimeError(
+            f"OpenVPN CA 证书文件不存在或为空：{OPENVPN_CA_CERT_FILE} / {SHARED_OPENVPN_CA_CERT_FILE}"
+        )
+    if api_error:
+        app.logger.warning("OpenVPN client materials fallback to local files: %s", api_error)
     return ca_text, tls_crypt_text
 
 
@@ -13257,7 +13285,7 @@ def admin_download_openvpn_config():
     requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
     normalized_mode = normalize_wg_profile_mode(requested_mode)
     try:
-        admin, _ = ensure_admin_self_vpn_profile(db, admin)
+        admin, _ = ensure_admin_self_vpn_profile(db, admin, force_prepare=True)
         admin = ensure_user_openvpn_client_identity(db, admin)
         db.commit()
         config_text = build_openvpn_client_config(
