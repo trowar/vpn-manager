@@ -80,6 +80,16 @@ SHARED_OPENVPN_SERVER_CERT_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_server.crt
 SHARED_OPENVPN_TLS_CRYPT_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_tls_crypt.key"
 SYSTEM_UPGRADE_LOG_FILE = DATA_DIR / "system-upgrade.log"
 DB_INIT_LOCK_DIR = DATA_DIR / ".db-init.lock"
+SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS_RAW = os.environ.get(
+    "PORTAL_SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS",
+    "300",
+).strip()
+try:
+    SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS = max(
+        300, int(SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS_RAW)
+    )
+except ValueError:
+    SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS = 300
 AUTO_RESTART_AFTER_SELF_UPGRADE = (
     os.environ.get(
         "PORTAL_SELF_UPGRADE_AUTO_RESTART",
@@ -1753,6 +1763,41 @@ def load_system_upgrade_state(db: sqlite3.Connection) -> dict[str, str]:
         "finished_at": get_app_setting(db, SETTING_SYSTEM_UPGRADE_FINISHED_AT, ""),
         "version": get_current_app_version(),
     }
+
+
+def load_system_upgrade_state_with_timeout_unlock(
+    db: sqlite3.Connection,
+) -> dict[str, str]:
+    state = load_system_upgrade_state(db)
+    status = (state.get("status") or "").strip().lower()
+    if status != "running":
+        return state
+
+    started_at_raw = (state.get("started_at") or "").strip()
+    started_at = parse_iso(started_at_raw)
+    if not started_at:
+        return state
+
+    elapsed_seconds = (utcnow() - started_at).total_seconds()
+    if elapsed_seconds < SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS:
+        return state
+
+    timeout_minutes = max(1, SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS // 60)
+    summary = (
+        f"系统升级任务超过 {timeout_minutes} 分钟未完成，已自动解锁。"
+        "请重新发起升级。"
+    )
+    append_system_upgrade_log(
+        "系统升级任务状态超时，自动解锁："
+        f"started_at={started_at_raw}, timeout={SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS}s"
+    )
+    save_system_upgrade_state(
+        status="failed",
+        summary=summary,
+        started_at=started_at_raw,
+        finished_at=utcnow_iso(),
+    )
+    return load_system_upgrade_state(db)
 
 
 def save_system_upgrade_state(
@@ -11101,7 +11146,7 @@ def admin_upgrade_saved_server(server_id: int):
 @admin_required
 def admin_upgrade_system():
     db = get_db()
-    state = load_system_upgrade_state(db)
+    state = load_system_upgrade_state_with_timeout_unlock(db)
     if (state.get("status") or "").strip().lower() == "running":
         flash("系统升级任务正在运行中，请稍后刷新查看结果。", "error")
         return redirect(url_for("admin_home"))
@@ -11150,7 +11195,7 @@ def admin_system_upgrade_log():
         }, 403
 
     db = get_db()
-    state = load_system_upgrade_state(db)
+    state = load_system_upgrade_state_with_timeout_unlock(db)
     log_text = read_system_upgrade_log_text()
     if not log_text:
         status = (state.get("status") or "").strip().lower()
@@ -11185,7 +11230,7 @@ def admin_home():
     server_overview = refresh_server_health_status(db)
     expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=50)
     _, online_summary = load_admin_online_users(db)
-    system_upgrade = load_system_upgrade_state(db)
+    system_upgrade = load_system_upgrade_state_with_timeout_unlock(db)
     system_upgrade_log = read_system_upgrade_log_text()
     if not system_upgrade_log:
         status = (system_upgrade.get("status") or "").strip().lower()
