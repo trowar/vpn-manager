@@ -120,9 +120,24 @@
         var response = await fetch(logUrl, {
           method: "GET",
           credentials: "same-origin",
-          cache: "no-store"
+          cache: "no-store",
+          headers: {
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest"
+          }
         });
-        var payload = await response.json();
+        var contentType = (response.headers.get("content-type") || "").toLowerCase();
+        var payload = null;
+        if (contentType.indexOf("application/json") >= 0) {
+          payload = await response.json();
+        } else {
+          var bodyText = await response.text();
+          throw new Error("接口返回非 JSON（可能已掉线或服务重启）: HTTP " + response.status + " " + bodyText.slice(0, 80));
+        }
+        if (response.status === 401 && payload && payload.redirect) {
+          window.location.href = payload.redirect;
+          return;
+        }
         if (!response.ok || !payload || !payload.ok) {
           throw new Error((payload && (payload.error || payload.message)) || ("HTTP " + response.status));
         }

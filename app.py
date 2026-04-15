@@ -11085,9 +11085,23 @@ def admin_upgrade_system():
 
 
 @app.route("/admin/system/upgrade/log")
-@login_required
-@admin_required
 def admin_system_upgrade_log():
+    if not session.get("user_id"):
+        return {
+            "ok": False,
+            "error": "unauthorized",
+            "message": "登录状态已失效，请重新登录。",
+            "redirect": url_for("login"),
+        }, 401
+    user = current_user()
+    if not user or row_get(user, "role", "") != "admin":
+        return {
+            "ok": False,
+            "error": "forbidden",
+            "message": "仅管理员可访问。",
+            "redirect": url_for("dashboard"),
+        }, 403
+
     db = get_db()
     state = load_system_upgrade_state(db)
     log_text = read_system_upgrade_log_text()
