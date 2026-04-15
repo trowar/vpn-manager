@@ -29,7 +29,7 @@
     </div>
   </div>
 
-  <p class="helper" id="online-sampled-at">最近采样：{{ sampled_at|fmt_utc }}</p>
+  <p class="helper" id="online-sampled-at">最近采样（北京时间）：{{ sampled_at|fmt_utc }}</p>
   <p class="helper" id="online-source-errors">
     {% if summary["source_errors"] > 0 %}
       数据源异常（{{ summary["source_errors"] }}）：{{ summary["source_errors_text"] }}
@@ -116,20 +116,44 @@
       return formatBytes(value) + "/s";
     }
 
-    function formatUtcText(isoText) {
+    var beijingFormatter = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+
+    function formatBeijingText(isoText) {
       var raw = String(isoText || "").trim();
       if (!raw) return "-";
       var dt = new Date(raw);
       if (Number.isNaN(dt.getTime())) {
         return escapeHtml(raw);
       }
-      return dt.toISOString().replace("T", " ").replace(".000Z", " UTC");
+      var parts = beijingFormatter.formatToParts(dt);
+      var map = {};
+      parts.forEach(function (part) {
+        if (part && part.type && part.type !== "literal") {
+          map[part.type] = part.value;
+        }
+      });
+      var year = map.year || "0000";
+      var month = map.month || "00";
+      var day = map.day || "00";
+      var hour = map.hour || "00";
+      var minute = map.minute || "00";
+      var second = map.second || "00";
+      return year + "-" + month + "-" + day + " " + hour + ":" + minute + ":" + second;
     }
 
     function expiryText(isoText) {
       var raw = String(isoText || "").trim();
       if (!raw) return "永久";
-      return formatUtcText(raw);
+      return formatBeijingText(raw);
     }
 
     function updateSummary(summary) {
@@ -186,7 +210,7 @@
         var assignedIp = escapeHtml(row.assigned_ip || "-");
         var serverName = escapeHtml(row.server_name || "-");
         var endpoint = escapeHtml(row.endpoint || "-");
-        var handshake = formatUtcText(row.latest_handshake_at || "");
+        var handshake = formatBeijingText(row.latest_handshake_at || "");
         var rxText = escapeHtml(row.rx_human || formatBytes(rxBytes));
         var txText = escapeHtml(row.tx_human || formatBytes(txBytes));
         var totalText = escapeHtml(row.total_human || formatBytes(Number(row.total_bytes || 0)));
@@ -223,7 +247,7 @@
     function render(payload) {
       updateSummary(payload.summary || {});
       if (sampledNode) {
-        sampledNode.textContent = "最近采样：" + formatUtcText(payload.sampled_at || "");
+        sampledNode.textContent = "最近采样（北京时间）：" + formatBeijingText(payload.sampled_at || "");
       }
       renderRows(payload);
     }

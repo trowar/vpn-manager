@@ -340,7 +340,7 @@ try:
 except ValueError:
     ADMIN_ONLINE_REFRESH_SECONDS = 5
 ADMIN_UI_TZ = timezone(timedelta(hours=8))
-ADMIN_UI_TZ_NAME = "北京时间 (UTC+8)"
+ADMIN_UI_TZ_NAME = "北京时间"
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_INITIAL_PASSWORD = "admin"
 ONBOARDING_SETTING_PORTAL_DOMAIN = "portal_domain"
@@ -421,7 +421,7 @@ def format_utc(value: str | None) -> str:
     dt = parse_iso(value)
     if not dt:
         return "-"
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return dt.astimezone(ADMIN_UI_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_admin_local_input(value: str | None) -> str:

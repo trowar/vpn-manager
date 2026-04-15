@@ -57,11 +57,11 @@
     </div>
     <div class="stat-item">
       <span class="stat-label">开始时间</span>
-      <strong class="stat-value" id="system-upgrade-started-at">{{ system_upgrade["started_at"] or "-" }}</strong>
+      <strong class="stat-value" id="system-upgrade-started-at">{{ system_upgrade["started_at"]|fmt_utc }}</strong>
     </div>
     <div class="stat-item">
       <span class="stat-label">完成时间</span>
-      <strong class="stat-value" id="system-upgrade-finished-at">{{ system_upgrade["finished_at"] or "-" }}</strong>
+      <strong class="stat-value" id="system-upgrade-finished-at">{{ system_upgrade["finished_at"]|fmt_utc }}</strong>
     </div>
   </div>
   <p class="helper" id="system-upgrade-summary">
@@ -98,6 +98,40 @@
         .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "")
         .replace(/\r/g, "")
         .trim();
+    }
+
+    var beijingFormatter = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+
+    function formatBeijingDateTime(raw) {
+      var text = String(raw || "").trim();
+      if (!text) return "-";
+      var dt = new Date(text);
+      if (Number.isNaN(dt.getTime())) {
+        return text;
+      }
+      var parts = beijingFormatter.formatToParts(dt);
+      var map = {};
+      parts.forEach(function (part) {
+        if (part && part.type && part.type !== "literal") {
+          map[part.type] = part.value;
+        }
+      });
+      var year = map.year || "0000";
+      var month = map.month || "00";
+      var day = map.day || "00";
+      var hour = map.hour || "00";
+      var minute = map.minute || "00";
+      var second = map.second || "00";
+      return year + "-" + month + "-" + day + " " + hour + ":" + minute + ":" + second;
     }
 
     function scheduleNext(ms) {
@@ -149,8 +183,8 @@
 
         if (versionNode) versionNode.textContent = payload.version || "-";
         if (statusNode) statusNode.textContent = status || "-";
-        if (startedAtNode) startedAtNode.textContent = payload.started_at || "-";
-        if (finishedAtNode) finishedAtNode.textContent = payload.finished_at || "-";
+        if (startedAtNode) startedAtNode.textContent = formatBeijingDateTime(payload.started_at || "");
+        if (finishedAtNode) finishedAtNode.textContent = formatBeijingDateTime(payload.finished_at || "");
         if (summaryNode) summaryNode.textContent = summary;
         if (logNode) {
           logNode.textContent = logText;
@@ -158,7 +192,7 @@
         }
         if (logMetaNode) {
           var now = new Date();
-          logMetaNode.textContent = "系统升级日志（最近刷新: " + now.toLocaleString() + "）";
+          logMetaNode.textContent = "系统升级日志（最近刷新: " + formatBeijingDateTime(now.toISOString()) + "）";
         }
         if (startBtn) {
           startBtn.disabled = statusLower === "running";
