@@ -1803,6 +1803,24 @@ finally:
 PY
         }}
 
+        retry_cmd() {{
+          retries="$1"
+          delay="$2"
+          shift 2
+
+          attempt=1
+          while true; do
+            "$@" && return 0
+            code=$?
+            if [ "$attempt" -ge "$retries" ]; then
+              return "$code"
+            fi
+            log "命令失败 (exit=$code)，${{delay}}s 后重试 $attempt/$retries: $*"
+            attempt=$((attempt + 1))
+            sleep "$delay"
+          done
+        }}
+
         success=0
         cleanup() {{
           code=$?
@@ -1863,10 +1881,17 @@ PY
         git checkout "$TARGET_BRANCH"
         log "git pull --ff-only origin $TARGET_BRANCH"
         git pull --ff-only origin "$TARGET_BRANCH"
-        log "docker compose --project-name $COMPOSE_PROJECT_NAME build web"
-        docker compose --project-name "$COMPOSE_PROJECT_NAME" build web
+        export COMPOSE_BAKE=0
+        export DOCKER_BUILDKIT=0
+        export COMPOSE_DOCKER_CLI_BUILD=0
+        export COMPOSE_HTTP_TIMEOUT=300
+        export DOCKER_CLIENT_TIMEOUT=300
+        log "docker pull docker.m.daocloud.io/library/python:3.12-slim (best effort)"
+        retry_cmd 3 8 docker pull docker.m.daocloud.io/library/python:3.12-slim || log "预拉取基础镜像失败，继续构建"
+        log "docker compose --project-name $COMPOSE_PROJECT_NAME build --pull web"
+        retry_cmd 3 10 docker compose --project-name "$COMPOSE_PROJECT_NAME" build --pull web
         log "docker compose --project-name $COMPOSE_PROJECT_NAME up -d --no-deps web"
-        docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d --no-deps web
+        retry_cmd 3 8 docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d --no-deps web
         success=1
         log "系统升级完成"
         write_state "success" "系统升级完成，请重新登录。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
