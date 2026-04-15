@@ -33,6 +33,62 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+first_local_ipv4() {
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+extract_ipv4() {
+  printf '%s' "$1" | tr -d '\r' | tr -d '\n' | awk '
+    match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}/) { print substr($0, RSTART, RLENGTH); exit }
+  '
+}
+
+is_public_ipv4() {
+  local ip="$1"
+  if [ -z "${ip}" ]; then
+    return 1
+  fi
+  if ! printf '%s' "${ip}" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    return 1
+  fi
+  case "${ip}" in
+    10.*|127.*|0.*|169.254.*|192.168.*|255.255.255.255) return 1 ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 1 ;;
+    100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*) return 1 ;;
+  esac
+  return 0
+}
+
+detect_public_ipv4() {
+  local candidate=""
+  local endpoint
+  for endpoint in \
+    "https://api.ipify.org" \
+    "https://ifconfig.me/ip" \
+    "https://ipv4.icanhazip.com" \
+    "https://checkip.amazonaws.com"
+  do
+    candidate="$(curl -4fsSL --max-time 4 "${endpoint}" 2>/dev/null | tr -d '\r\n' || true)"
+    candidate="$(extract_ipv4 "${candidate}")"
+    if is_public_ipv4 "${candidate}"; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_preferred_ip() {
+  local local_ip public_ip
+  local_ip="$(first_local_ipv4)"
+  public_ip="$(detect_public_ipv4 || true)"
+  if is_public_ipv4 "${public_ip}"; then
+    printf '%s' "${public_ip}"
+    return 0
+  fi
+  printf '%s' "${local_ip}"
+}
+
 ensure_swap_if_needed() {
   if ! has_cmd swapon || ! [ -r /proc/meminfo ]; then
     return 0
@@ -300,7 +356,7 @@ prepare_env() {
   fi
 
   local ip portal_secret api_token
-  ip="$(hostname -I | awk '{print $1}')"
+  ip="$(resolve_preferred_ip)"
   portal_secret="$(generate_secret)"
   api_token="$(generate_secret)"
 
@@ -329,14 +385,16 @@ start_web() {
 }
 
 print_summary() {
-  local ip
-  ip="$(hostname -I | awk '{print $1}')"
+  local ip local_ip
+  ip="$(resolve_preferred_ip)"
+  local_ip="$(first_local_ipv4)"
 
   cat <<EOF
 
 ================ 安装完成 ================
 登录地址: http://${ip}:${WEB_PUBLIC_PORT}
 IP: ${ip}
+LAN IP: ${local_ip}
 端口: ${WEB_PUBLIC_PORT}
 默认账号: admin
 默认密码: admin
