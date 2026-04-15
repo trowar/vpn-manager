@@ -1,4 +1,23 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vpn-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PORTAL_POSTGRES_DB:-vpnportal}
+      POSTGRES_USER: ${PORTAL_POSTGRES_USER:-vpnportal}
+      POSTGRES_PASSWORD: ${PORTAL_POSTGRES_PASSWORD:-vpnportal}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PORTAL_POSTGRES_USER:-vpnportal} -d ${PORTAL_POSTGRES_DB:-vpnportal}"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    networks:
+      - vpnnet
+
   vpnmanager-server:
     profiles:
       - vpn-server
@@ -53,6 +72,9 @@ services:
     container_name: vpn-web
     restart: unless-stopped
     environment:
+      PORTAL_DB_BACKEND: ${PORTAL_DB_BACKEND:-postgres}
+      PORTAL_POSTGRES_DSN: ${PORTAL_POSTGRES_DSN:-postgresql://vpnportal:vpnportal@postgres:5432/vpnportal}
+      PORTAL_SQLITE_MIGRATION_SOURCE: ${PORTAL_SQLITE_MIGRATION_SOURCE:-/app/data/portal.db}
       PORTAL_SECRET_KEY: ${PORTAL_SECRET_KEY}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
@@ -95,6 +117,9 @@ services:
       - vpn_shared:/srv/vpn-shared:ro
       - ./docker/vpn/openvpn:/srv/openvpn:ro
       - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${WEB_PUBLIC_PORT:-8080}:8080"
       - "${WG_RELAY_PORT_START:-24000}-${WG_RELAY_PORT_END:-28999}:${WG_RELAY_PORT_START:-24000}-${WG_RELAY_PORT_END:-28999}/udp"

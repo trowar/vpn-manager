@@ -15,6 +15,7 @@ import string
 import subprocess
 import sys
 import shlex
+import contextlib
 import tempfile
 import textwrap
 import time
@@ -30,6 +31,7 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 import paramiko
+import psycopg
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, x25519
@@ -45,12 +47,23 @@ from flask import (
     session,
     url_for,
 )
+from psycopg.rows import dict_row
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("PORTAL_DATA_DIR", BASE_DIR / "data"))
 DB_PATH = Path(os.environ.get("PORTAL_DB_PATH", DATA_DIR / "portal.db"))
+DB_BACKEND = os.environ.get("PORTAL_DB_BACKEND", "sqlite").strip().lower()
+if DB_BACKEND not in {"sqlite", "postgres"}:
+    DB_BACKEND = "sqlite"
+POSTGRES_DSN = os.environ.get(
+    "PORTAL_POSTGRES_DSN",
+    "postgresql://vpnportal:vpnportal@postgres:5432/vpnportal",
+).strip()
+LEGACY_SQLITE_MIGRATION_SOURCE = Path(
+    os.environ.get("PORTAL_SQLITE_MIGRATION_SOURCE", str(DB_PATH))
+)
 CLIENT_CONF_DIR = Path(
     os.environ.get("PORTAL_CLIENT_CONF_DIR", DATA_DIR / "client-configs")
 )
@@ -1702,8 +1715,7 @@ def save_system_upgrade_state(
     started_at: str = "",
     finished_at: str = "",
 ) -> None:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = open_direct_db_connection()
     try:
         for key, value in (
             (SETTING_SYSTEM_UPGRADE_STATUS, status),
@@ -1753,11 +1765,15 @@ def build_host_web_upgrade_script(current_version: str) -> str:
     branch = shlex.quote(HOST_WEB_UPGRADE_BRANCH or "main")
     compose_project_name = shlex.quote(resolve_host_web_upgrade_project_name())
     quoted_current_version = shlex.quote((current_version or "").strip() or "0")
+    quoted_db_backend = shlex.quote(DB_BACKEND)
+    quoted_postgres_dsn = shlex.quote(POSTGRES_DSN)
     return textwrap.dedent(
         f"""
         set -eu
         LOG_FILE=/app/data/system-upgrade.log
         DB_PATH=/app/data/portal.db
+        DB_BACKEND={quoted_db_backend}
+        POSTGRES_DSN={quoted_postgres_dsn}
         STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
         TARGET_BRANCH={branch}
         CURRENT_VERSION={quoted_current_version}
@@ -1772,34 +1788,55 @@ def build_host_web_upgrade_script(current_version: str) -> str:
             return 0
           fi
           python3 - "$1" "$2" "$3" "$4" <<'PY'
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
 
-status, summary, started_at, finished_at = sys.argv[1:5]
-db_path = "/app/data/portal.db"
-conn = sqlite3.connect(db_path)
 try:
+    import psycopg2
+except Exception:
+    psycopg2 = None
+
+status, summary, started_at, finished_at = sys.argv[1:5]
+db_backend = (os.environ.get("DB_BACKEND") or "sqlite").strip().lower()
+conn = None
+try:
+    if db_backend == "postgres" and psycopg2 and os.environ.get("POSTGRES_DSN"):
+        conn = psycopg2.connect(os.environ["POSTGRES_DSN"])
+    else:
+        db_path = "/app/data/portal.db"
+        conn = sqlite3.connect(db_path)
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    if db_backend == "postgres":
+        upsert_sql = '''
+            INSERT INTO app_settings (setting_key, setting_value, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value,
+                updated_at = excluded.updated_at
+        '''
+    else:
+        upsert_sql = '''
+            INSERT INTO app_settings (setting_key, setting_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value,
+                updated_at = excluded.updated_at
+        '''
     for key, value in (
         ("system_upgrade_status", status),
         ("system_upgrade_summary", summary[:1000]),
         ("system_upgrade_started_at", started_at),
         ("system_upgrade_finished_at", finished_at),
     ):
-        conn.execute(
-            '''
-            INSERT INTO app_settings (setting_key, setting_value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(setting_key) DO UPDATE SET
-                setting_value = excluded.setting_value,
-                updated_at = excluded.updated_at
-            ''',
-            (key, value, now_iso),
-        )
+        conn.execute(upsert_sql, (key, value, now_iso))
     conn.commit()
+except Exception:
+    pass
 finally:
-    conn.close()
+    if conn is not None:
+        conn.close()
 PY
         }}
 
@@ -1835,6 +1872,7 @@ PY
         : > "$LOG_FILE"
         log "宿主机升级任务已启动"
         apk add --no-cache git python3 >/dev/null
+        apk add --no-cache py3-psycopg2 >/dev/null 2>&1 || true
         write_state "running" "系统升级进行中" "$STARTED_AT" ""
         cd /workspace
         log "git fetch origin"
@@ -1881,6 +1919,10 @@ PY
         git checkout "$TARGET_BRANCH"
         log "git pull --ff-only origin $TARGET_BRANCH"
         git pull --ff-only origin "$TARGET_BRANCH"
+        if [ "$DB_BACKEND" = "postgres" ]; then
+          log "docker compose --project-name $COMPOSE_PROJECT_NAME up -d postgres"
+          retry_cmd 3 8 docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d postgres
+        fi
         export COMPOSE_BAKE=0
         export DOCKER_BUILDKIT=0
         export COMPOSE_DOCKER_CLI_BUILD=0
@@ -5206,12 +5248,172 @@ def release_db_init_lock() -> None:
         pass
 
 
-def get_db() -> sqlite3.Connection:
+def _replace_qmark_placeholders(sql: str) -> str:
+    out: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'" and not in_double:
+            if in_single and i + 1 < len(sql) and sql[i + 1] == "'":
+                out.append("''")
+                i += 2
+                continue
+            in_single = not in_single
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "?" and not in_single and not in_double:
+            out.append("%s")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _translate_postgres_sql(sql: str, params) -> tuple[str, tuple | list]:
+    text = sql.strip()
+    upper = text.upper()
+    if upper.startswith("PRAGMA TABLE_INFO("):
+        match = re.search(r"PRAGMA\s+table_info\(\s*([^)]+?)\s*\)", text, re.IGNORECASE)
+        if match:
+            table_name = match.group(1).strip().strip("'\"")
+            return (
+                """
+                SELECT column_name AS name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (table_name,),
+            )
+    if upper.startswith("PRAGMA"):
+        return "SELECT 1", ()
+    if upper.startswith("BEGIN IMMEDIATE"):
+        return "BEGIN", ()
+
+    normalized = re.sub(
+        r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
+        "BIGSERIAL PRIMARY KEY",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    if re.search(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+users\b", normalized, re.IGNORECASE):
+        normalized = re.sub(
+            r",\s*FOREIGN KEY\s*\(assigned_server_id\)\s*REFERENCES\s+vpn_servers\s*\(id\)\s*ON DELETE SET NULL\s*",
+            "",
+            normalized,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    normalized = normalized.replace("COLLATE NOCASE", "")
+    normalized = re.sub(
+        r"SELECT\s+last_insert_rowid\(\)\s+AS\s+lid",
+        "SELECT LASTVAL() AS lid",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = _replace_qmark_placeholders(normalized)
+    return normalized, params
+
+
+class PostgresCompatCursor:
+    def __init__(self, conn, cursor, *, translated_sql: str):
+        self._conn = conn
+        self._cursor = cursor
+        self._translated_sql = translated_sql
+        self._cached_lastrowid = None
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    @property
+    def lastrowid(self):
+        if self._cached_lastrowid is not None:
+            return self._cached_lastrowid
+        try:
+            cur = self._conn.cursor(row_factory=dict_row)
+            cur.execute("SELECT LASTVAL() AS lid")
+            row = cur.fetchone() or {}
+            self._cached_lastrowid = row.get("lid")
+        except Exception:
+            self._cached_lastrowid = None
+        return self._cached_lastrowid
+
+
+class PostgresCompatConnection:
+    def __init__(self, raw_conn):
+        self._raw_conn = raw_conn
+        self.backend = "postgres"
+
+    def execute(self, sql: str, params=()):
+        translated_sql, translated_params = _translate_postgres_sql(sql, params)
+        cur = self._raw_conn.cursor(row_factory=dict_row)
+        if translated_params is None:
+            translated_params = ()
+        cur.execute(translated_sql, translated_params)
+        return PostgresCompatCursor(
+            self._raw_conn,
+            cur,
+            translated_sql=translated_sql,
+        )
+
+    def commit(self):
+        self._raw_conn.commit()
+
+    def rollback(self):
+        self._raw_conn.rollback()
+
+    def close(self):
+        self._raw_conn.close()
+
+
+def connect_sqlite_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def connect_postgres_db() -> PostgresCompatConnection:
+    if not POSTGRES_DSN:
+        raise RuntimeError("PORTAL_POSTGRES_DSN is empty")
+    raw_conn = psycopg.connect(POSTGRES_DSN, autocommit=False)
+    return PostgresCompatConnection(raw_conn)
+
+
+def open_direct_db_connection():
+    if DB_BACKEND == "postgres":
+        return connect_postgres_db()
+    return connect_sqlite_db()
+
+
+def begin_immediate(db) -> None:
+    if DB_BACKEND == "postgres":
+        db.execute("BEGIN")
+    else:
+        db.execute("BEGIN IMMEDIATE")
+
+
+DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
+
+
+def get_db():
     if "db" not in g:
-        conn = sqlite3.connect(DB_PATH, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute("PRAGMA foreign_keys=ON")
+        if DB_BACKEND == "postgres":
+            conn = connect_postgres_db()
+        else:
+            conn = connect_sqlite_db()
         g.db = conn
     return g.db
 
@@ -5221,6 +5423,110 @@ def close_db(_exc) -> None:
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+
+def migrate_sqlite_to_postgres_if_needed(db) -> None:
+    if DB_BACKEND != "postgres":
+        return
+    if get_app_setting(db, "sqlite_migration_done", ""):
+        return
+    source_path = LEGACY_SQLITE_MIGRATION_SOURCE
+    if not source_path.exists() or source_path.stat().st_size <= 0:
+        return
+
+    try:
+        src = sqlite3.connect(source_path)
+        src.row_factory = sqlite3.Row
+    except Exception:
+        return
+
+    try:
+        source_users_exists = (
+            src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+            ).fetchone()
+            is not None
+        )
+        if not source_users_exists:
+            return
+        source_user_count = int(
+            (src.execute("SELECT COUNT(*) AS cnt FROM users").fetchone() or {"cnt": 0})[
+                "cnt"
+            ]
+            or 0
+        )
+        target_user_count = int(
+            (db.execute("SELECT COUNT(*) AS cnt FROM users").fetchone() or {"cnt": 0})[
+                "cnt"
+            ]
+            or 0
+        )
+        if source_user_count <= 0 or target_user_count > 0:
+            upsert_app_setting(db, "sqlite_migration_done", utcnow_iso())
+            db.commit()
+            return
+
+        table_order = (
+            "vpn_servers",
+            "cloudflare_accounts",
+            "users",
+            "managed_domains",
+            "subscription_plans",
+            "payment_methods",
+            "payment_orders",
+            "email_verifications",
+            "mail_servers",
+            "registration_limits",
+            "app_settings",
+        )
+        for table in table_order:
+            src_exists = src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not src_exists:
+                continue
+
+            src_cols = [
+                row["name"] for row in src.execute(f"PRAGMA table_info({table})").fetchall()
+            ]
+            dst_cols = [
+                row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+            ]
+            shared_cols = [name for name in dst_cols if name in src_cols]
+            if not shared_cols:
+                continue
+
+            select_sql = f"SELECT {', '.join(shared_cols)} FROM {table}"
+            rows = src.execute(select_sql).fetchall()
+            if not rows:
+                continue
+            insert_sql = (
+                f"INSERT INTO {table} ({', '.join(shared_cols)}) "
+                f"VALUES ({', '.join('?' for _ in shared_cols)}) ON CONFLICT DO NOTHING"
+            )
+            for row in rows:
+                db.execute(insert_sql, tuple(row[col] for col in shared_cols))
+
+            if "id" in shared_cols:
+                db.execute(
+                    f"""
+                    SELECT setval(
+                        pg_get_serial_sequence('{table}', 'id'),
+                        COALESCE((SELECT MAX(id) FROM {table}), 1),
+                        (SELECT COUNT(*) > 0 FROM {table})
+                    )
+                    """
+                )
+
+        upsert_app_setting(db, "sqlite_migration_done", utcnow_iso())
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            src.close()
 
 
 def init_db() -> None:
@@ -5438,6 +5744,7 @@ def init_db() -> None:
         """
     )
     migrate_schema(db)
+    migrate_sqlite_to_postgres_if_needed(db)
     ensure_default_payment_settings(db)
     ensure_default_onboarding_settings(db)
     ensure_default_system_settings(db)
@@ -6041,7 +6348,7 @@ def ensure_admin_user() -> None:
             ),
         )
         db.commit()
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERRORS:
         db.rollback()
 
 
@@ -7301,7 +7608,7 @@ def settle_order_paid(
     webhook_amount: Decimal | None = None,
     webhook_network: str | None = None,
 ):
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     order = db.execute(
         "SELECT * FROM payment_orders WHERE id = ?",
         (order_id,),
@@ -8137,7 +8444,7 @@ def register_send_code():
     code = "".join(random.choice(string.digits) for _ in range(6))
     verification_id = 0
     try:
-        db.execute("BEGIN IMMEDIATE")
+        begin_immediate(db)
         verification_id = create_email_verification_code(
             db,
             email=email,
@@ -8221,7 +8528,7 @@ def register():
         username = email
         try:
             now_iso = utcnow_iso()
-            db.execute("BEGIN IMMEDIATE")
+            begin_immediate(db)
             cooldown_seconds = get_registration_cooldown_seconds(db, client_ip)
             if cooldown_seconds > 0:
                 db.rollback()
@@ -8256,7 +8563,7 @@ def register():
             db.commit()
             flash("注册成功，请登录后创建订阅订单。", "success")
             return redirect(url_for("login"))
-        except sqlite3.IntegrityError:
+        except DB_INTEGRITY_ERRORS:
             db.rollback()
             flash("该邮箱已注册。", "error")
         except Exception:
@@ -8364,7 +8671,7 @@ def password_recover_send_code():
     code = "".join(random.choice(string.digits) for _ in range(6))
     verification_id = 0
     try:
-        db.execute("BEGIN IMMEDIATE")
+        begin_immediate(db)
         verification_id = create_email_verification_code(
             db,
             email=email,
@@ -8420,7 +8727,7 @@ def password_recover():
             return render_template("password_recover.html", email_prefill=email_prefill)
 
         try:
-            db.execute("BEGIN IMMEDIATE")
+            begin_immediate(db)
             user = db.execute(
                 "SELECT * FROM users WHERE email = ? AND role = 'user' LIMIT 1",
                 (email,),
@@ -8759,7 +9066,7 @@ def dashboard_profile():
 
         db = get_db()
         try:
-            db.execute("BEGIN IMMEDIATE")
+            begin_immediate(db)
             latest_user = db.execute(
                 "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
                 (user["id"],),
@@ -9137,7 +9444,7 @@ def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
     params = []
     normalized_query = (email_query or "").strip()
     if normalized_query:
-        base_sql += " AND email LIKE ? COLLATE NOCASE"
+        base_sql += " AND lower(email) LIKE lower(?)"
         params.append(f"%{normalized_query}%")
     base_sql += " ORDER BY subscription_expires_at DESC, id DESC"
     return db.execute(base_sql, params).fetchall()
@@ -12596,7 +12903,7 @@ def admin_reset_user_password(user_id: int):
         return redirect_admin_subscriptions()
 
     try:
-        db.execute("BEGIN IMMEDIATE")
+        begin_immediate(db)
         latest_user = db.execute(
             "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
             (user_id,),
@@ -13071,7 +13378,8 @@ def bootstrap() -> None:
         with app.app_context():
             init_db()
             db = get_db()
-            db.execute("PRAGMA journal_mode=WAL")
+            if DB_BACKEND == "sqlite":
+                db.execute("PRAGMA journal_mode=WAL")
             ensure_admin_user()
     finally:
         release_db_init_lock()
