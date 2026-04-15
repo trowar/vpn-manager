@@ -160,7 +160,7 @@
             </td>
             <td>
               <form method="post" action="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}" class="expiry-form">
-                <input type="datetime-local" name="expires_at_local" value="{{ u['subscription_expires_at']|fmt_local_input }}" required>
+                <input type="date" name="expires_at_local" value="{{ u['subscription_expires_at']|fmt_local_date_input }}" required>
                 <button type="submit">保存期限</button>
               </form>
             </td>

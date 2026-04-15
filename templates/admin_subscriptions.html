@@ -85,7 +85,7 @@
                     type="button"
                     class="btn secondary open-user-edit-modal"
                     data-user-email="{{ u['email'] }}"
-                    data-expires-local="{{ u['subscription_expires_at']|fmt_local_input }}"
+                    data-expires-local="{{ u['subscription_expires_at']|fmt_local_date_input }}"
                     data-set-expiry-url="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
                     data-disable-url="{{ url_for('admin_disable_user', user_id=u['id']) }}"
                     data-reset-url="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
@@ -122,7 +122,7 @@
         <input type="hidden" name="q" value="{{ search_email or '' }}">
         <label>保存期限
           <input
-            type="datetime-local"
+            type="date"
             id="user-edit-expiry-input"
             name="expires_at_local"
             required

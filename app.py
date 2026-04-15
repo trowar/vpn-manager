@@ -424,19 +424,33 @@ def format_utc(value: str | None) -> str:
     return dt.astimezone(ADMIN_UI_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def format_admin_local_input(value: str | None) -> str:
+def format_admin_local_date_input(value: str | None) -> str:
     dt = parse_iso(value)
     if not dt:
         return ""
-    return dt.astimezone(ADMIN_UI_TZ).strftime("%Y-%m-%dT%H:%M")
+    return dt.astimezone(ADMIN_UI_TZ).strftime("%Y-%m-%d")
+
+
+def format_admin_local_input(value: str | None) -> str:
+    # Backward-compatible alias for templates still using fmt_local_input.
+    return format_admin_local_date_input(value)
+
+
+def parse_admin_local_date(raw: str) -> datetime:
+    value = (raw or "").strip()
+    local_dt = datetime.strptime(value, "%Y-%m-%d").replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=ADMIN_UI_TZ,
+    )
+    return local_dt.astimezone(timezone.utc)
 
 
 def parse_admin_local_datetime(raw: str) -> datetime:
-    value = (raw or "").strip()
-    dt = datetime.fromisoformat(value)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ADMIN_UI_TZ)
-    return dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    # Backward-compatible alias so older code paths still parse date-only values.
+    return parse_admin_local_date(raw)
 
 
 @app.template_filter("fmt_utc")
@@ -444,9 +458,14 @@ def fmt_utc_filter(value: str | None) -> str:
     return format_utc(value)
 
 
+@app.template_filter("fmt_local_date_input")
+def fmt_local_date_input_filter(value: str | None) -> str:
+    return format_admin_local_date_input(value)
+
+
 @app.template_filter("fmt_local_input")
 def fmt_local_input_filter(value: str | None) -> str:
-    return format_admin_local_input(value)
+    return format_admin_local_date_input(value)
 
 
 def parse_usdt_amount(raw: str, fallback: str) -> Decimal:
@@ -12723,7 +12742,7 @@ def admin_set_user_expiry(user_id: int):
         return redirect_admin_subscriptions()
 
     try:
-        expires_at_utc = parse_admin_local_datetime(expires_raw)
+        expires_at_utc = parse_admin_local_date(expires_raw)
     except Exception:
         flash("到期时间格式无效。", "error")
         return redirect_admin_subscriptions()
