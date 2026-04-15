@@ -9,7 +9,7 @@ wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/i
 ```
 
 ## 2. 我们系统实现了哪些功能
-
+- 在线更新web以及vpn服务端功能-通过在管理员的页面点击来从git获取新版本升级并保留之前的数据
 - 管理员后台与用户门户（中文界面）
 - 管理员首次登录强制修改密码、初始化引导
 - 用户注册、登录、找回密码、邮箱验证码、图片验证码
