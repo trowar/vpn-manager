@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_DIR="/opt/vpn-platform-v1"
+APP_DIR="/srv/vpn-platform-v1"
 REPO_URL="https://github.com/trowar/vpn-manager.git"
 WEB_PUBLIC_PORT="${WEB_PUBLIC_PORT:-8080}"
 ENV_FILE=".env"
 LEGACY_SERVICE_NAME="vpn-platform-v1"
+LOCAL_VPN_APP_DIR="${LOCAL_VPN_APP_DIR:-/srv/vpn-node}"
+INSTALL_LOCAL_VPN_SERVER="${INSTALL_LOCAL_VPN_SERVER:-1}"
+WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-51820}"
+OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-1194}"
+OPENVPN_PROTO="${OPENVPN_PROTO:-udp}"
+DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-53}"
+VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
+DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-1}"
+INSTALL_API_TOKEN=""
 
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-600}"
 APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
@@ -359,14 +368,19 @@ prepare_env() {
   ip="$(resolve_preferred_ip)"
   portal_secret="$(generate_secret)"
   api_token="$(generate_secret)"
+  INSTALL_API_TOKEN="${api_token}"
 
   upsert_env "PORTAL_SECRET_KEY" "${portal_secret}"
   upsert_env "ADMIN_USERNAME" "admin"
   upsert_env "ADMIN_PASSWORD" "admin"
   upsert_env "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
   upsert_env "VPN_API_TOKEN" "${api_token}"
-  upsert_env "WG_ENDPOINT" "${ip}:51820"
+  upsert_env "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
+  upsert_env "WG_ENDPOINT" "${ip}:${WG_PUBLIC_PORT}"
   upsert_env "OPENVPN_ENDPOINT_HOST" "${ip}"
+  upsert_env "OPENVPN_ENDPOINT_PORT" "${OPENVPN_PUBLIC_PORT}"
+  upsert_env "OPENVPN_PROTO" "${OPENVPN_PROTO}"
+  upsert_env "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
   upsert_env "PORTAL_ENABLE_UDP_RELAY" "1"
   upsert_env "VPN_RELAY_PUBLIC_HOST" "${ip}"
   upsert_env "WG_RELAY_PORT_START" "24000"
@@ -388,6 +402,42 @@ start_web() {
   compose_cmd up -d web
 }
 
+deploy_local_vpn_server() {
+  if [ "${INSTALL_LOCAL_VPN_SERVER}" != "1" ]; then
+    log "Skipping local vpn-server deploy (INSTALL_LOCAL_VPN_SERVER=${INSTALL_LOCAL_VPN_SERVER})"
+    return 0
+  fi
+
+  local script_path
+  script_path="${APP_DIR}/scripts/manual_deploy_vpn_node.sh"
+  if [ ! -f "${script_path}" ]; then
+    err "Local vpn deploy script not found: ${script_path}"
+    exit 1
+  fi
+
+  if [ -z "${INSTALL_API_TOKEN}" ]; then
+    INSTALL_API_TOKEN="$(awk -F= '/^VPN_API_TOKEN=/{print substr($0, index($0, "=")+1); exit}' "${APP_DIR}/${ENV_FILE}" 2>/dev/null || true)"
+  fi
+  if [ -z "${INSTALL_API_TOKEN}" ]; then
+    err "VPN_API_TOKEN is empty, cannot deploy local vpn-server"
+    exit 1
+  fi
+
+  log "Deploying local vpn-server on host (systemd mode)"
+  APP_DIR="${LOCAL_VPN_APP_DIR}" \
+  REPO_URL="${REPO_URL}" \
+  BRANCH="main" \
+  WG_PUBLIC_PORT="${WG_PUBLIC_PORT}" \
+  OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT}" \
+  OPENVPN_PROTO="${OPENVPN_PROTO}" \
+  DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT}" \
+  VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT}" \
+  VPN_API_TOKEN="${INSTALL_API_TOKEN}" \
+  DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE}" \
+  OPENVPN_ENFORCE_DB_AUTH=0 \
+  bash "${script_path}"
+}
+
 print_summary() {
   local ip local_ip
   ip="$(resolve_preferred_ip)"
@@ -404,14 +454,21 @@ LAN IP: ${local_ip}
 默认密码: admin
 说明:
 1) 已安装 Docker 并启动 web 容器
-2) vpnmanager-server 默认不在本机部署
-3) 请登录后台“服务器管理”添加服务器后自动部署 VPN 服务端
+2) 已默认在本机部署 vpn-server（systemd 模式）
+3) 本机 vpn-server 目录: ${LOCAL_VPN_APP_DIR}
+4) 本机 vpn-server 端口: WG=${WG_PUBLIC_PORT}/udp OpenVPN=${OPENVPN_PUBLIC_PORT}/${OPENVPN_PROTO} DNS=${DNS_PUBLIC_PORT} API=${VPN_API_PUBLIC_PORT}
 ========================================
-
 EOF
 
   cd "${APP_DIR}"
   compose_cmd ps
+  if has_cmd systemctl; then
+    echo
+    echo "[local-vpn] service status:"
+    systemctl is-active "wg-quick@wg0.service" 2>/dev/null || true
+    systemctl is-active "vpnmanager-openvpn.service" 2>/dev/null || true
+    systemctl is-active "vpnmanager-server.service" 2>/dev/null || true
+  fi
 }
 
 main() {
@@ -423,6 +480,7 @@ main() {
   disable_legacy_service_if_needed
   prepare_env
   start_web
+  deploy_local_vpn_server
   print_summary
 }
 

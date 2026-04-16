@@ -101,7 +101,7 @@ AUTO_RESTART_AFTER_SELF_UPGRADE = (
 )
 HOST_WEB_UPGRADE_PROJECT_DIR = os.environ.get(
     "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR",
-    "/opt/vpn-platform-v1",
+    "/srv/vpn-platform-v1",
 ).strip()
 HOST_WEB_UPGRADE_BRANCH = os.environ.get(
     "PORTAL_SELF_UPGRADE_PROJECT_BRANCH",
@@ -1860,10 +1860,10 @@ def resolve_host_web_upgrade_project_name() -> str:
 def resolve_host_web_upgrade_project_dir() -> str:
     raw = (HOST_WEB_UPGRADE_PROJECT_DIR or "").strip()
     if not raw:
-        return "/opt/vpn-platform-v1"
+        return "/srv/vpn-platform-v1"
     normalized = Path(raw).as_posix().strip()
     if not normalized:
-        return "/opt/vpn-platform-v1"
+        return "/srv/vpn-platform-v1"
     if normalized == "/":
         return normalized
     return normalized.rstrip("/")
@@ -2922,7 +2922,7 @@ def build_structured_deploy_log(
         f"SSH用户: {user_display}",
         "远程命令: bash -s (stdin install script)",
         f"脚本行数: {script_line_count}",
-        "脚本步骤: 升级系统并安装依赖 -> 拉取 GitHub 仓库 -> Docker Compose 启动 vpnmanager-server",
+        "脚本步骤: 升级系统并安装依赖 -> 拉取 GitHub 仓库 -> 启动本地 systemd 服务 vpnmanager-server",
         f"脚本是否执行: {'是' if script_executed else '否'}",
         f"退出码: {exit_code if exit_code is not None else '-'}",
         "",
@@ -4921,319 +4921,30 @@ def build_vpn_node_deploy_script(
     openvpn_server_key_b64: str,
     openvpn_tls_crypt_key_b64: str,
 ) -> str:
-    return textwrap.dedent(
+    manual_script_path = BASE_DIR / "scripts" / "manual_deploy_vpn_node.sh"
+    manual_script = manual_script_path.read_text(encoding="utf-8")
+    bootstrap = textwrap.dedent(
         f"""
         #!/usr/bin/env bash
         set -euo pipefail
-        export DEBIAN_FRONTEND=noninteractive
-        export DEBCONF_NONINTERACTIVE_SEEN=true
-        export TERM="${{TERM:-dumb}}"
-        export NEEDRESTART_MODE=a
-        DEPLOY_SKIP_OS_UPGRADE={"1" if skip_os_upgrade else "0"}
-
-        log() {{ echo "[deploy] $1"; }}
-        retry_cmd() {{
-          local retries="$1"
-          local delay="$2"
-          shift 2
-
-          local attempt=1
-          local code=0
-          while true; do
-            code=0
-            "$@" || code=$?
-            if [ "$code" -eq 0 ]; then
-              return 0
-            fi
-            if [ "$attempt" -ge "$retries" ]; then
-              return "$code"
-            fi
-            log "命令失败 (exit=$code)，${{delay}}s 后重试 ${{attempt}}/${{retries}}: $*"
-            attempt=$((attempt + 1))
-            sleep "$delay"
-          done
-        }}
-
-        apt_cmd() {{
-          DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get \
-            -o DPkg::Lock::Timeout=600 \
-            -o Acquire::Retries=3 \
-            -o Dpkg::Use-Pty=0 \
-            "$@"
-        }}
-
-        PM=""
-        if command -v apt-get >/dev/null 2>&1; then
-          PM="apt"
-        elif command -v dnf >/dev/null 2>&1; then
-          PM="dnf"
-        elif command -v yum >/dev/null 2>&1; then
-          PM="yum"
-        else
-          log "未找到可用包管理器（apt/dnf/yum）"
-          exit 1
-        fi
-
-        PKG_CACHE_READY=0
-        pkg_update() {{
-          if [ "$PKG_CACHE_READY" -eq 1 ]; then
-            return 0
-          fi
-          if [ "$PM" = "apt" ]; then
-            retry_cmd 5 8 apt_cmd update
-          elif [ "$PM" = "dnf" ]; then
-            retry_cmd 4 6 dnf -y -q makecache
-          else
-            retry_cmd 4 6 yum -y -q makecache
-          fi
-          PKG_CACHE_READY=1
-        }}
-
-        pkg_upgrade() {{
-          log "升级系统组件（$PM）"
-          if [ "$PM" = "apt" ]; then
-            pkg_update
-            retry_cmd 5 8 apt_cmd upgrade -y || retry_cmd 5 8 apt_cmd dist-upgrade -y
-          elif [ "$PM" = "dnf" ]; then
-            retry_cmd 4 8 dnf -y -q upgrade --refresh || retry_cmd 4 8 dnf -y -q update
-          else
-            retry_cmd 4 8 yum -y -q update
-          fi
-        }}
-
-        pkg_install() {{
-          if [ "$#" -eq 0 ]; then
-            return 0
-          fi
-          pkg_update
-          if [ "$PM" = "apt" ]; then
-            retry_cmd 5 8 apt_cmd install -y --no-install-recommends "$@"
-          elif [ "$PM" = "dnf" ]; then
-            retry_cmd 4 6 dnf -y -q install "$@"
-          else
-            retry_cmd 4 6 yum -y -q install "$@"
-          fi
-        }}
-
-        if [ "$DEPLOY_SKIP_OS_UPGRADE" = "1" ]; then
-          log "跳过系统整体升级（快速部署模式）"
-        else
-          pkg_upgrade
-        fi
-        pkg_install ca-certificates curl git openssl
-
-        if ! command -v ip >/dev/null 2>&1; then
-          pkg_install iproute2 || pkg_install iproute || true
-        fi
-        if ! command -v iptables >/dev/null 2>&1; then
-          pkg_install iptables || true
-        fi
-        if ! command -v ss >/dev/null 2>&1; then
-          pkg_install iproute2 || pkg_install iproute || true
-        fi
-
-        if ! command -v docker >/dev/null 2>&1; then
-          if [ "$PM" = "apt" ]; then
-            pkg_install docker.io || true
-          else
-            pkg_install docker docker-ce docker-ce-cli containerd.io || pkg_install docker || true
-          fi
-        fi
-        if ! command -v docker >/dev/null 2>&1; then
-          curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || true
-        fi
-        if ! command -v docker >/dev/null 2>&1; then
-          log "Docker 安装失败"
-          exit 1
-        fi
-
-        if command -v systemctl >/dev/null 2>&1; then
-          systemctl enable --now docker >/dev/null 2>&1 || true
-        else
-          service docker start >/dev/null 2>&1 || true
-        fi
-
-        if ! docker compose version >/dev/null 2>&1; then
-          if [ "$PM" = "apt" ]; then
-            pkg_install docker-compose-plugin || pkg_install docker-compose-v2 || pkg_install docker-compose || true
-          else
-            pkg_install docker-compose-plugin || pkg_install docker-compose || true
-          fi
-        fi
-
-        HAS_DOCKER_COMPOSE_V2=0
-        if docker compose version >/dev/null 2>&1; then
-          HAS_DOCKER_COMPOSE_V2=1
-        elif command -v docker-compose >/dev/null 2>&1; then
-          HAS_DOCKER_COMPOSE_V2=0
-        else
-          log "docker compose 不可用"
-          exit 1
-        fi
-
-        compose() {{
-          if [ "$HAS_DOCKER_COMPOSE_V2" -eq 1 ]; then
-            docker compose "$@"
-          else
-            docker-compose "$@"
-          fi
-        }}
-
-        if ! command -v wg >/dev/null 2>&1; then
-          pkg_install wireguard-tools || true
-        fi
-        if ! command -v wg >/dev/null 2>&1; then
-          if [ "$PM" = "dnf" ] || [ "$PM" = "yum" ]; then
-            pkg_install epel-release || true
-            pkg_install wireguard-tools || true
-          fi
-        fi
-        if ! command -v wg >/dev/null 2>&1; then
-          log "wireguard-tools 安装失败"
-          exit 1
-        fi
-
-        if ! command -v openvpn >/dev/null 2>&1; then
-          pkg_install openvpn || true
-        fi
-        if ! command -v openvpn >/dev/null 2>&1; then
-          log "openvpn 安装失败"
-          exit 1
-        fi
-
-        if [ ! -d /opt/vpn-node/.git ]; then
-          log "拉取 GitHub 仓库（全新克隆）"
-          rm -rf /opt/vpn-node
-          retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf /opt/vpn-node; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch main "$u" /opt/vpn-node && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch main "$u" /opt/vpn-node && exit 0; fi; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
-        else
-          log "更新 GitHub 仓库（origin/main）"
-          retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C /opt/vpn-node remote set-url origin "$u" >/dev/null 2>&1 || true; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C /opt/vpn-node fetch --depth 1 origin main && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C /opt/vpn-node fetch --depth 1 origin main && exit 0; fi; done; exit 128' _ "https://github.com/trowar/vpn-manager.git" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git"
-          retry_cmd 4 8 git -C /opt/vpn-node checkout -f main || \
-          retry_cmd 4 8 git -C /opt/vpn-node checkout -B main origin/main
-          retry_cmd 4 8 git -C /opt/vpn-node reset --hard origin/main
-        fi
-
-        cd /opt/vpn-node
-        mkdir -p docker/vpn/wireguard docker/vpn/openvpn
-
-        echo "{wg_private_key_b64}" | base64 -d > docker/vpn/wireguard/server_private.key
-        echo "{wg_public_key_b64}" | base64 -d > docker/vpn/wireguard/server_public.key
-        chmod 600 docker/vpn/wireguard/server_private.key docker/vpn/wireguard/server_public.key
-
-        UPLINK_IF=$(ip -o route show default 2>/dev/null | awk 'NR==1 {{print $5}}')
-        if [ -z "$UPLINK_IF" ]; then
-          UPLINK_IF=eth0
-        fi
-        WG_PRIV=$(cat docker/vpn/wireguard/server_private.key)
-        cat > docker/vpn/wireguard/wg0.conf <<EOF
-[Interface]
-Address = 10.7.0.1/24
-ListenPort = {wg_port}
-PrivateKey = $WG_PRIV
-SaveConfig = true
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $UPLINK_IF -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $UPLINK_IF -j MASQUERADE
-EOF
-        chmod 600 docker/vpn/wireguard/wg0.conf
-
-        if [ ! -f docker/vpn/openvpn/server.conf ] && [ -f docker/vpn/openvpn/server.conf.example ]; then
-          cp docker/vpn/openvpn/server.conf.example docker/vpn/openvpn/server.conf
-        fi
-
-        if [ ! -f docker/vpn/openvpn/ca.crt ] || [ ! -f docker/vpn/openvpn/server.crt ] || [ ! -f docker/vpn/openvpn/server.key ]; then
-          log "生成 OpenVPN 证书材料"
-          OVPN_DIR="docker/vpn/openvpn"
-          mkdir -p "$OVPN_DIR"
-
-          if [ ! -f "$OVPN_DIR/ca.key" ]; then
-            openssl genrsa -out "$OVPN_DIR/ca.key" 4096 >/dev/null 2>&1
-          fi
-          if [ ! -f "$OVPN_DIR/ca.crt" ]; then
-            openssl req -x509 -new -nodes -key "$OVPN_DIR/ca.key" -sha256 -days 3650 \
-              -subj "/CN=vpnmanager-ca" -out "$OVPN_DIR/ca.crt" >/dev/null 2>&1
-          fi
-          if [ ! -f "$OVPN_DIR/server.key" ]; then
-            openssl genrsa -out "$OVPN_DIR/server.key" 4096 >/dev/null 2>&1
-          fi
-          if [ ! -f "$OVPN_DIR/server.csr" ]; then
-            openssl req -new -key "$OVPN_DIR/server.key" -subj "/CN=vpnmanager-server" \
-              -out "$OVPN_DIR/server.csr" >/dev/null 2>&1
-          fi
-
-          cat > "$OVPN_DIR/server_ext.cnf" <<EOF
-basicConstraints=CA:FALSE
-keyUsage=digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-EOF
-
-          openssl x509 -req -in "$OVPN_DIR/server.csr" -CA "$OVPN_DIR/ca.crt" -CAkey "$OVPN_DIR/ca.key" \
-            -CAcreateserial -out "$OVPN_DIR/server.crt" -days 1825 -sha256 \
-            -extfile "$OVPN_DIR/server_ext.cnf" >/dev/null 2>&1
-          chmod 600 "$OVPN_DIR/ca.key" "$OVPN_DIR/server.key"
-        fi
-
-        if [ ! -f docker/vpn/openvpn/tls-crypt.key ]; then
-          openvpn --genkey secret docker/vpn/openvpn/tls-crypt.key >/dev/null 2>&1 || \
-          openvpn --genkey --secret docker/vpn/openvpn/tls-crypt.key >/dev/null 2>&1
-          chmod 600 docker/vpn/openvpn/tls-crypt.key
-        fi
-
-        OVPN_DIR="docker/vpn/openvpn"
-        mkdir -p "$OVPN_DIR"
-        echo "{openvpn_ca_cert_b64}" | base64 -d > "$OVPN_DIR/ca.crt"
-        echo "{openvpn_server_cert_b64}" | base64 -d > "$OVPN_DIR/server.crt"
-        echo "{openvpn_server_key_b64}" | base64 -d > "$OVPN_DIR/server.key"
-        echo "{openvpn_tls_crypt_key_b64}" | base64 -d > "$OVPN_DIR/tls-crypt.key"
-        chmod 600 "$OVPN_DIR/server.key" "$OVPN_DIR/tls-crypt.key"
-
-        ACTUAL_DNS_PORT=5353
-        if command -v ss >/dev/null 2>&1; then
-          if ss -H -lnut "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null | grep -q .; then
-            log "DNS port $ACTUAL_DNS_PORT is in use, trying fallback ports."
-            for candidate in 1053 2053 3053 4053; do
-              if ss -H -lnut "( sport = :$candidate )" 2>/dev/null | grep -q .; then
-                continue
-              fi
-              ACTUAL_DNS_PORT="$candidate"
-              log "Using DNS fallback port $ACTUAL_DNS_PORT."
-              break
-            done
-          fi
-          if ss -H -lnut "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null | grep -q .; then
-            log "No available DNS port found (tried 5353/1053/2053/3053/4053)."
-            ss -H -lnptu "( sport = :$ACTUAL_DNS_PORT )" 2>/dev/null || true
-            exit 1
-          fi
-        fi
-
-        cat > .env <<EOF
-VPN_API_TOKEN={vpn_api_token}
-WG_INTERFACE=wg0
-WG_PUBLIC_PORT={wg_port}
-OPENVPN_PUBLIC_PORT={openvpn_port}
-DNS_PUBLIC_PORT=$ACTUAL_DNS_PORT
-VPN_API_PUBLIC_PORT={SERVER_DEPLOY_DEFAULT_VPN_API_PORT}
-VPN_ENABLE_WIREGUARD=1
-VPN_ENABLE_DNSMASQ=1
-VPN_ENABLE_OPENVPN=1
-EOF
-
-        export COMPOSE_BAKE=0
-        export DOCKER_BUILDKIT=0
-        export COMPOSE_DOCKER_CLI_BUILD=0
-        export COMPOSE_HTTP_TIMEOUT=300
-        export DOCKER_CLIENT_TIMEOUT=300
-
-        log "启动 Docker Compose 构建与部署"
-        retry_cmd 5 8 docker pull docker.m.daocloud.io/library/python:3.12-slim >/dev/null 2>&1 || log "Pre-pull failed, continuing with build."
-        retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server
-        retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server
-        compose -f docker-compose.vpn-node.yml --env-file .env ps
-        log "completed"
+        export APP_DIR="/srv/vpn-node"
+        export REPO_URL="https://github.com/trowar/vpn-manager.git"
+        export BRANCH="main"
+        export DEPLOY_SKIP_OS_UPGRADE={"1" if skip_os_upgrade else "0"}
+        export WG_PUBLIC_PORT="{wg_port}"
+        export OPENVPN_PUBLIC_PORT="{openvpn_port}"
+        export DNS_PUBLIC_PORT="{dns_port}"
+        export VPN_API_PUBLIC_PORT="{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}"
+        export VPN_API_TOKEN="{vpn_api_token}"
+        export WG_PRIVATE_KEY_B64='{wg_private_key_b64}'
+        export WG_PUBLIC_KEY_B64='{wg_public_key_b64}'
+        export OPENVPN_CA_CERT_B64='{openvpn_ca_cert_b64}'
+        export OPENVPN_SERVER_CERT_B64='{openvpn_server_cert_b64}'
+        export OPENVPN_SERVER_KEY_B64='{openvpn_server_key_b64}'
+        export OPENVPN_TLS_CRYPT_KEY_B64='{openvpn_tls_crypt_key_b64}'
         """
-    ).strip() + "\n"
+    ).strip()
+    return f"{bootstrap}\n\n{manual_script.strip()}\n"
 
 
 def deploy_vpn_node_server(
@@ -11139,7 +10850,10 @@ def admin_delete_saved_server(server_id: int):
     server_label = (row_get(row, "host", "") or "").strip() or (
         row_get(row, "server_name", "") or ""
     ).strip()
-    flash(f"服务器 {server_label} 已从管理列表删除；远端主机和已安装 Docker 会保留，可随时重新部署。", "success")
+    flash(
+        f"服务器 {server_label} 已从管理列表删除；远端主机和已安装的本地服务会保留，可随时重新部署。",
+        "success",
+    )
     return redirect(url_for("admin_servers"))
 
 
@@ -11180,7 +10894,7 @@ def admin_upgrade_saved_server(server_id: int):
         row_get(row, "host", "") or ""
     ).strip()
     flash(
-        f"服务器 {server_label} 升级任务已启动，会在原主机拉取 GitHub 最新代码并重建 vpnserver Docker。",
+        f"服务器 {server_label} 升级任务已启动，会在原主机拉取 GitHub 最新代码并重启 vpnserver 本地服务。",
         "success",
     )
     return redirect(url_for("admin_servers"))

@@ -6,22 +6,43 @@ export DEBCONF_NONINTERACTIVE_SEEN=true
 export TERM="${TERM:-dumb}"
 export NEEDRESTART_MODE=a
 
-APP_DIR="${APP_DIR:-/opt/vpn-node}"
+APP_DIR="${APP_DIR:-/srv/vpn-node}"
 REPO_URL="${REPO_URL:-https://github.com/trowar/vpn-manager.git}"
 BRANCH="${BRANCH:-main}"
 
+WG_INTERFACE="${WG_INTERFACE:-wg0}"
 WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-51820}"
 OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-1194}"
-DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-5353}"
+OPENVPN_PROTO="${OPENVPN_PROTO:-udp}"
+DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-53}"
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 VPN_API_TOKEN="${VPN_API_TOKEN:-}"
+OPENVPN_ENFORCE_DB_AUTH="${OPENVPN_ENFORCE_DB_AUTH:-}"
+DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-0}"
 
-APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-600}"
-APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
-APT_RETRY_DELAY_SECONDS="${APT_RETRY_DELAY_SECONDS:-8}"
+WG_PRIVATE_KEY_B64="${WG_PRIVATE_KEY_B64:-}"
+WG_PUBLIC_KEY_B64="${WG_PUBLIC_KEY_B64:-}"
+OPENVPN_CA_CERT_B64="${OPENVPN_CA_CERT_B64:-}"
+OPENVPN_SERVER_CERT_B64="${OPENVPN_SERVER_CERT_B64:-}"
+OPENVPN_SERVER_KEY_B64="${OPENVPN_SERVER_KEY_B64:-}"
+OPENVPN_TLS_CRYPT_KEY_B64="${OPENVPN_TLS_CRYPT_KEY_B64:-}"
+
+PY_VENV_DIR="${PY_VENV_DIR:-${APP_DIR}/.venv-vpn}"
+PORTAL_DB_PATH="${PORTAL_DB_PATH:-}"
+
+WG_CONF_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
+OPENVPN_DIR="/etc/openvpn/server"
+OPENVPN_SERVER_CONF="${OPENVPN_DIR}/server.conf"
+OPENVPN_PID_FILE="/run/openvpn-server.pid"
+OPENVPN_STATUS_FILE="/run/openvpn-status.log"
+DNSMASQ_CONF="/etc/dnsmasq.d/vpn.conf"
+WG_SERVER_PUBLIC_KEY_FILE="/srv/vpn-shared/server_public.key"
+
+OPENVPN_SERVICE_NAME="vpnmanager-openvpn.service"
+OPENVPN_GUARD_SERVICE_NAME="vpnmanager-openvpn-guard.service"
+VPN_API_SERVICE_NAME="vpnmanager-server.service"
 
 PM=""
-ACTUAL_DNS_PORT="${DNS_PUBLIC_PORT}"
 
 log() {
   echo "[manual-deploy] $*"
@@ -37,7 +58,7 @@ err() {
 
 require_root() {
   if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    err "请使用 root 执行该脚本"
+    err "please run as root"
     exit 1
   fi
 }
@@ -50,9 +71,9 @@ retry_cmd() {
   local retries="$1"
   local delay="$2"
   shift 2
-
   local attempt=1
   local code=0
+
   while true; do
     code=0
     "$@" || code=$?
@@ -62,7 +83,7 @@ retry_cmd() {
     if [ "$attempt" -ge "$retries" ]; then
       return "$code"
     fi
-    warn "命令失败 (exit=${code})，${delay}s 后重试 ${attempt}/${retries}: $*"
+    warn "command failed (exit=${code}), retry ${attempt}/${retries} in ${delay}s: $*"
     attempt=$((attempt + 1))
     sleep "$delay"
   done
@@ -70,7 +91,7 @@ retry_cmd() {
 
 apt_cmd() {
   DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get \
-    -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" \
+    -o DPkg::Lock::Timeout=600 \
     -o Acquire::Retries=3 \
     -o Dpkg::Use-Pty=0 \
     -o Dpkg::Options::="--force-confdef" \
@@ -91,13 +112,13 @@ detect_pm() {
     PM="yum"
     return 0
   fi
-  err "未找到支持的包管理器（apt / dnf / yum）"
+  err "unsupported package manager (apt/dnf/yum required)"
   exit 1
 }
 
 pkg_update() {
   if [ "$PM" = "apt" ]; then
-    retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd update
+    retry_cmd 5 8 apt_cmd update
     return 0
   fi
   if [ "$PM" = "dnf" ]; then
@@ -108,9 +129,13 @@ pkg_update() {
 }
 
 pkg_upgrade() {
-  log "升级系统组件（${PM}）"
+  if [ "$DEPLOY_SKIP_OS_UPGRADE" = "1" ]; then
+    log "skip full OS upgrade (DEPLOY_SKIP_OS_UPGRADE=1)"
+    return 0
+  fi
+  log "upgrading system packages via ${PM}"
   if [ "$PM" = "apt" ]; then
-    retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd upgrade -y
+    retry_cmd 5 8 apt_cmd upgrade -y || retry_cmd 5 8 apt_cmd dist-upgrade -y
     return 0
   fi
   if [ "$PM" = "dnf" ]; then
@@ -124,9 +149,8 @@ pkg_install() {
   if [ "$#" -eq 0 ]; then
     return 0
   fi
-
   if [ "$PM" = "apt" ]; then
-    retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y --no-install-recommends "$@"
+    retry_cmd 5 8 apt_cmd install -y --no-install-recommends "$@"
     return 0
   fi
   if [ "$PM" = "dnf" ]; then
@@ -139,120 +163,37 @@ pkg_install() {
 install_base_deps() {
   pkg_update
   pkg_upgrade
-  pkg_install ca-certificates curl git openssl
-
-  if ! has_cmd ip; then
-    pkg_install iproute2 || pkg_install iproute || true
-  fi
-  if ! has_cmd iptables; then
-    pkg_install iptables || true
-  fi
-  if ! has_cmd ss; then
-    pkg_install iproute2 || pkg_install iproute || true
-  fi
-  if ! has_cmd wg; then
-    pkg_install wireguard-tools || true
-  fi
-  if ! has_cmd openvpn; then
-    pkg_install openvpn || true
-  fi
-
-  if ! has_cmd wg; then
-    err "wireguard-tools 安装失败"
-    exit 1
-  fi
-  if ! has_cmd openvpn; then
-    err "openvpn 安装失败"
-    exit 1
-  fi
-}
-
-install_compose_standalone() {
-  local os arch version bin_url plugin_dir
-  os="linux"
-  version="${DOCKER_COMPOSE_VERSION:-v2.39.2}"
-  arch="$(uname -m)"
-  case "${arch}" in
-    x86_64|amd64) arch="x86_64" ;;
-    aarch64|arm64) arch="aarch64" ;;
-    *)
-      warn "unsupported architecture for compose standalone install: ${arch}"
-      return 1
-      ;;
-  esac
-
-  bin_url="https://github.com/docker/compose/releases/download/${version}/docker-compose-${os}-${arch}"
-  log "安装 Docker Compose standalone (${version})"
-  retry_cmd 3 5 curl -fsSL "${bin_url}" -o /usr/local/bin/docker-compose
-  chmod +x /usr/local/bin/docker-compose
-
-  plugin_dir="/usr/local/lib/docker/cli-plugins"
-  mkdir -p "${plugin_dir}"
-  cp /usr/local/bin/docker-compose "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
-  chmod +x "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
-  hash -r || true
-}
-
-ensure_docker_compose() {
-  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
-    return 0
-  fi
 
   if [ "$PM" = "apt" ]; then
-    pkg_install docker-compose-plugin || pkg_install docker-compose-v2 || pkg_install docker-compose || true
+    pkg_install \
+      ca-certificates curl git openssl \
+      iproute2 iptables \
+      wireguard-tools openvpn dnsmasq \
+      python3 python3-venv python3-pip
   else
-    pkg_install docker-compose-plugin || pkg_install docker-compose || true
+    pkg_install \
+      ca-certificates curl git openssl \
+      iproute iptables \
+      wireguard-tools openvpn dnsmasq \
+      python3 python3-pip
   fi
 
-  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
-    return 0
-  fi
-
-  install_compose_standalone || true
-  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
-    return 0
-  fi
-
-  err "Docker Compose 不可用"
-  return 1
-}
-
-install_docker() {
-  if ! has_cmd docker; then
-    log "安装 Docker"
-    if [ "$PM" = "apt" ]; then
-      pkg_install docker.io || true
-    else
-      pkg_install docker docker-ce docker-ce-cli containerd.io || pkg_install docker || true
-    fi
-  fi
-
-  if ! has_cmd docker; then
-    log "尝试官方安装脚本安装 Docker"
-    curl -fsSL https://get.docker.com | sh
-  fi
-
-  if ! has_cmd docker; then
-    err "Docker 安装失败"
+  if ! has_cmd wg; then
+    err "wireguard-tools install failed"
     exit 1
   fi
-
-  if has_cmd systemctl; then
-    systemctl daemon-reload || true
-    systemctl enable --now docker || true
-  else
-    service docker start || true
+  if ! has_cmd openvpn; then
+    err "openvpn install failed"
+    exit 1
   fi
-
-  ensure_docker_compose
-}
-
-compose() {
-  if docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-    return
+  if ! has_cmd dnsmasq; then
+    err "dnsmasq install failed"
+    exit 1
   fi
-  docker-compose "$@"
+  if ! has_cmd python3; then
+    err "python3 install failed"
+    exit 1
+  fi
 }
 
 generate_token() {
@@ -267,187 +208,372 @@ PY
 }
 
 setup_repo() {
+  mkdir -p "$(dirname "${APP_DIR}")"
+
   if [ -d "${APP_DIR}/.git" ]; then
-    log "更新代码：${APP_DIR}"
+    log "updating repository in ${APP_DIR}"
     retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do git -C "$5" remote set-url origin "$u" >/dev/null 2>&1 || true; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C "$5" fetch --depth 1 origin "$6" && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 -C "$5" fetch --depth 1 origin "$6" && exit 0; fi; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
-    retry_cmd 4 8 git -C "${APP_DIR}" checkout -f "${BRANCH}"
+    retry_cmd 4 8 git -C "${APP_DIR}" checkout -f "${BRANCH}" || retry_cmd 4 8 git -C "${APP_DIR}" checkout -B "${BRANCH}" "origin/${BRANCH}"
     retry_cmd 4 8 git -C "${APP_DIR}" reset --hard "origin/${BRANCH}"
-  else
-    log "拉取代码到：${APP_DIR}"
-    rm -rf "${APP_DIR}"
-    retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf "$5"; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; fi; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
+    return
   fi
+
+  log "cloning repository to ${APP_DIR}"
+  rm -rf "${APP_DIR}"
+  retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf "$5"; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; fi; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
+}
+
+resolve_portal_db_path() {
+  if [ -n "${PORTAL_DB_PATH}" ]; then
+    echo "${PORTAL_DB_PATH}"
+    return
+  fi
+  if [ -f /srv/vpn-platform-v1/data/portal.db ]; then
+    echo "/srv/vpn-platform-v1/data/portal.db"
+    return
+  fi
+  if [ -f /opt/vpn-platform-v1/data/portal.db ]; then
+    echo "/opt/vpn-platform-v1/data/portal.db"
+    return
+  fi
+  echo "${APP_DIR}/data/portal.db"
+}
+
+detect_uplink_interface() {
+  local iface
+  iface="$(ip -o route show default 2>/dev/null | awk 'NR==1 {print $5}')"
+  if [ -z "${iface}" ]; then
+    iface="eth0"
+  fi
+  printf '%s' "${iface}"
 }
 
 ensure_wireguard_files() {
-  mkdir -p docker/vpn/wireguard
+  local work_dir priv_file pub_file wg_priv uplink_if
+  work_dir="${APP_DIR}/docker/vpn/wireguard"
+  priv_file="${work_dir}/server_private.key"
+  pub_file="${work_dir}/server_public.key"
 
-  if [ ! -f docker/vpn/wireguard/server_private.key ]; then
-    wg genkey > docker/vpn/wireguard/server_private.key
-    chmod 600 docker/vpn/wireguard/server_private.key
+  mkdir -p "${work_dir}" /etc/wireguard "$(dirname "${WG_SERVER_PUBLIC_KEY_FILE}")"
+
+  if [ -n "${WG_PRIVATE_KEY_B64}" ]; then
+    echo "${WG_PRIVATE_KEY_B64}" | base64 -d > "${priv_file}"
+  elif [ ! -f "${priv_file}" ]; then
+    wg genkey > "${priv_file}"
   fi
+  chmod 600 "${priv_file}"
 
-  if [ ! -f docker/vpn/wireguard/server_public.key ]; then
-    wg pubkey < docker/vpn/wireguard/server_private.key > docker/vpn/wireguard/server_public.key
-    chmod 600 docker/vpn/wireguard/server_public.key
+  if [ -n "${WG_PUBLIC_KEY_B64}" ]; then
+    echo "${WG_PUBLIC_KEY_B64}" | base64 -d > "${pub_file}"
+  else
+    wg pubkey < "${priv_file}" > "${pub_file}"
   fi
+  chmod 600 "${pub_file}"
 
-  if [ ! -f docker/vpn/wireguard/wg0.conf ]; then
-    local uplink_if
-    local wg_priv
+  wg_priv="$(cat "${priv_file}")"
+  uplink_if="$(detect_uplink_interface)"
 
-    uplink_if="$(ip -o route show default 2>/dev/null | awk 'NR==1 {print $5}')"
-    if [ -z "${uplink_if}" ]; then
-      uplink_if="eth0"
-    fi
-
-    wg_priv="$(cat docker/vpn/wireguard/server_private.key)"
-    cat > docker/vpn/wireguard/wg0.conf <<EOF
+  cat > "${WG_CONF_PATH}" <<EOF
 [Interface]
 Address = 10.7.0.1/24
-ListenPort = 51820
+ListenPort = ${WG_PUBLIC_PORT}
 PrivateKey = ${wg_priv}
 SaveConfig = true
 PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${uplink_if} -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${uplink_if} -j MASQUERADE
 EOF
-    chmod 600 docker/vpn/wireguard/wg0.conf
-  fi
+  chmod 600 "${WG_CONF_PATH}"
+  cp -f "${pub_file}" "${WG_SERVER_PUBLIC_KEY_FILE}"
+  chmod 600 "${WG_SERVER_PUBLIC_KEY_FILE}"
 }
 
-ensure_openvpn_files() {
-  local ovpn_dir
-  ovpn_dir="docker/vpn/openvpn"
-  mkdir -p "${ovpn_dir}"
+ensure_openvpn_materials() {
+  local ca_crt server_crt server_key tls_key
+  ca_crt="${OPENVPN_DIR}/ca.crt"
+  server_crt="${OPENVPN_DIR}/server.crt"
+  server_key="${OPENVPN_DIR}/server.key"
+  tls_key="${OPENVPN_DIR}/tls-crypt.key"
 
-  if [ ! -f "${ovpn_dir}/server.conf" ] && [ -f "${ovpn_dir}/server.conf.example" ]; then
-    cp "${ovpn_dir}/server.conf.example" "${ovpn_dir}/server.conf"
+  mkdir -p "${OPENVPN_DIR}"
+
+  if [ -n "${OPENVPN_CA_CERT_B64}" ]; then
+    echo "${OPENVPN_CA_CERT_B64}" | base64 -d > "${ca_crt}"
+  fi
+  if [ -n "${OPENVPN_SERVER_CERT_B64}" ]; then
+    echo "${OPENVPN_SERVER_CERT_B64}" | base64 -d > "${server_crt}"
+  fi
+  if [ -n "${OPENVPN_SERVER_KEY_B64}" ]; then
+    echo "${OPENVPN_SERVER_KEY_B64}" | base64 -d > "${server_key}"
+  fi
+  if [ -n "${OPENVPN_TLS_CRYPT_KEY_B64}" ]; then
+    echo "${OPENVPN_TLS_CRYPT_KEY_B64}" | base64 -d > "${tls_key}"
   fi
 
-  if [ ! -f "${ovpn_dir}/ca.crt" ] || [ ! -f "${ovpn_dir}/server.crt" ] || [ ! -f "${ovpn_dir}/server.key" ]; then
-    log "生成 OpenVPN 证书材料"
-
-    if [ ! -f "${ovpn_dir}/ca.key" ]; then
-      openssl genrsa -out "${ovpn_dir}/ca.key" 4096 >/dev/null 2>&1
-    fi
-    if [ ! -f "${ovpn_dir}/ca.crt" ]; then
-      openssl req -x509 -new -nodes -key "${ovpn_dir}/ca.key" -sha256 -days 3650 \
-        -subj "/CN=vpnmanager-ca" -out "${ovpn_dir}/ca.crt" >/dev/null 2>&1
-    fi
-    if [ ! -f "${ovpn_dir}/server.key" ]; then
-      openssl genrsa -out "${ovpn_dir}/server.key" 4096 >/dev/null 2>&1
-    fi
-    if [ ! -f "${ovpn_dir}/server.csr" ]; then
-      openssl req -new -key "${ovpn_dir}/server.key" -subj "/CN=vpnmanager-server" \
-        -out "${ovpn_dir}/server.csr" >/dev/null 2>&1
-    fi
-
-    cat > "${ovpn_dir}/server_ext.cnf" <<EOF
+  if [ ! -f "${ca_crt}" ] || [ ! -f "${server_crt}" ] || [ ! -f "${server_key}" ]; then
+    log "generating OpenVPN CA/server certificates"
+    openssl genrsa -out "${OPENVPN_DIR}/ca.key" 4096 >/dev/null 2>&1
+    openssl req -x509 -new -nodes -key "${OPENVPN_DIR}/ca.key" -sha256 -days 3650 -subj "/CN=vpnmanager-ca" -out "${ca_crt}" >/dev/null 2>&1
+    openssl genrsa -out "${server_key}" 4096 >/dev/null 2>&1
+    openssl req -new -key "${server_key}" -subj "/CN=vpnmanager-server" -out "${OPENVPN_DIR}/server.csr" >/dev/null 2>&1
+    cat > "${OPENVPN_DIR}/server_ext.cnf" <<EOF
 basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid,issuer
 EOF
-
-    openssl x509 -req -in "${ovpn_dir}/server.csr" -CA "${ovpn_dir}/ca.crt" -CAkey "${ovpn_dir}/ca.key" \
-      -CAcreateserial -out "${ovpn_dir}/server.crt" -days 1825 -sha256 \
-      -extfile "${ovpn_dir}/server_ext.cnf" >/dev/null 2>&1
-    chmod 600 "${ovpn_dir}/ca.key" "${ovpn_dir}/server.key"
+    openssl x509 -req -in "${OPENVPN_DIR}/server.csr" -CA "${ca_crt}" -CAkey "${OPENVPN_DIR}/ca.key" -CAcreateserial -out "${server_crt}" -days 1825 -sha256 -extfile "${OPENVPN_DIR}/server_ext.cnf" >/dev/null 2>&1
   fi
 
-  if [ ! -f "${ovpn_dir}/tls-crypt.key" ]; then
-    openvpn --genkey secret "${ovpn_dir}/tls-crypt.key" >/dev/null 2>&1 || \
-    openvpn --genkey --secret "${ovpn_dir}/tls-crypt.key" >/dev/null 2>&1
-    chmod 600 "${ovpn_dir}/tls-crypt.key"
+  if [ ! -f "${tls_key}" ]; then
+    openvpn --genkey secret "${tls_key}" >/dev/null 2>&1 || openvpn --genkey --secret "${tls_key}" >/dev/null 2>&1
   fi
+
+  chmod 600 "${server_key}" "${tls_key}" "${OPENVPN_DIR}/ca.key" 2>/dev/null || true
 }
 
-pick_dns_port_if_needed() {
-  ACTUAL_DNS_PORT="${DNS_PUBLIC_PORT}"
-  if has_cmd ss; then
-    if ss -H -lnut "( sport = :${ACTUAL_DNS_PORT} )" 2>/dev/null | grep -q .; then
-      warn "DNS port ${ACTUAL_DNS_PORT} is in use, trying fallback ports."
-      for candidate in 5353 1053 2053 3053 4053; do
-        if [ "${candidate}" = "${ACTUAL_DNS_PORT}" ]; then
-          continue
-        fi
-        if ss -H -lnut "( sport = :${candidate} )" 2>/dev/null | grep -q .; then
-          continue
-        fi
-        ACTUAL_DNS_PORT="${candidate}"
-        log "Using DNS fallback port ${ACTUAL_DNS_PORT}."
-        break
-      done
-    fi
-    if ss -H -lnut "( sport = :${ACTUAL_DNS_PORT} )" 2>/dev/null | grep -q .; then
-      err "No available DNS port found (tried ${DNS_PUBLIC_PORT}, 5353, 1053, 2053, 3053, 4053)."
-      ss -H -lnptu "( sport = :${ACTUAL_DNS_PORT} )" 2>/dev/null || true
-      exit 1
-    fi
-  fi
-}
+write_openvpn_config() {
+  local uplink_if auth_lines
+  uplink_if="$(detect_uplink_interface)"
 
-write_env_file() {
-  if [ -z "${VPN_API_TOKEN}" ]; then
-    VPN_API_TOKEN="$(generate_token)"
+  auth_lines="script-security 2"
+  if [ "${OPENVPN_ENFORCE_DB_AUTH}" = "1" ]; then
+    auth_lines="$(cat <<EOF
+script-security 3
+verify-client-cert require
+tls-verify "/usr/bin/python3 ${APP_DIR}/scripts/openvpn_auth.py"
+management 127.0.0.1 7505
+EOF
+)"
   fi
 
-  cat > .env <<EOF
-VPN_API_TOKEN=${VPN_API_TOKEN}
-WG_INTERFACE=wg0
-WG_PUBLIC_PORT=${WG_PUBLIC_PORT}
-OPENVPN_PUBLIC_PORT=${OPENVPN_PUBLIC_PORT}
-DNS_PUBLIC_PORT=${ACTUAL_DNS_PORT}
-VPN_API_PUBLIC_PORT=${VPN_API_PUBLIC_PORT}
-VPN_ENABLE_WIREGUARD=1
-VPN_ENABLE_DNSMASQ=1
-VPN_ENABLE_OPENVPN=1
+  cat > "${OPENVPN_SERVER_CONF}" <<EOF
+port ${OPENVPN_PUBLIC_PORT}
+proto ${OPENVPN_PROTO}
+dev tun
+topology subnet
+server 10.8.0.0 255.255.255.0
+ifconfig-pool-persist ${OPENVPN_DIR}/ipp.txt
+
+ca ${OPENVPN_DIR}/ca.crt
+cert ${OPENVPN_DIR}/server.crt
+key ${OPENVPN_DIR}/server.key
+dh none
+ecdh-curve prime256v1
+tls-crypt ${OPENVPN_DIR}/tls-crypt.key
+
+cipher AES-256-GCM
+ncp-ciphers AES-256-GCM:AES-128-GCM
+auth SHA256
+keepalive 10 120
+persist-key
+persist-tun
+explicit-exit-notify 1
+
+user nobody
+group nogroup
+
+${auth_lines}
+
+push "redirect-gateway def1"
+push "dhcp-option DNS 10.7.0.1"
+
+up "/sbin/iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE"
+down "/sbin/iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE"
+
+status ${OPENVPN_STATUS_FILE}
+verb 3
 EOF
 }
 
-start_vpn_service() {
-  export COMPOSE_BAKE=0
-  export DOCKER_BUILDKIT=0
-  export COMPOSE_DOCKER_CLI_BUILD=0
-  export COMPOSE_HTTP_TIMEOUT=300
-  export DOCKER_CLIENT_TIMEOUT=300
+write_dnsmasq_conf() {
+  mkdir -p "$(dirname "${DNSMASQ_CONF}")"
+  cat > "${DNSMASQ_CONF}" <<EOF
+port=${DNS_PUBLIC_PORT}
+listen-address=10.7.0.1
+bind-interfaces
+no-resolv
+server=1.1.1.1
+server=8.8.8.8
+cache-size=1000
+EOF
+}
 
-  retry_cmd 5 8 docker pull docker.m.daocloud.io/library/python:3.12-slim >/dev/null 2>&1 || warn "Pre-pull failed, continuing with build"
-  retry_cmd 5 10 compose -f docker-compose.vpn-node.yml --env-file .env build --pull vpnmanager-server
-  retry_cmd 5 8 compose -f docker-compose.vpn-node.yml --env-file .env up -d --no-build vpnmanager-server
+ensure_python_runtime() {
+  mkdir -p "${APP_DIR}" "${APP_DIR}/data"
+  if [ ! -d "${PY_VENV_DIR}" ]; then
+    python3 -m venv "${PY_VENV_DIR}"
+  fi
+  "${PY_VENV_DIR}/bin/pip" install --upgrade pip >/dev/null
+  "${PY_VENV_DIR}/bin/pip" install "Flask==3.0.3" "gunicorn==22.0.0" "werkzeug==3.0.2" >/dev/null
+}
+
+write_systemd_units() {
+  cat > "/etc/systemd/system/${OPENVPN_SERVICE_NAME}" <<EOF
+[Unit]
+Description=VPN Manager OpenVPN Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PORTAL_DB_PATH=${PORTAL_DB_PATH}
+Environment=OPENVPN_COMMON_NAME_PREFIX=vpn-user-
+ExecStart=/usr/sbin/openvpn --config ${OPENVPN_SERVER_CONF} --writepid ${OPENVPN_PID_FILE} --status ${OPENVPN_STATUS_FILE}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "/etc/systemd/system/${VPN_API_SERVICE_NAME}" <<EOF
+[Unit]
+Description=VPN Manager API Service
+After=network-online.target ${OPENVPN_SERVICE_NAME} wg-quick@${WG_INTERFACE}.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${APP_DIR}/docker/vpn
+Environment=PATH=${PY_VENV_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=WG_INTERFACE=${WG_INTERFACE}
+Environment=WG_CONF_PATH=${WG_CONF_PATH}
+Environment=WG_SERVER_PUBLIC_KEY_FILE=${WG_SERVER_PUBLIC_KEY_FILE}
+Environment=VPN_API_TOKEN=${VPN_API_TOKEN}
+Environment=OPENVPN_SERVER_CONF=${OPENVPN_SERVER_CONF}
+Environment=OPENVPN_CA_CERT_FILE=${OPENVPN_DIR}/ca.crt
+Environment=OPENVPN_TLS_CRYPT_KEY_FILE=${OPENVPN_DIR}/tls-crypt.key
+Environment=OPENVPN_STATUS_FILE=${OPENVPN_STATUS_FILE}
+Environment=OPENVPN_PID_FILE=${OPENVPN_PID_FILE}
+ExecStart=${PY_VENV_DIR}/bin/gunicorn --workers 1 --bind 0.0.0.0:${VPN_API_PUBLIC_PORT} vpn_api:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "/etc/systemd/system/${OPENVPN_GUARD_SERVICE_NAME}" <<EOF
+[Unit]
+Description=VPN Manager OpenVPN Session Guard
+After=${OPENVPN_SERVICE_NAME}
+Requires=${OPENVPN_SERVICE_NAME}
+
+[Service]
+Type=simple
+Environment=PORTAL_DB_PATH=${PORTAL_DB_PATH}
+Environment=OPENVPN_STATUS_FILE=${OPENVPN_STATUS_FILE}
+Environment=OPENVPN_MANAGEMENT_HOST=127.0.0.1
+Environment=OPENVPN_MANAGEMENT_PORT=7505
+Environment=OPENVPN_COMMON_NAME_PREFIX=vpn-user-
+ExecStart=/usr/bin/python3 ${APP_DIR}/scripts/openvpn_session_guard.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+enable_ip_forward() {
+  cat > /etc/sysctl.d/99-vpnmanager.conf <<EOF
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
+  sysctl --system >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+}
+
+start_services() {
+  if ! has_cmd systemctl; then
+    err "systemctl is required for local deployment mode"
+    exit 1
+  fi
+
+  systemctl daemon-reload
+
+  systemctl enable --now "wg-quick@${WG_INTERFACE}.service"
+  systemctl enable --now dnsmasq
+  systemctl enable --now "${OPENVPN_SERVICE_NAME}"
+
+  if [ "${OPENVPN_ENFORCE_DB_AUTH}" = "1" ]; then
+    systemctl enable --now "${OPENVPN_GUARD_SERVICE_NAME}"
+  else
+    systemctl disable --now "${OPENVPN_GUARD_SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  systemctl enable --now "${VPN_API_SERVICE_NAME}"
+}
+
+wait_vpn_api_ready() {
+  local url
+  url="http://127.0.0.1:${VPN_API_PUBLIC_PORT}/healthz"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS --max-time 2 "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 print_summary() {
-  log "部署完成"
+  log "deployment completed"
   echo
-  echo "================ 手动部署完成 ================"
-  echo "目录: ${APP_DIR}"
-  echo "WG 端口: ${WG_PUBLIC_PORT}/udp"
-  echo "OpenVPN 端口: ${OPENVPN_PUBLIC_PORT}/udp"
-  echo "DNS 端口: ${ACTUAL_DNS_PORT}"
-  echo "VPN API 端口: ${VPN_API_PUBLIC_PORT}/tcp"
+  echo "================ Local Deploy Completed ================"
+  echo "APP_DIR: ${APP_DIR}"
+  echo "WG: ${WG_PUBLIC_PORT}/udp"
+  echo "OpenVPN: ${OPENVPN_PUBLIC_PORT}/${OPENVPN_PROTO}"
+  echo "DNS: 10.7.0.1:${DNS_PUBLIC_PORT}"
+  echo "VPN API: ${VPN_API_PUBLIC_PORT}/tcp"
   echo "VPN_API_TOKEN: ${VPN_API_TOKEN}"
-  echo "日志查看: cd ${APP_DIR} && docker compose -f docker-compose.vpn-node.yml --env-file .env logs -f vpnmanager-server"
-  echo "=============================================="
-
-  compose -f docker-compose.vpn-node.yml --env-file .env ps
+  echo "PORTAL_DB_PATH: ${PORTAL_DB_PATH}"
+  echo "Auth enforcement: ${OPENVPN_ENFORCE_DB_AUTH}"
+  echo
+  echo "Service status checks:"
+  systemctl --no-pager --full status "wg-quick@${WG_INTERFACE}.service" | sed -n '1,6p' || true
+  systemctl --no-pager --full status "${OPENVPN_SERVICE_NAME}" | sed -n '1,6p' || true
+  systemctl --no-pager --full status "${VPN_API_SERVICE_NAME}" | sed -n '1,6p' || true
+  echo "======================================================="
 }
 
 main() {
   require_root
   detect_pm
-  log "检测到包管理器: ${PM}"
+  log "package manager detected: ${PM}"
+
   install_base_deps
-  install_docker
   setup_repo
 
-  cd "${APP_DIR}"
+  if [ -z "${VPN_API_TOKEN}" ]; then
+    VPN_API_TOKEN="$(generate_token)"
+  fi
+
+  PORTAL_DB_PATH="$(resolve_portal_db_path)"
+  if [ -z "${OPENVPN_ENFORCE_DB_AUTH}" ]; then
+    if [ -f "${PORTAL_DB_PATH}" ]; then
+      OPENVPN_ENFORCE_DB_AUTH="1"
+    else
+      OPENVPN_ENFORCE_DB_AUTH="0"
+    fi
+  fi
+
+  ensure_python_runtime
   ensure_wireguard_files
-  ensure_openvpn_files
-  pick_dns_port_if_needed
-  write_env_file
-  start_vpn_service
+  ensure_openvpn_materials
+  write_openvpn_config
+  write_dnsmasq_conf
+  enable_ip_forward
+  write_systemd_units
+  start_services
+
+  if ! wait_vpn_api_ready; then
+    err "vpn api health check failed on 127.0.0.1:${VPN_API_PUBLIC_PORT}"
+    exit 1
+  fi
+
   print_summary
 }
 
