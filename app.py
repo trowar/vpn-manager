@@ -270,6 +270,10 @@ try:
     SSH_CONNECT_RETRY_DELAY_SECONDS = max(0.0, float(SSH_CONNECT_RETRY_DELAY_SECONDS_RAW))
 except ValueError:
     SSH_CONNECT_RETRY_DELAY_SECONDS = 2.0
+SERVER_DEPLOY_SKIP_OS_UPGRADE = os.environ.get(
+    "PORTAL_DEPLOY_SKIP_OS_UPGRADE",
+    "1",
+).strip().lower() in {"1", "true", "yes", "on"}
 REGISTER_COOLDOWN_SECONDS = 5 * 60
 EMAIL_CODE_TTL_MINUTES = 10
 EMAIL_CODE_RESEND_SECONDS = 60
@@ -4909,6 +4913,7 @@ def build_vpn_node_deploy_script(
     wg_port: int,
     openvpn_port: int,
     dns_port: int,
+    skip_os_upgrade: bool,
     wg_private_key_b64: str,
     wg_public_key_b64: str,
     openvpn_ca_cert_b64: str,
@@ -4924,6 +4929,7 @@ def build_vpn_node_deploy_script(
         export DEBCONF_NONINTERACTIVE_SEEN=true
         export TERM="${{TERM:-dumb}}"
         export NEEDRESTART_MODE=a
+        DEPLOY_SKIP_OS_UPGRADE={"1" if skip_os_upgrade else "0"}
 
         log() {{ echo "[deploy] $1"; }}
         retry_cmd() {{
@@ -5009,7 +5015,11 @@ def build_vpn_node_deploy_script(
           fi
         }}
 
-        pkg_upgrade
+        if [ "$DEPLOY_SKIP_OS_UPGRADE" = "1" ]; then
+          log "跳过系统整体升级（快速部署模式）"
+        else
+          pkg_upgrade
+        fi
         pkg_install ca-certificates curl git openssl
 
         if ! command -v ip >/dev/null 2>&1; then
@@ -5253,6 +5263,7 @@ def deploy_vpn_node_server(
             openvpn_port, SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
         ),
         dns_port=normalize_server_port(dns_port, SERVER_DEPLOY_DEFAULT_DNS_PORT),
+        skip_os_upgrade=SERVER_DEPLOY_SKIP_OS_UPGRADE,
         wg_private_key_b64=base64.b64encode(
             shared_materials["wg_private_key"].encode("utf-8")
         ).decode("ascii"),
