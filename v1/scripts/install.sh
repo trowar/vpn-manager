@@ -189,6 +189,45 @@ setup_repo() {
   fi
 }
 
+cleanup_legacy_docker_stack() {
+  if ! has_cmd docker; then
+    return 0
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    warn "docker command exists but daemon is unavailable, skip legacy cleanup"
+    return 0
+  fi
+
+  local had_legacy=0
+  log "Checking legacy Docker deployment"
+
+  if has_cmd systemctl; then
+    systemctl disable --now vpn-platform-v1.service >/dev/null 2>&1 || true
+  fi
+
+  for cname in vpn-web vpn-postgres vpnmanager-server; do
+    if docker ps -a --format '{{.Names}}' | grep -Fxq "${cname}"; then
+      had_legacy=1
+      docker rm -f "${cname}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  if docker compose version >/dev/null 2>&1; then
+    local compose_dir
+    for compose_dir in "${APP_DIR}" "/srv/vpn-platform-v1" "/opt/vpn-platform-v1" "/root/vpn-platform-v1"; do
+      if [ -f "${compose_dir}/docker-compose.yml" ]; then
+        had_legacy=1
+        docker compose -f "${compose_dir}/docker-compose.yml" --project-name vpn-platform-v1 down --remove-orphans >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+
+  if [ "${had_legacy}" = "1" ]; then
+    log "Legacy Docker stack removed, continuing with local systemd deployment"
+  fi
+}
+
 ensure_postgres_ready() {
   if has_cmd systemctl; then
     systemctl enable --now postgresql
@@ -392,6 +431,7 @@ main() {
   require_root
   install_base_deps
   setup_repo
+  cleanup_legacy_docker_stack
   ensure_postgres_ready
   setup_postgres_db
   prepare_env
