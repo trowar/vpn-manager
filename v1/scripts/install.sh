@@ -373,6 +373,11 @@ prepare_env() {
   upsert_env "PORTAL_SECRET_KEY" "${portal_secret}"
   upsert_env "ADMIN_USERNAME" "admin"
   upsert_env "ADMIN_PASSWORD" "admin"
+  upsert_env "PORTAL_DB_BACKEND" "postgres"
+  upsert_env "PORTAL_POSTGRES_DB" "vpnportal"
+  upsert_env "PORTAL_POSTGRES_USER" "vpnportal"
+  upsert_env "PORTAL_POSTGRES_PASSWORD" "vpnportal"
+  upsert_env "PORTAL_POSTGRES_DSN" "postgresql://vpnportal:vpnportal@postgres:5432/vpnportal"
   upsert_env "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
   upsert_env "VPN_API_TOKEN" "${api_token}"
   upsert_env "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
@@ -438,6 +443,50 @@ deploy_local_vpn_server() {
   bash "${script_path}"
 }
 
+verify_first_install_components() {
+  local backend postgres_health
+
+  if ! docker ps --format '{{.Names}}' | grep -qx 'vpn-web'; then
+    err "web container (vpn-web) is not running"
+    docker ps -a || true
+    exit 1
+  fi
+
+  backend="$(awk -F= '/^PORTAL_DB_BACKEND=/{print $2; exit}' "${APP_DIR}/${ENV_FILE}" 2>/dev/null | tr -d '\r' || true)"
+  if [ "${backend}" = "postgres" ]; then
+    if ! docker ps --format '{{.Names}}' | grep -qx 'vpn-postgres'; then
+      err "postgres container (vpn-postgres) is not running"
+      docker ps -a || true
+      exit 1
+    fi
+
+    postgres_health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' vpn-postgres 2>/dev/null || echo unknown)"
+    if [ "${postgres_health}" != "healthy" ]; then
+      err "postgres is not healthy (status=${postgres_health})"
+      docker inspect -f '{{json .State}}' vpn-postgres 2>/dev/null || true
+      exit 1
+    fi
+  fi
+
+  if [ "${INSTALL_LOCAL_VPN_SERVER}" = "1" ] && has_cmd systemctl; then
+    if ! systemctl is-active --quiet "wg-quick@wg0.service"; then
+      err "wg-quick@wg0.service is not active"
+      systemctl --no-pager --full status "wg-quick@wg0.service" || true
+      exit 1
+    fi
+    if ! systemctl is-active --quiet "vpnmanager-openvpn.service"; then
+      err "vpnmanager-openvpn.service is not active"
+      systemctl --no-pager --full status "vpnmanager-openvpn.service" || true
+      exit 1
+    fi
+    if ! systemctl is-active --quiet "vpnmanager-server.service"; then
+      err "vpnmanager-server.service is not active"
+      systemctl --no-pager --full status "vpnmanager-server.service" || true
+      exit 1
+    fi
+  fi
+}
+
 print_summary() {
   local ip local_ip
   ip="$(resolve_preferred_ip)"
@@ -481,6 +530,7 @@ main() {
   prepare_env
   start_web
   deploy_local_vpn_server
+  verify_first_install_components
   print_summary
 }
 
