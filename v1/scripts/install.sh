@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_DIR="/srv/vpn-platform-v1"
-REPO_URL="https://github.com/trowar/vpn-manager.git"
+APP_DIR="${APP_DIR:-/srv/vpn-platform-v1}"
+REPO_URL="${REPO_URL:-https://github.com/trowar/vpn-manager.git}"
+BRANCH="${BRANCH:-main}"
 WEB_PUBLIC_PORT="${WEB_PUBLIC_PORT:-8080}"
+WEB_SERVICE_NAME="${WEB_SERVICE_NAME:-vpn-platform-v1-web.service}"
 ENV_FILE=".env"
-LEGACY_SERVICE_NAME="vpn-platform-v1"
+
+POSTGRES_DB="${POSTGRES_DB:-vpnportal}"
+POSTGRES_USER="${POSTGRES_USER:-vpnportal}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-vpnportal}"
+
 LOCAL_VPN_APP_DIR="${LOCAL_VPN_APP_DIR:-/srv/vpn-node}"
 INSTALL_LOCAL_VPN_SERVER="${INSTALL_LOCAL_VPN_SERVER:-1}"
 WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-51820}"
@@ -14,17 +20,17 @@ OPENVPN_PROTO="${OPENVPN_PROTO:-udp}"
 DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-53}"
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-1}"
-INSTALL_API_TOKEN=""
 
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-600}"
 APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
 APT_RETRY_DELAY_SECONDS="${APT_RETRY_DELAY_SECONDS:-8}"
-INSTALL_SWAP_MB="${INSTALL_SWAP_MB:-2048}"
 
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NONINTERACTIVE_SEEN=true
 export TERM="${TERM:-dumb}"
 export NEEDRESTART_MODE=a
+
+INSTALL_API_TOKEN=""
 
 log() {
   echo "[install] $*"
@@ -40,6 +46,45 @@ err() {
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+require_root() {
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    err "请使用 root 运行此脚本"
+    exit 1
+  fi
+}
+
+retry_cmd() {
+  local retries="$1"
+  local delay="$2"
+  shift 2
+  local attempt=1
+
+  while true; do
+    "$@"
+    local code=$?
+    if [ "$code" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$attempt" -ge "$retries" ]; then
+      err "命令失败，已重试 ${attempt} 次 (exit=${code}): $*"
+      return "$code"
+    fi
+    warn "命令失败 (exit=${code})，${delay}s 后重试 ${attempt}/${retries}: $*"
+    attempt=$((attempt + 1))
+    sleep "$delay"
+  done
+}
+
+apt_cmd() {
+  DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get \
+    -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" \
+    -o Acquire::Retries=3 \
+    -o Dpkg::Use-Pty=0 \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    "$@"
 }
 
 first_local_ipv4() {
@@ -77,7 +122,7 @@ detect_public_ipv4() {
     "https://ipv4.icanhazip.com" \
     "https://checkip.amazonaws.com"
   do
-    candidate="$(curl -4fsSL --max-time 4 "${endpoint}" 2>/dev/null | tr -d '\r\n' || true)"
+    candidate="$(curl -4fsSL --max-time 4 "${endpoint}" 2>/dev/null || true)"
     candidate="$(extract_ipv4 "${candidate}")"
     if is_public_ipv4 "${candidate}"; then
       printf '%s' "${candidate}"
@@ -98,245 +143,6 @@ resolve_preferred_ip() {
   printf '%s' "${local_ip}"
 }
 
-ensure_swap_if_needed() {
-  if ! has_cmd swapon || ! [ -r /proc/meminfo ]; then
-    return 0
-  fi
-  local mem_kb swap_kb
-  mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
-  swap_kb="$(awk '/SwapTotal/ {print $2}' /proc/meminfo)"
-  if [ -z "${mem_kb}" ]; then
-    return 0
-  fi
-  if [ "${swap_kb:-0}" -gt 0 ]; then
-    return 0
-  fi
-  if [ "${mem_kb}" -ge 1800000 ]; then
-    return 0
-  fi
-  if [ -f /swapfile ]; then
-    warn "swapfile already exists, skipping auto swap creation"
-    return 0
-  fi
-
-  log "Low-memory host detected; creating ${INSTALL_SWAP_MB}MB swapfile to avoid OOM during install"
-  if has_cmd fallocate; then
-    fallocate -l "${INSTALL_SWAP_MB}M" /swapfile
-  else
-    dd if=/dev/zero of=/swapfile bs=1M count="${INSTALL_SWAP_MB}" status=none
-  fi
-  chmod 600 /swapfile
-  mkswap /swapfile >/dev/null
-  swapon /swapfile
-  if ! grep -q '^/swapfile ' /etc/fstab 2>/dev/null; then
-    echo '/swapfile none swap sw 0 0' >> /etc/fstab
-  fi
-}
-
-on_error() {
-  local exit_code=$?
-  err "安装失败，退出码: ${exit_code}"
-  err "可查看日志排查: /var/log/cloud-init-output.log 或 docker compose logs"
-  exit "$exit_code"
-}
-
-trap on_error ERR
-
-require_root() {
-  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    err "请使用 root 运行此脚本"
-    exit 1
-  fi
-}
-
-retry_cmd() {
-  local retries="$1"
-  local delay="$2"
-  shift 2
-
-  local attempt=1
-  while true; do
-    "$@"
-    local code=$?
-    if [ "$code" -eq 0 ]; then
-      return 0
-    fi
-    if [ "$attempt" -ge "$retries" ]; then
-      err "命令失败，已重试 ${attempt} 次 (exit=${code}): $*"
-      return "$code"
-    fi
-    warn "命令失败 (exit=${code})，${delay}s 后重试 ${attempt}/${retries}: $*"
-    attempt=$((attempt + 1))
-    sleep "$delay"
-  done
-}
-
-apt_cmd() {
-  DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get \
-    -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" \
-    -o Acquire::Retries=3 \
-    -o Dpkg::Use-Pty=0 \
-    -o Dpkg::Options::="--force-confdef" \
-    -o Dpkg::Options::="--force-confold" \
-    "$@"
-}
-
-repair_apt_state() {
-  log "Repairing dpkg/apt state"
-  DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
-  retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd -f install -y || true
-}
-
-install_base_deps() {
-  if has_cmd apt-get; then
-    log "Detected apt environment"
-    repair_apt_state
-    retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd update
-    retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y \
-      ca-certificates curl gnupg lsb-release git wget openssl
-    repair_apt_state
-    return
-  fi
-
-  if has_cmd yum; then
-    log "Detected yum environment"
-    retry_cmd 3 5 yum makecache -y
-    retry_cmd 3 5 yum install -y \
-      ca-certificates curl gnupg2 git wget openssl yum-utils
-    return
-  fi
-
-  err "Unsupported package manager. Need apt-get or yum."
-  exit 1
-}
-
-install_compose_standalone() {
-  local os arch version bin_url plugin_dir
-  os="linux"
-  version="${DOCKER_COMPOSE_VERSION:-v2.39.2}"
-  arch="$(uname -m)"
-  case "${arch}" in
-    x86_64|amd64) arch="x86_64" ;;
-    aarch64|arm64) arch="aarch64" ;;
-    *)
-      warn "Unsupported architecture for docker compose standalone install: ${arch}"
-      return 1
-      ;;
-  esac
-
-  bin_url="https://github.com/docker/compose/releases/download/${version}/docker-compose-${os}-${arch}"
-  log "Installing Docker Compose standalone (${version})"
-  retry_cmd 3 5 curl -fsSL "${bin_url}" -o /usr/local/bin/docker-compose
-  chmod +x /usr/local/bin/docker-compose
-
-  plugin_dir="/usr/local/lib/docker/cli-plugins"
-  mkdir -p "${plugin_dir}"
-  cp /usr/local/bin/docker-compose "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
-  chmod +x "${plugin_dir}/docker-compose" >/dev/null 2>&1 || true
-  hash -r || true
-}
-
-ensure_docker_compose() {
-  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
-    return 0
-  fi
-
-  if has_cmd apt-get; then
-    retry_cmd 2 5 apt_cmd install -y docker-compose-plugin || true
-    if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
-      retry_cmd 2 5 apt_cmd install -y docker-compose-v2 || true
-    fi
-    if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
-      retry_cmd 2 5 apt_cmd install -y docker-compose || true
-    fi
-  elif has_cmd yum; then
-    retry_cmd 2 5 yum install -y docker-compose-plugin || true
-    if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
-      retry_cmd 2 5 yum install -y docker-compose || true
-    fi
-  fi
-
-  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
-    return 0
-  fi
-
-  install_compose_standalone || true
-  if docker compose version >/dev/null 2>&1 || has_cmd docker-compose; then
-    return 0
-  fi
-
-  err "Docker Compose not found."
-  return 1
-}
-
-install_docker() {
-  if has_cmd docker; then
-    log "Docker already installed"
-  elif has_cmd apt-get; then
-    log "Installing docker via apt"
-    retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y docker.io
-  elif has_cmd yum; then
-    log "Installing docker via yum"
-    retry_cmd 3 5 yum install -y docker
-  else
-    err "Cannot install docker: unsupported package manager."
-    exit 1
-  fi
-
-  if has_cmd systemctl; then
-    systemctl daemon-reload || true
-    systemctl enable --now docker
-  else
-    service docker start || true
-  fi
-
-  ensure_docker_compose
-}
-
-compose_cmd() {
-  if docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-    return
-  fi
-  if has_cmd docker-compose; then
-    docker-compose "$@"
-    return
-  fi
-  err "Docker Compose not found."
-  exit 1
-}
-
-setup_repo() {
-  if [ -d "${APP_DIR}/.git" ]; then
-    log "Updating existing repo at ${APP_DIR}"
-    git -C "${APP_DIR}" fetch --depth 1 origin main
-    git -C "${APP_DIR}" checkout -f main
-    git -C "${APP_DIR}" reset --hard origin/main
-  else
-    log "Cloning repo to ${APP_DIR}"
-    rm -rf "${APP_DIR}"
-    git clone --depth 1 "${REPO_URL}" "${APP_DIR}"
-  fi
-}
-
-disable_legacy_service_if_needed() {
-  if ! has_cmd systemctl; then
-    return
-  fi
-  if ! systemctl list-unit-files | grep -q "^${LEGACY_SERVICE_NAME}\\.service"; then
-    return
-  fi
-
-  if systemctl is-active --quiet "${LEGACY_SERVICE_NAME}"; then
-    log "Stopping legacy service: ${LEGACY_SERVICE_NAME}"
-    systemctl stop "${LEGACY_SERVICE_NAME}" || true
-  fi
-  if systemctl is-enabled --quiet "${LEGACY_SERVICE_NAME}" 2>/dev/null; then
-    log "Disabling legacy service: ${LEGACY_SERVICE_NAME}"
-    systemctl disable "${LEGACY_SERVICE_NAME}" || true
-  fi
-}
-
 generate_secret() {
   if has_cmd openssl; then
     openssl rand -hex 24
@@ -348,44 +154,103 @@ print(secrets.token_hex(24))
 PY
 }
 
+repair_apt_state() {
+  log "Repairing dpkg/apt state"
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+  retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd -f install -y || true
+}
+
+install_base_deps() {
+  if ! has_cmd apt-get; then
+    err "当前脚本仅支持 apt 系发行版（Ubuntu/Debian）"
+    exit 1
+  fi
+
+  repair_apt_state
+  retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd update
+  retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y \
+    ca-certificates curl git openssl \
+    python3 python3-venv python3-pip \
+    postgresql postgresql-contrib
+  repair_apt_state
+}
+
+setup_repo() {
+  mkdir -p "$(dirname "${APP_DIR}")"
+  if [ -d "${APP_DIR}/.git" ]; then
+    log "Updating existing repo at ${APP_DIR}"
+    git -C "${APP_DIR}" fetch --depth 1 origin "${BRANCH}"
+    git -C "${APP_DIR}" checkout -f "${BRANCH}"
+    git -C "${APP_DIR}" reset --hard "origin/${BRANCH}"
+  else
+    log "Cloning repo to ${APP_DIR}"
+    rm -rf "${APP_DIR}"
+    git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${APP_DIR}"
+  fi
+}
+
+ensure_postgres_ready() {
+  if has_cmd systemctl; then
+    systemctl enable --now postgresql
+  fi
+  retry_cmd 20 2 bash -lc "pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1"
+}
+
+setup_postgres_db() {
+  local role_exists db_exists
+  role_exists="$(runuser -u postgres -- psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'\" | tr -d '[:space:]' || true)"
+  if [ "${role_exists}" != "1" ]; then
+    runuser -u postgres -- psql -c "CREATE USER ${POSTGRES_USER} WITH PASSWORD '${POSTGRES_PASSWORD}';"
+  else
+    runuser -u postgres -- psql -c "ALTER USER ${POSTGRES_USER} WITH PASSWORD '${POSTGRES_PASSWORD}';"
+  fi
+
+  db_exists="$(runuser -u postgres -- psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'\" | tr -d '[:space:]' || true)"
+  if [ "${db_exists}" != "1" ]; then
+    runuser -u postgres -- psql -c "CREATE DATABASE ${POSTGRES_DB} OWNER ${POSTGRES_USER};"
+  fi
+}
+
 upsert_env() {
   local key="$1"
   local value="$2"
-  if grep -q "^${key}=" "${ENV_FILE}" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "${ENV_FILE}"
+  if grep -q "^${key}=" "${APP_DIR}/${ENV_FILE}" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "${APP_DIR}/${ENV_FILE}"
   else
-    echo "${key}=${value}" >> "${ENV_FILE}"
+    echo "${key}=${value}" >> "${APP_DIR}/${ENV_FILE}"
   fi
 }
 
 prepare_env() {
-  cd "${APP_DIR}"
-  if [ ! -f "${ENV_FILE}" ]; then
-    cp .env.docker.example "${ENV_FILE}"
-  fi
-
   local ip portal_secret api_token
   ip="$(resolve_preferred_ip)"
   portal_secret="$(generate_secret)"
   api_token="$(generate_secret)"
   INSTALL_API_TOKEN="${api_token}"
 
+  mkdir -p "${APP_DIR}"
+  touch "${APP_DIR}/${ENV_FILE}"
+
   upsert_env "PORTAL_SECRET_KEY" "${portal_secret}"
   upsert_env "ADMIN_USERNAME" "admin"
   upsert_env "ADMIN_PASSWORD" "admin"
   upsert_env "PORTAL_DB_BACKEND" "postgres"
-  upsert_env "PORTAL_POSTGRES_DB" "vpnportal"
-  upsert_env "PORTAL_POSTGRES_USER" "vpnportal"
-  upsert_env "PORTAL_POSTGRES_PASSWORD" "vpnportal"
-  upsert_env "PORTAL_POSTGRES_DSN" "postgresql://vpnportal:vpnportal@postgres:5432/vpnportal"
+  upsert_env "PORTAL_POSTGRES_DB" "${POSTGRES_DB}"
+  upsert_env "PORTAL_POSTGRES_USER" "${POSTGRES_USER}"
+  upsert_env "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
+  upsert_env "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
+  upsert_env "PORTAL_SQLITE_MIGRATION_SOURCE" "${APP_DIR}/data/portal.db"
+
   upsert_env "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
+  upsert_env "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
+
   upsert_env "VPN_API_TOKEN" "${api_token}"
   upsert_env "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
   upsert_env "WG_ENDPOINT" "${ip}:${WG_PUBLIC_PORT}"
   upsert_env "OPENVPN_ENDPOINT_HOST" "${ip}"
   upsert_env "OPENVPN_ENDPOINT_PORT" "${OPENVPN_PUBLIC_PORT}"
   upsert_env "OPENVPN_PROTO" "${OPENVPN_PROTO}"
-  upsert_env "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
+
   upsert_env "PORTAL_ENABLE_UDP_RELAY" "1"
   upsert_env "VPN_RELAY_PUBLIC_HOST" "${ip}"
   upsert_env "WG_RELAY_PORT_START" "24000"
@@ -394,17 +259,42 @@ prepare_env() {
   upsert_env "OPENVPN_RELAY_PORT_END" "29031"
 }
 
-start_web() {
-  cd "${APP_DIR}"
-  log "Starting web container"
-  docker rm -f vpn-web >/dev/null 2>&1 || true
-  compose_cmd down --remove-orphans >/dev/null 2>&1 || true
-  if grep -Eq '^PORTAL_DB_BACKEND=postgres$' "${ENV_FILE}"; then
-    log "Starting postgres service"
-    compose_cmd up -d postgres
+install_web_runtime() {
+  log "Installing web runtime dependencies (local)"
+  python3 -m venv "${APP_DIR}/.venv"
+  "${APP_DIR}/.venv/bin/pip" install --upgrade pip
+  "${APP_DIR}/.venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
+}
+
+write_web_systemd_unit() {
+  cat > "/etc/systemd/system/${WEB_SERVICE_NAME}" <<EOF
+[Unit]
+Description=VPN Platform Web (Local)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${APP_DIR}
+EnvironmentFile=${APP_DIR}/.env
+ExecStart=${APP_DIR}/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${WEB_PUBLIC_PORT} wsgi:app
+Restart=always
+RestartSec=3
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+start_web_service() {
+  if ! has_cmd systemctl; then
+    err "systemctl 不可用，无法启动本地 web 服务"
+    exit 1
   fi
-  compose_cmd build web
-  compose_cmd up -d web
+  systemctl daemon-reload
+  systemctl enable --now "${WEB_SERVICE_NAME}"
 }
 
 deploy_local_vpn_server() {
@@ -420,18 +310,10 @@ deploy_local_vpn_server() {
     exit 1
   fi
 
-  if [ -z "${INSTALL_API_TOKEN}" ]; then
-    INSTALL_API_TOKEN="$(awk -F= '/^VPN_API_TOKEN=/{print substr($0, index($0, "=")+1); exit}' "${APP_DIR}/${ENV_FILE}" 2>/dev/null || true)"
-  fi
-  if [ -z "${INSTALL_API_TOKEN}" ]; then
-    err "VPN_API_TOKEN is empty, cannot deploy local vpn-server"
-    exit 1
-  fi
-
   log "Deploying local vpn-server on host (systemd mode)"
   APP_DIR="${LOCAL_VPN_APP_DIR}" \
   REPO_URL="${REPO_URL}" \
-  BRANCH="main" \
+  BRANCH="${BRANCH}" \
   WG_PUBLIC_PORT="${WG_PUBLIC_PORT}" \
   OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT}" \
   OPENVPN_PROTO="${OPENVPN_PROTO}" \
@@ -444,43 +326,31 @@ deploy_local_vpn_server() {
 }
 
 verify_first_install_components() {
-  local backend postgres_health
-
-  if ! docker ps --format '{{.Names}}' | grep -qx 'vpn-web'; then
-    err "web container (vpn-web) is not running"
-    docker ps -a || true
+  if ! systemctl is-active --quiet postgresql; then
+    err "postgresql 服务未启动"
+    systemctl --no-pager --full status postgresql || true
     exit 1
   fi
 
-  backend="$(awk -F= '/^PORTAL_DB_BACKEND=/{print $2; exit}' "${APP_DIR}/${ENV_FILE}" 2>/dev/null | tr -d '\r' || true)"
-  if [ "${backend}" = "postgres" ]; then
-    if ! docker ps --format '{{.Names}}' | grep -qx 'vpn-postgres'; then
-      err "postgres container (vpn-postgres) is not running"
-      docker ps -a || true
-      exit 1
-    fi
-
-    postgres_health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' vpn-postgres 2>/dev/null || echo unknown)"
-    if [ "${postgres_health}" != "healthy" ]; then
-      err "postgres is not healthy (status=${postgres_health})"
-      docker inspect -f '{{json .State}}' vpn-postgres 2>/dev/null || true
-      exit 1
-    fi
+  if ! systemctl is-active --quiet "${WEB_SERVICE_NAME}"; then
+    err "web 服务未启动: ${WEB_SERVICE_NAME}"
+    systemctl --no-pager --full status "${WEB_SERVICE_NAME}" || true
+    exit 1
   fi
 
-  if [ "${INSTALL_LOCAL_VPN_SERVER}" = "1" ] && has_cmd systemctl; then
+  if [ "${INSTALL_LOCAL_VPN_SERVER}" = "1" ]; then
     if ! systemctl is-active --quiet "wg-quick@wg0.service"; then
-      err "wg-quick@wg0.service is not active"
+      err "wg-quick@wg0.service 未启动"
       systemctl --no-pager --full status "wg-quick@wg0.service" || true
       exit 1
     fi
     if ! systemctl is-active --quiet "vpnmanager-openvpn.service"; then
-      err "vpnmanager-openvpn.service is not active"
+      err "vpnmanager-openvpn.service 未启动"
       systemctl --no-pager --full status "vpnmanager-openvpn.service" || true
       exit 1
     fi
     if ! systemctl is-active --quiet "vpnmanager-server.service"; then
-      err "vpnmanager-server.service is not active"
+      err "vpnmanager-server.service 未启动"
       systemctl --no-pager --full status "vpnmanager-server.service" || true
       exit 1
     fi
@@ -502,33 +372,32 @@ LAN IP: ${local_ip}
 默认账号: admin
 默认密码: admin
 说明:
-1) 已安装 Docker 并启动 web 容器
-2) 已默认在本机部署 vpn-server（systemd 模式）
-3) 本机 vpn-server 目录: ${LOCAL_VPN_APP_DIR}
-4) 本机 vpn-server 端口: WG=${WG_PUBLIC_PORT}/udp OpenVPN=${OPENVPN_PUBLIC_PORT}/${OPENVPN_PROTO} DNS=${DNS_PUBLIC_PORT} API=${VPN_API_PUBLIC_PORT}
+1) 已本地部署 web 服务（systemd: ${WEB_SERVICE_NAME}）
+2) 已本地部署数据库（systemd: postgresql）
+3) 已本地部署 vpn-server（systemd）
+4) web 目录: ${APP_DIR}
+5) vpn-server 目录: ${LOCAL_VPN_APP_DIR}
 ========================================
+
 EOF
 
-  cd "${APP_DIR}"
-  compose_cmd ps
-  if has_cmd systemctl; then
-    echo
-    echo "[local-vpn] service status:"
-    systemctl is-active "wg-quick@wg0.service" 2>/dev/null || true
-    systemctl is-active "vpnmanager-openvpn.service" 2>/dev/null || true
-    systemctl is-active "vpnmanager-server.service" 2>/dev/null || true
-  fi
+  echo "[status] postgresql: $(systemctl is-active postgresql 2>/dev/null || true)"
+  echo "[status] web: $(systemctl is-active "${WEB_SERVICE_NAME}" 2>/dev/null || true)"
+  echo "[status] wg: $(systemctl is-active wg-quick@wg0.service 2>/dev/null || true)"
+  echo "[status] openvpn: $(systemctl is-active vpnmanager-openvpn.service 2>/dev/null || true)"
+  echo "[status] vpn-api: $(systemctl is-active vpnmanager-server.service 2>/dev/null || true)"
 }
 
 main() {
   require_root
-  ensure_swap_if_needed
   install_base_deps
-  install_docker
   setup_repo
-  disable_legacy_service_if_needed
+  ensure_postgres_ready
+  setup_postgres_db
   prepare_env
-  start_web
+  install_web_runtime
+  write_web_systemd_unit
+  start_web_service
   deploy_local_vpn_server
   verify_first_install_components
   print_summary
