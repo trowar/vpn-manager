@@ -1853,9 +1853,22 @@ def resolve_host_web_upgrade_project_name() -> str:
     return normalized
 
 
+def resolve_host_web_upgrade_project_dir() -> str:
+    raw = (HOST_WEB_UPGRADE_PROJECT_DIR or "").strip()
+    if not raw:
+        return "/opt/vpn-platform-v1"
+    normalized = Path(raw).as_posix().strip()
+    if not normalized:
+        return "/opt/vpn-platform-v1"
+    if normalized == "/":
+        return normalized
+    return normalized.rstrip("/")
+
+
 def build_host_web_upgrade_script(current_version: str) -> str:
     branch = shlex.quote(HOST_WEB_UPGRADE_BRANCH or "main")
     compose_project_name = shlex.quote(resolve_host_web_upgrade_project_name())
+    project_dir = shlex.quote(resolve_host_web_upgrade_project_dir())
     quoted_current_version = shlex.quote((current_version or "").strip() or "0")
     quoted_db_backend = shlex.quote(DB_BACKEND)
     quoted_postgres_dsn = shlex.quote(POSTGRES_DSN)
@@ -1870,6 +1883,7 @@ def build_host_web_upgrade_script(current_version: str) -> str:
         TARGET_BRANCH={branch}
         CURRENT_VERSION={quoted_current_version}
         COMPOSE_PROJECT_NAME={compose_project_name}
+        PROJECT_DIR={project_dir}
 
         log() {{
           printf '[%s] %s\\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" "$1" | tee -a "$LOG_FILE"
@@ -1966,7 +1980,22 @@ PY
         apk add --no-cache git python3 >/dev/null
         apk add --no-cache py3-psycopg2 >/dev/null 2>&1 || true
         write_state "running" "系统升级进行中" "$STARTED_AT" ""
-        cd /workspace
+        if [ "$PROJECT_DIR" = "/workspace" ]; then
+          log "Refusing upgrade: PROJECT_DIR cannot be /workspace."
+          write_state "failed" "系统升级失败：项目目录配置错误(/workspace)." "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+          exit 1
+        fi
+        if [ ! -d "$PROJECT_DIR" ]; then
+          log "Refusing upgrade: PROJECT_DIR does not exist: $PROJECT_DIR"
+          write_state "failed" "系统升级失败：项目目录不存在。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+          exit 1
+        fi
+        if [ ! -f "$PROJECT_DIR/docker-compose.yml" ] && [ ! -f "$PROJECT_DIR/compose.yml" ] && [ ! -f "$PROJECT_DIR/compose.yaml" ]; then
+          log "Refusing upgrade: docker compose file not found under $PROJECT_DIR"
+          write_state "failed" "系统升级失败：项目目录缺少 compose 文件。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+          exit 1
+        fi
+        cd "$PROJECT_DIR"
         log "git fetch origin"
         git fetch origin
         REMOTE_VERSION="$(git show "origin/$TARGET_BRANCH:VERSION" 2>/dev/null | head -n 1 | tr -d '\\r' || true)"
@@ -2012,8 +2041,8 @@ PY
         log "git pull --ff-only origin $TARGET_BRANCH"
         git pull --ff-only origin "$TARGET_BRANCH"
         if [ "$DB_BACKEND" = "postgres" ]; then
-          log "docker compose --project-name $COMPOSE_PROJECT_NAME up -d postgres"
-          retry_cmd 3 8 docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d postgres
+          log "docker compose --project-directory $PROJECT_DIR --project-name $COMPOSE_PROJECT_NAME up -d postgres"
+          retry_cmd 3 8 docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" up -d postgres
         fi
         export COMPOSE_BAKE=0
         export DOCKER_BUILDKIT=0
@@ -2022,10 +2051,10 @@ PY
         export DOCKER_CLIENT_TIMEOUT=300
         log "docker pull docker.m.daocloud.io/library/python:3.12-slim (best effort)"
         retry_cmd 3 8 docker pull docker.m.daocloud.io/library/python:3.12-slim || log "预拉取基础镜像失败，继续构建"
-        log "docker compose --project-name $COMPOSE_PROJECT_NAME build --pull web"
-        retry_cmd 3 10 docker compose --project-name "$COMPOSE_PROJECT_NAME" build --pull web
-        log "docker compose --project-name $COMPOSE_PROJECT_NAME up -d --no-deps web"
-        retry_cmd 3 8 docker compose --project-name "$COMPOSE_PROJECT_NAME" up -d --no-deps web
+        log "docker compose --project-directory $PROJECT_DIR --project-name $COMPOSE_PROJECT_NAME build --pull web"
+        retry_cmd 3 10 docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" build --pull web
+        log "docker compose --project-directory $PROJECT_DIR --project-name $COMPOSE_PROJECT_NAME up -d --no-deps web"
+        retry_cmd 3 8 docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" up -d --no-deps web
         success=1
         log "系统升级完成"
         write_state "success" "系统升级完成，请重新登录。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
@@ -2038,6 +2067,11 @@ def dispatch_host_web_upgrade() -> tuple[bool, str]:
         return False, "未检测到 Docker Socket，无法派发宿主机升级任务。"
     if not HOST_WEB_UPGRADE_PROJECT_DIR:
         return False, "未配置宿主机项目目录，无法升级。"
+    project_dir = resolve_host_web_upgrade_project_dir()
+    if not project_dir.startswith("/"):
+        return False, "宿主机项目目录必须为绝对路径，无法升级。"
+    if project_dir == "/workspace":
+        return False, "宿主机项目目录不能为 /workspace，请改为真实部署目录后重试。"
     helper_script = build_host_web_upgrade_script(get_current_app_version())
     args = [
         "docker",
@@ -2047,11 +2081,11 @@ def dispatch_host_web_upgrade() -> tuple[bool, str]:
         "-v",
         f"{DOCKER_SOCKET_FILE}:{DOCKER_SOCKET_FILE}",
         "-v",
-        f"{HOST_WEB_UPGRADE_PROJECT_DIR}:/workspace",
+        f"{project_dir}:{project_dir}",
         "-v",
         f"{HOST_WEB_UPGRADE_DATA_VOLUME}:/app/data",
         "-w",
-        "/workspace",
+        project_dir,
         HOST_WEB_UPGRADE_HELPER_IMAGE,
         "sh",
         "-lc",
