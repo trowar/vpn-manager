@@ -32,6 +32,10 @@ from urllib import request as urllib_request
 
 import paramiko
 import psycopg
+try:
+    import qrcode
+except Exception:  # pragma: no cover - optional dependency fallback
+    qrcode = None
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, x25519
@@ -13133,6 +13137,57 @@ def admin_download_openvpn_config():
     return Response(config_text, headers=headers, mimetype="text/plain")
 
 
+def render_qr_png(payload: str) -> bytes:
+    content = (payload or "").strip()
+    if not content:
+        raise RuntimeError("二维码内容为空")
+
+    python_qr_error = ""
+    if qrcode is not None:
+        try:
+            qr_obj = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=8,
+                border=2,
+            )
+            qr_obj.add_data(content)
+            qr_obj.make(fit=True)
+            image = qr_obj.make_image(fill_color="black", back_color="white")
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return buffer.getvalue()
+        except Exception as exc:
+            python_qr_error = str(exc).strip() or repr(exc)
+    else:
+        python_qr_error = "python qrcode 模块不可用"
+
+    native_qr_error = ""
+    try:
+        qr = subprocess.run(
+            ["qrencode", "-o", "-", "-t", "PNG"],
+            input=content.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        if qr.returncode == 0 and qr.stdout:
+            return qr.stdout
+        native_qr_error = (
+            (qr.stderr or b"").decode("utf-8", errors="ignore").strip() or "未知错误"
+        )
+    except FileNotFoundError:
+        native_qr_error = "系统未安装 qrencode"
+    except Exception as exc:
+        native_qr_error = str(exc).strip() or repr(exc)
+
+    details = []
+    if python_qr_error:
+        details.append(f"Python二维码引擎失败：{python_qr_error}")
+    if native_qr_error:
+        details.append(f"qrencode 回退失败：{native_qr_error}")
+    raise RuntimeError("；".join(details) if details else "未知错误")
+
+
 @app.route("/admin/download/qr")
 @login_required
 @admin_required
@@ -13161,20 +13216,16 @@ def admin_download_qr():
         flash(f"管理员二维码生成失败：{exc}", "error")
         return redirect(url_for("admin_home"))
 
-    qr = subprocess.run(
-        ["qrencode", "-o", "-", "-t", "PNG"],
-        input=config_text.encode("utf-8"),
-        capture_output=True,
-        check=False,
-    )
-    if qr.returncode != 0:
-        msg = (qr.stderr or b"").decode("utf-8", errors="ignore").strip() or "未知错误"
+    try:
+        qr_png = render_qr_png(config_text)
+    except Exception as exc:
+        msg = str(exc).strip() or "未知错误"
         flash(f"管理员二维码生成失败：{msg}", "error")
         return redirect(url_for("admin_home"))
 
     filename = f"wg-admin-{safe_name(admin['username'])}-{wireguard_profile_filename_suffix(requested_mode)}.png"
     headers = {"Content-Disposition": f'inline; filename=\"{filename}\"'}
-    return Response(qr.stdout, headers=headers, mimetype="image/png")
+    return Response(qr_png, headers=headers, mimetype="image/png")
 
 
 
@@ -13207,20 +13258,16 @@ def download_qr():
         flash(f"二维码生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    qr = subprocess.run(
-        ["qrencode", "-o", "-", "-t", "PNG"],
-        input=config_text.encode("utf-8"),
-        capture_output=True,
-        check=False,
-    )
-    if qr.returncode != 0:
-        msg = (qr.stderr or b"").decode("utf-8", errors="ignore").strip() or "未知错误"
+    try:
+        qr_png = render_qr_png(config_text)
+    except Exception as exc:
+        msg = str(exc).strip() or "未知错误"
         flash(f"二维码生成失败：{msg}", "error")
         return redirect(url_for("dashboard_home"))
 
     filename = f"wg-{safe_name(user['username'])}-global.png"
     headers = {"Content-Disposition": f'inline; filename=\"{filename}\"'}
-    return Response(qr.stdout, headers=headers, mimetype="image/png")
+    return Response(qr_png, headers=headers, mimetype="image/png")
 
 
 @app.route("/subscription/payment-qr")
@@ -13235,17 +13282,13 @@ def subscription_payment_qr():
     if not address:
         return {"ok": False, "error": "未配置 USDT 收款地址"}, 404
 
-    qr = subprocess.run(
-        ["qrencode", "-o", "-", "-t", "PNG"],
-        input=address.encode("utf-8"),
-        capture_output=True,
-        check=False,
-    )
-    if qr.returncode != 0:
-        msg = (qr.stderr or "").strip() or "未知错误"
+    try:
+        qr_png = render_qr_png(address)
+    except Exception as exc:
+        msg = str(exc).strip() or "未知错误"
         return {"ok": False, "error": f"生成支付二维码失败：{msg}"}, 500
 
-    return Response(qr.stdout, mimetype="image/png")
+    return Response(qr_png, mimetype="image/png")
 
 
 

@@ -3,3 +3,5 @@ gunicorn==22.0.0
 paramiko==3.5.1
 cryptography==46.0.3
 psycopg[binary]==3.2.3
+qrcode==7.4.2
+Pillow==10.4.0
