@@ -64,6 +64,12 @@ POSTGRES_DSN = os.environ.get(
 LEGACY_SQLITE_MIGRATION_SOURCE = Path(
     os.environ.get("PORTAL_SQLITE_MIGRATION_SOURCE", str(DB_PATH))
 )
+SKIP_SQLITE_IMPORT = os.environ.get("PORTAL_SKIP_SQLITE_IMPORT", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 CLIENT_CONF_DIR = Path(
     os.environ.get("PORTAL_CLIENT_CONF_DIR", DATA_DIR / "client-configs")
 )
@@ -5275,6 +5281,8 @@ def close_db(_exc) -> None:
 
 def migrate_sqlite_to_postgres_if_needed(db) -> None:
     if DB_BACKEND != "postgres":
+        return
+    if SKIP_SQLITE_IMPORT:
         return
     if get_app_setting(db, "sqlite_migration_done", ""):
         return

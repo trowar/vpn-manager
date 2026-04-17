@@ -25,6 +25,7 @@ DISABLE_SYSTEMD_RESOLVED="${DISABLE_SYSTEMD_RESOLVED:-1}"
 INSTALL_MODE="${INSTALL_MODE:-auto}" # auto|install|upgrade
 SKIP_APT_ON_UPGRADE="${SKIP_APT_ON_UPGRADE:-1}"
 UPGRADE_INCLUDE_VPN_SERVER="${UPGRADE_INCLUDE_VPN_SERVER:-0}"
+UPGRADE_BACKUP_DB="${UPGRADE_BACKUP_DB:-1}"
 
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-600}"
 APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
@@ -37,6 +38,7 @@ export NEEDRESTART_MODE=a
 
 SCRIPT_MODE=""
 INSTALL_API_TOKEN=""
+UPGRADE_DB_BACKUP_FILE=""
 
 log() {
   echo "[install] $*"
@@ -336,6 +338,30 @@ load_existing_settings_if_any() {
   if [ -n "${v}" ]; then WEB_PUBLIC_PORT="${v}"; fi
 }
 
+require_upgrade_env_integrity() {
+  local file backend dsn
+  file="$(env_path)"
+  if [ ! -f "${file}" ]; then
+    err "Upgrade mode requires existing ${file}. Refusing to continue to protect data."
+    exit 1
+  fi
+
+  backend="$(read_env_value PORTAL_DB_BACKEND || true)"
+  if [ -z "${backend}" ]; then
+    backend="postgres"
+  fi
+  if [ "${backend}" != "postgres" ]; then
+    err "Upgrade mode expects PORTAL_DB_BACKEND=postgres in ${file}, got '${backend}'."
+    exit 1
+  fi
+
+  dsn="$(read_env_value PORTAL_POSTGRES_DSN || true)"
+  if [ -z "${dsn}" ]; then
+    err "Upgrade mode requires PORTAL_POSTGRES_DSN in ${file}. Refusing to continue."
+    exit 1
+  fi
+}
+
 ensure_postgres_ready() {
   if has_cmd systemctl; then
     systemctl enable --now postgresql
@@ -358,6 +384,42 @@ setup_postgres_db() {
   fi
 }
 
+ensure_postgres_db_exists_for_upgrade() {
+  local db_exists users_exists
+  db_exists="$(runuser -u postgres -- psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'\" | tr -d '[:space:]' || true)"
+  if [ "${db_exists}" != "1" ]; then
+    err "Upgrade mode: database '${POSTGRES_DB}' does not exist. Refusing to create a new empty database."
+    exit 1
+  fi
+
+  users_exists="$(runuser -u postgres -- psql -d "${POSTGRES_DB}" -tAc \"SELECT to_regclass('public.users') IS NOT NULL\" | tr -d '[:space:]' || true)"
+  if [ "${users_exists}" != "t" ] && [ "${users_exists}" != "true" ]; then
+    err "Upgrade mode: table 'users' not found in '${POSTGRES_DB}'. Refusing migration to protect existing data."
+    exit 1
+  fi
+}
+
+backup_postgres_before_upgrade() {
+  if [ "${SCRIPT_MODE}" != "upgrade" ] || [ "${UPGRADE_BACKUP_DB}" != "1" ]; then
+    return 0
+  fi
+
+  if ! has_cmd pg_dump; then
+    err "Upgrade mode requires pg_dump for safety backup, but pg_dump is missing."
+    exit 1
+  fi
+
+  local backup_dir ts backup_file
+  backup_dir="${APP_DIR}/backups"
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_file="${backup_dir}/postgres-${POSTGRES_DB}-${ts}.dump"
+  mkdir -p "${backup_dir}"
+
+  log "Upgrade mode: creating database backup at ${backup_file}"
+  runuser -u postgres -- pg_dump -Fc --dbname="${POSTGRES_DB}" --file="${backup_file}"
+  UPGRADE_DB_BACKUP_FILE="${backup_file}"
+}
+
 prepare_env_install() {
   local ip portal_secret api_token
   ip="$(resolve_preferred_ip)"
@@ -377,6 +439,7 @@ prepare_env_install() {
   upsert_env "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
   upsert_env "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
   upsert_env "PORTAL_SQLITE_MIGRATION_SOURCE" "${APP_DIR}/data/portal.db"
+  upsert_env "PORTAL_SKIP_SQLITE_IMPORT" "0"
 
   upsert_env "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
   upsert_env "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
@@ -421,6 +484,7 @@ prepare_env_upgrade() {
   upsert_env_if_missing "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
   upsert_env_if_missing "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
   upsert_env_if_missing "PORTAL_SQLITE_MIGRATION_SOURCE" "${APP_DIR}/data/portal.db"
+  upsert_env "PORTAL_SKIP_SQLITE_IMPORT" "1"
 
   upsert_env_if_missing "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
   upsert_env_if_missing "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
@@ -445,6 +509,32 @@ install_web_runtime() {
   python3 -m venv "${APP_DIR}/.venv"
   "${APP_DIR}/.venv/bin/pip" install --upgrade pip
   "${APP_DIR}/.venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
+}
+
+run_upgrade_schema_migration() {
+  if [ "${SCRIPT_MODE}" != "upgrade" ]; then
+    return 0
+  fi
+  log "Upgrade mode: applying schema migration only (no data reset)"
+  set -a
+  # shellcheck disable=SC1090
+  . "$(env_path)"
+  set +a
+  PORTAL_SKIP_SQLITE_IMPORT=1 "${APP_DIR}/.venv/bin/python" - <<'PY'
+import os
+import traceback
+try:
+    os.environ["PORTAL_SKIP_SQLITE_IMPORT"] = "1"
+    import app as portal
+    with portal.app.app_context():
+        db = portal.get_db()
+        portal.migrate_schema(db)
+        db.commit()
+    print("schema migration completed")
+except Exception:
+    traceback.print_exc()
+    raise
+PY
 }
 
 write_web_systemd_unit() {
@@ -569,6 +659,7 @@ Notes:
 3) Local vpn-server path: ${LOCAL_VPN_APP_DIR}
 4) Web path: ${APP_DIR}
 5) Upgrade mode keeps existing account/secret/token values in ${APP_DIR}/${ENV_FILE}
+6) Upgrade DB backup: ${UPGRADE_DB_BACKUP_FILE:-skipped}
 ===================================================
 
 EOF
@@ -597,8 +688,16 @@ main() {
   setup_repo
   load_existing_settings_if_any
   cleanup_legacy_docker_stack
+  if [ "${SCRIPT_MODE}" = "upgrade" ]; then
+    require_upgrade_env_integrity
+  fi
   ensure_postgres_ready
-  setup_postgres_db
+  if [ "${SCRIPT_MODE}" = "install" ]; then
+    setup_postgres_db
+  else
+    ensure_postgres_db_exists_for_upgrade
+    backup_postgres_before_upgrade
+  fi
 
   if [ "${SCRIPT_MODE}" = "install" ]; then
     prepare_env_install
@@ -607,6 +706,7 @@ main() {
   fi
 
   install_web_runtime
+  run_upgrade_schema_migration
   write_web_systemd_unit
   start_or_restart_web_service
   deploy_local_vpn_server
