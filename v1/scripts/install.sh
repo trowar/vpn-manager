@@ -533,7 +533,9 @@ run_upgrade_schema_migration() {
   # shellcheck disable=SC1090
   . "$(env_path)"
   set +a
-  PORTAL_SKIP_SQLITE_IMPORT=1 "${APP_DIR}/.venv/bin/python" - <<'PY'
+  (
+    cd "${APP_DIR}"
+    PORTAL_SKIP_SQLITE_IMPORT=1 "${APP_DIR}/.venv/bin/python" - <<'PY'
 import os
 import traceback
 try:
@@ -548,6 +550,7 @@ except Exception:
     traceback.print_exc()
     raise
 PY
+  )
 }
 
 write_web_systemd_unit() {
