@@ -622,6 +622,137 @@ deploy_local_vpn_server() {
   bash "${script_path}"
 }
 
+register_local_vpn_server_record() {
+  if [ "${INSTALL_LOCAL_VPN_SERVER}" != "1" ]; then
+    return 0
+  fi
+  if [ ! -f "$(env_path)" ]; then
+    return 0
+  fi
+
+  local host server_name api_token
+  host="$(resolve_preferred_ip)"
+  server_name="$(hostname 2>/dev/null || echo "local-vpn-server")"
+  api_token="$(read_env_value VPN_API_TOKEN || true)"
+  if [ -z "${api_token}" ]; then
+    api_token="${INSTALL_API_TOKEN}"
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  . "$(env_path)"
+  set +a
+
+  (
+    cd "${APP_DIR}"
+    LOCAL_SERVER_HOST="${host}" \
+    LOCAL_SERVER_NAME="${server_name}" \
+    LOCAL_SERVER_REGION="Local" \
+    LOCAL_VPN_API_TOKEN="${api_token}" \
+    LOCAL_WG_PORT="${WG_PUBLIC_PORT}" \
+    LOCAL_OPENVPN_PORT="${OPENVPN_PUBLIC_PORT}" \
+    LOCAL_DNS_PORT="${DNS_PUBLIC_PORT}" \
+    "${APP_DIR}/.venv/bin/python" - <<'PY'
+import os
+
+import app as portal
+
+host = (os.environ.get("LOCAL_SERVER_HOST") or "").strip()
+server_name = (os.environ.get("LOCAL_SERVER_NAME") or "").strip() or host
+server_region = (os.environ.get("LOCAL_SERVER_REGION") or "Local").strip()
+vpn_api_token = (os.environ.get("LOCAL_VPN_API_TOKEN") or "").strip()
+wg_port = portal.normalize_server_port(os.environ.get("LOCAL_WG_PORT"), portal.SERVER_DEPLOY_DEFAULT_WG_PORT)
+openvpn_port = portal.normalize_server_port(os.environ.get("LOCAL_OPENVPN_PORT"), portal.SERVER_DEPLOY_DEFAULT_OPENVPN_PORT)
+dns_port = portal.normalize_server_port(os.environ.get("LOCAL_DNS_PORT"), portal.SERVER_DEPLOY_DEFAULT_DNS_PORT)
+now_iso = portal.utcnow_iso()
+message = "Local vpn-server deployed by install script."
+
+if not host:
+    raise RuntimeError("empty local server host")
+
+with portal.app.app_context():
+    db = portal.get_db()
+    row = db.execute(
+        """
+        SELECT id
+        FROM vpn_servers
+        WHERE host = ?
+           OR (trim(COALESCE(vpn_api_token, '')) <> '' AND vpn_api_token = ?)
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (host, vpn_api_token),
+    ).fetchone()
+    if row:
+        server_id = int(row["id"])
+        db.execute(
+            """
+            UPDATE vpn_servers
+            SET server_name = ?,
+                server_region = ?,
+                host = ?,
+                port = 22,
+                username = COALESCE(NULLIF(username, ''), 'root'),
+                domain = COALESCE(domain, ''),
+                vpn_api_token = ?,
+                wg_port = ?,
+                openvpn_port = ?,
+                dns_port = ?,
+                status = 'online',
+                last_test_at = ?,
+                last_test_ok = 1,
+                last_test_message = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                server_name,
+                server_region,
+                host,
+                vpn_api_token,
+                wg_port,
+                openvpn_port,
+                dns_port,
+                now_iso,
+                message,
+                now_iso,
+                server_id,
+            ),
+        )
+    else:
+        server_id = portal.create_server_record(
+            db,
+            server_name=server_name,
+            server_region=server_region,
+            host=host,
+            port=22,
+            username="root",
+            password="",
+            ssh_private_key="",
+            domain="",
+            wg_port=wg_port,
+            openvpn_port=openvpn_port,
+            dns_port=dns_port,
+            vpn_api_token=vpn_api_token,
+            status="online",
+        )
+        db.execute(
+            """
+            UPDATE vpn_servers
+            SET last_test_at = ?,
+                last_test_ok = 1,
+                last_test_message = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso, message, now_iso, server_id),
+        )
+    db.commit()
+    print(f"local server record upserted: id={server_id}, host={host}")
+PY
+  ) || warn "Failed to register local vpn-server record in portal database"
+}
+
 ensure_openvpn_updown_wrapper_compat() {
   local conf up_script down_script iptables_bin up_line uplink_if
   conf="/etc/openvpn/server/server.conf"
@@ -780,6 +911,7 @@ main() {
   start_or_restart_web_service
   deploy_local_vpn_server
   ensure_openvpn_updown_wrapper_compat
+  register_local_vpn_server_record
   verify_components
   print_summary
 }
