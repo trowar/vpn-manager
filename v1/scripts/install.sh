@@ -21,6 +21,10 @@ DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-53}"
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-1}"
 
+INSTALL_MODE="${INSTALL_MODE:-auto}" # auto|install|upgrade
+SKIP_APT_ON_UPGRADE="${SKIP_APT_ON_UPGRADE:-1}"
+UPGRADE_INCLUDE_VPN_SERVER="${UPGRADE_INCLUDE_VPN_SERVER:-0}"
+
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-600}"
 APT_RETRY_COUNT="${APT_RETRY_COUNT:-5}"
 APT_RETRY_DELAY_SECONDS="${APT_RETRY_DELAY_SECONDS:-8}"
@@ -30,6 +34,7 @@ export DEBCONF_NONINTERACTIVE_SEEN=true
 export TERM="${TERM:-dumb}"
 export NEEDRESTART_MODE=a
 
+SCRIPT_MODE=""
 INSTALL_API_TOKEN=""
 
 log() {
@@ -48,9 +53,13 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+env_path() {
+  echo "${APP_DIR}/${ENV_FILE}"
+}
+
 require_root() {
   if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    err "请使用 root 运行此脚本"
+    err "Please run this script as root."
     exit 1
   fi
 }
@@ -64,16 +73,16 @@ retry_cmd() {
   while true; do
     "$@"
     local code=$?
-    if [ "$code" -eq 0 ]; then
+    if [ "${code}" -eq 0 ]; then
       return 0
     fi
-    if [ "$attempt" -ge "$retries" ]; then
-      err "命令失败，已重试 ${attempt} 次 (exit=${code}): $*"
-      return "$code"
+    if [ "${attempt}" -ge "${retries}" ]; then
+      err "Command failed after ${attempt} attempts (exit=${code}): $*"
+      return "${code}"
     fi
-    warn "命令失败 (exit=${code})，${delay}s 后重试 ${attempt}/${retries}: $*"
+    warn "Command failed (exit=${code}), retrying in ${delay}s (${attempt}/${retries}): $*"
     attempt=$((attempt + 1))
-    sleep "$delay"
+    sleep "${delay}"
   done
 }
 
@@ -162,7 +171,7 @@ repair_apt_state() {
 
 install_base_deps() {
   if ! has_cmd apt-get; then
-    err "当前脚本仅支持 apt 系发行版（Ubuntu/Debian）"
+    err "This script currently supports apt-based distributions only (Ubuntu/Debian)."
     exit 1
   fi
 
@@ -224,8 +233,106 @@ cleanup_legacy_docker_stack() {
   fi
 
   if [ "${had_legacy}" = "1" ]; then
-    log "Legacy Docker stack removed, continuing with local systemd deployment"
+    log "Legacy Docker stack removed"
   fi
+}
+
+read_env_value() {
+  local key="$1"
+  local file
+  file="$(env_path)"
+  if [ ! -f "${file}" ]; then
+    return 0
+  fi
+  awk -v k="${key}" -F= '
+    $1 == k {
+      sub(/^[^=]*=/, "", $0)
+      val = $0
+    }
+    END {
+      if (val != "") {
+        print val
+      }
+    }
+  ' "${file}"
+}
+
+upsert_env() {
+  local key="$1"
+  local value="$2"
+  local file
+  file="$(env_path)"
+  if grep -q "^${key}=" "${file}" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "${file}"
+  else
+    echo "${key}=${value}" >> "${file}"
+  fi
+}
+
+upsert_env_if_missing() {
+  local key="$1"
+  local value="$2"
+  local file
+  file="$(env_path)"
+  if ! grep -q "^${key}=" "${file}" 2>/dev/null; then
+    echo "${key}=${value}" >> "${file}"
+  fi
+}
+
+looks_like_existing_install() {
+  local file
+  file="$(env_path)"
+  if [ -f "${file}" ]; then
+    return 0
+  fi
+  if [ -d "${APP_DIR}/.git" ] && [ -f "/etc/systemd/system/${WEB_SERVICE_NAME}" ]; then
+    return 0
+  fi
+  return 1
+}
+
+resolve_install_mode() {
+  case "${INSTALL_MODE}" in
+    install|upgrade)
+      SCRIPT_MODE="${INSTALL_MODE}"
+      ;;
+    auto)
+      if looks_like_existing_install; then
+        SCRIPT_MODE="upgrade"
+      else
+        SCRIPT_MODE="install"
+      fi
+      ;;
+    *)
+      err "Invalid INSTALL_MODE=${INSTALL_MODE}. Allowed: auto|install|upgrade"
+      exit 1
+      ;;
+  esac
+
+  if [ "${SCRIPT_MODE}" = "upgrade" ] && ! looks_like_existing_install; then
+    err "INSTALL_MODE=upgrade but no existing installation detected under ${APP_DIR}"
+    exit 1
+  fi
+
+  log "Running in ${SCRIPT_MODE} mode"
+}
+
+load_existing_settings_if_any() {
+  local file
+  file="$(env_path)"
+  if [ ! -f "${file}" ]; then
+    return 0
+  fi
+
+  local v
+  v="$(read_env_value PORTAL_POSTGRES_DB || true)"
+  if [ -n "${v}" ]; then POSTGRES_DB="${v}"; fi
+  v="$(read_env_value PORTAL_POSTGRES_USER || true)"
+  if [ -n "${v}" ]; then POSTGRES_USER="${v}"; fi
+  v="$(read_env_value PORTAL_POSTGRES_PASSWORD || true)"
+  if [ -n "${v}" ]; then POSTGRES_PASSWORD="${v}"; fi
+  v="$(read_env_value WEB_PUBLIC_PORT || true)"
+  if [ -n "${v}" ]; then WEB_PUBLIC_PORT="${v}"; fi
 }
 
 ensure_postgres_ready() {
@@ -250,17 +357,7 @@ setup_postgres_db() {
   fi
 }
 
-upsert_env() {
-  local key="$1"
-  local value="$2"
-  if grep -q "^${key}=" "${APP_DIR}/${ENV_FILE}" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "${APP_DIR}/${ENV_FILE}"
-  else
-    echo "${key}=${value}" >> "${APP_DIR}/${ENV_FILE}"
-  fi
-}
-
-prepare_env() {
+prepare_env_install() {
   local ip portal_secret api_token
   ip="$(resolve_preferred_ip)"
   portal_secret="$(generate_secret)"
@@ -268,7 +365,7 @@ prepare_env() {
   INSTALL_API_TOKEN="${api_token}"
 
   mkdir -p "${APP_DIR}"
-  touch "${APP_DIR}/${ENV_FILE}"
+  touch "$(env_path)"
 
   upsert_env "PORTAL_SECRET_KEY" "${portal_secret}"
   upsert_env "ADMIN_USERNAME" "admin"
@@ -298,8 +395,52 @@ prepare_env() {
   upsert_env "OPENVPN_RELAY_PORT_END" "29031"
 }
 
+prepare_env_upgrade() {
+  local ip portal_secret api_token
+  ip="$(resolve_preferred_ip)"
+  mkdir -p "${APP_DIR}"
+  touch "$(env_path)"
+
+  portal_secret="$(read_env_value PORTAL_SECRET_KEY || true)"
+  if [ -z "${portal_secret}" ]; then
+    portal_secret="$(generate_secret)"
+  fi
+  api_token="$(read_env_value VPN_API_TOKEN || true)"
+  if [ -z "${api_token}" ]; then
+    api_token="$(generate_secret)"
+  fi
+  INSTALL_API_TOKEN="${api_token}"
+
+  upsert_env_if_missing "PORTAL_SECRET_KEY" "${portal_secret}"
+  upsert_env_if_missing "ADMIN_USERNAME" "admin"
+  upsert_env_if_missing "ADMIN_PASSWORD" "admin"
+  upsert_env_if_missing "PORTAL_DB_BACKEND" "postgres"
+  upsert_env_if_missing "PORTAL_POSTGRES_DB" "${POSTGRES_DB}"
+  upsert_env_if_missing "PORTAL_POSTGRES_USER" "${POSTGRES_USER}"
+  upsert_env_if_missing "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
+  upsert_env_if_missing "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
+  upsert_env_if_missing "PORTAL_SQLITE_MIGRATION_SOURCE" "${APP_DIR}/data/portal.db"
+
+  upsert_env_if_missing "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
+  upsert_env_if_missing "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
+
+  upsert_env_if_missing "VPN_API_TOKEN" "${api_token}"
+  upsert_env_if_missing "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
+  upsert_env_if_missing "WG_ENDPOINT" "${ip}:${WG_PUBLIC_PORT}"
+  upsert_env_if_missing "OPENVPN_ENDPOINT_HOST" "${ip}"
+  upsert_env_if_missing "OPENVPN_ENDPOINT_PORT" "${OPENVPN_PUBLIC_PORT}"
+  upsert_env_if_missing "OPENVPN_PROTO" "${OPENVPN_PROTO}"
+
+  upsert_env_if_missing "PORTAL_ENABLE_UDP_RELAY" "1"
+  upsert_env_if_missing "VPN_RELAY_PUBLIC_HOST" "${ip}"
+  upsert_env_if_missing "WG_RELAY_PORT_START" "24000"
+  upsert_env_if_missing "WG_RELAY_PORT_END" "24031"
+  upsert_env_if_missing "OPENVPN_RELAY_PORT_START" "29000"
+  upsert_env_if_missing "OPENVPN_RELAY_PORT_END" "29031"
+}
+
 install_web_runtime() {
-  log "Installing web runtime dependencies (local)"
+  log "Installing/updating web runtime dependencies"
   python3 -m venv "${APP_DIR}/.venv"
   "${APP_DIR}/.venv/bin/pip" install --upgrade pip
   "${APP_DIR}/.venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
@@ -327,18 +468,27 @@ WantedBy=multi-user.target
 EOF
 }
 
-start_web_service() {
+start_or_restart_web_service() {
   if ! has_cmd systemctl; then
-    err "systemctl 不可用，无法启动本地 web 服务"
+    err "systemctl is required for local deployment mode."
     exit 1
   fi
   systemctl daemon-reload
-  systemctl enable --now "${WEB_SERVICE_NAME}"
+  if systemctl is-active --quiet "${WEB_SERVICE_NAME}"; then
+    systemctl restart "${WEB_SERVICE_NAME}"
+  else
+    systemctl enable --now "${WEB_SERVICE_NAME}"
+  fi
 }
 
 deploy_local_vpn_server() {
   if [ "${INSTALL_LOCAL_VPN_SERVER}" != "1" ]; then
     log "Skipping local vpn-server deploy (INSTALL_LOCAL_VPN_SERVER=${INSTALL_LOCAL_VPN_SERVER})"
+    return 0
+  fi
+
+  if [ "${SCRIPT_MODE}" = "upgrade" ] && [ "${UPGRADE_INCLUDE_VPN_SERVER}" != "1" ]; then
+    log "Upgrade mode: skip vpn-server redeploy (set UPGRADE_INCLUDE_VPN_SERVER=1 to enable)"
     return 0
   fi
 
@@ -364,32 +514,32 @@ deploy_local_vpn_server() {
   bash "${script_path}"
 }
 
-verify_first_install_components() {
+verify_components() {
   if ! systemctl is-active --quiet postgresql; then
-    err "postgresql 服务未启动"
+    err "postgresql service is not active"
     systemctl --no-pager --full status postgresql || true
     exit 1
   fi
 
   if ! systemctl is-active --quiet "${WEB_SERVICE_NAME}"; then
-    err "web 服务未启动: ${WEB_SERVICE_NAME}"
+    err "web service is not active: ${WEB_SERVICE_NAME}"
     systemctl --no-pager --full status "${WEB_SERVICE_NAME}" || true
     exit 1
   fi
 
-  if [ "${INSTALL_LOCAL_VPN_SERVER}" = "1" ]; then
+  if [ "${INSTALL_LOCAL_VPN_SERVER}" = "1" ] && { [ "${SCRIPT_MODE}" = "install" ] || [ "${UPGRADE_INCLUDE_VPN_SERVER}" = "1" ]; }; then
     if ! systemctl is-active --quiet "wg-quick@wg0.service"; then
-      err "wg-quick@wg0.service 未启动"
+      err "wg-quick@wg0.service is not active"
       systemctl --no-pager --full status "wg-quick@wg0.service" || true
       exit 1
     fi
     if ! systemctl is-active --quiet "vpnmanager-openvpn.service"; then
-      err "vpnmanager-openvpn.service 未启动"
+      err "vpnmanager-openvpn.service is not active"
       systemctl --no-pager --full status "vpnmanager-openvpn.service" || true
       exit 1
     fi
     if ! systemctl is-active --quiet "vpnmanager-server.service"; then
-      err "vpnmanager-server.service 未启动"
+      err "vpnmanager-server.service is not active"
       systemctl --no-pager --full status "vpnmanager-server.service" || true
       exit 1
     fi
@@ -403,20 +553,21 @@ print_summary() {
 
   cat <<EOF
 
-================ 安装完成 ================
-登录地址: http://${ip}:${WEB_PUBLIC_PORT}
+================ Install Completed ================
+Mode: ${SCRIPT_MODE}
+Login URL: http://${ip}:${WEB_PUBLIC_PORT}
 IP: ${ip}
 LAN IP: ${local_ip}
-端口: ${WEB_PUBLIC_PORT}
-默认账号: admin
-默认密码: admin
-说明:
-1) 已本地部署 web 服务（systemd: ${WEB_SERVICE_NAME}）
-2) 已本地部署数据库（systemd: postgresql）
-3) 已本地部署 vpn-server（systemd）
-4) web 目录: ${APP_DIR}
-5) vpn-server 目录: ${LOCAL_VPN_APP_DIR}
-========================================
+Port: ${WEB_PUBLIC_PORT}
+Default username: admin
+Default password: admin
+Notes:
+1) Local web service (systemd): ${WEB_SERVICE_NAME}
+2) Local database (systemd): postgresql
+3) Local vpn-server path: ${LOCAL_VPN_APP_DIR}
+4) Web path: ${APP_DIR}
+5) Upgrade mode keeps existing account/secret/token values in ${APP_DIR}/${ENV_FILE}
+===================================================
 
 EOF
 
@@ -429,18 +580,37 @@ EOF
 
 main() {
   require_root
-  install_base_deps
+  resolve_install_mode
+
+  if [ "${SCRIPT_MODE}" = "install" ]; then
+    install_base_deps
+  else
+    if [ "${SKIP_APT_ON_UPGRADE}" = "1" ]; then
+      log "Upgrade mode: skip apt install/update (SKIP_APT_ON_UPGRADE=1)"
+    else
+      install_base_deps
+    fi
+  fi
+
   setup_repo
+  load_existing_settings_if_any
   cleanup_legacy_docker_stack
   ensure_postgres_ready
   setup_postgres_db
-  prepare_env
+
+  if [ "${SCRIPT_MODE}" = "install" ]; then
+    prepare_env_install
+  else
+    prepare_env_upgrade
+  fi
+
   install_web_runtime
   write_web_systemd_unit
-  start_web_service
+  start_or_restart_web_service
   deploy_local_vpn_server
-  verify_first_install_components
+  verify_components
   print_summary
 }
 
 main "$@"
+
