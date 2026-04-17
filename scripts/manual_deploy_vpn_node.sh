@@ -19,6 +19,7 @@ VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 VPN_API_TOKEN="${VPN_API_TOKEN:-}"
 OPENVPN_ENFORCE_DB_AUTH="${OPENVPN_ENFORCE_DB_AUTH:-}"
 DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-0}"
+DISABLE_SYSTEMD_RESOLVED="${DISABLE_SYSTEMD_RESOLVED:-1}"
 
 WG_PRIVATE_KEY_B64="${WG_PRIVATE_KEY_B64:-}"
 WG_PUBLIC_KEY_B64="${WG_PUBLIC_KEY_B64:-}"
@@ -246,6 +247,40 @@ detect_uplink_interface() {
     iface="eth0"
   fi
   printf '%s' "${iface}"
+}
+
+disable_systemd_resolved_if_needed() {
+  if [ "${DISABLE_SYSTEMD_RESOLVED}" != "1" ]; then
+    log "skip disabling systemd-resolved (DISABLE_SYSTEMD_RESOLVED=${DISABLE_SYSTEMD_RESOLVED})"
+    return 0
+  fi
+  if ! has_cmd systemctl; then
+    warn "systemctl not available, cannot disable systemd-resolved"
+    return 0
+  fi
+  if ! systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -Fxq "systemd-resolved.service"; then
+    return 0
+  fi
+
+  log "disabling systemd-resolved by default to free DNS port 53"
+  systemctl stop systemd-resolved >/dev/null 2>&1 || true
+  systemctl disable systemd-resolved >/dev/null 2>&1 || true
+
+  if [ -L /etc/resolv.conf ]; then
+    local current_target
+    current_target="$(readlink -f /etc/resolv.conf || true)"
+    if [ "${current_target}" = "/run/systemd/resolve/stub-resolv.conf" ] || [ "${current_target}" = "/run/systemd/resolve/resolv.conf" ] || [ -z "${current_target}" ]; then
+      rm -f /etc/resolv.conf || true
+    fi
+  fi
+
+  if [ ! -s /etc/resolv.conf ] || grep -q "127.0.0.53" /etc/resolv.conf 2>/dev/null; then
+    cat > /etc/resolv.conf <<EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:3
+EOF
+  fi
 }
 
 ensure_wireguard_files() {
@@ -546,6 +581,7 @@ main() {
 
   install_base_deps
   setup_repo
+  disable_systemd_resolved_if_needed
 
   if [ -z "${VPN_API_TOKEN}" ]; then
     VPN_API_TOKEN="$(generate_token)"
