@@ -168,13 +168,13 @@ install_base_deps() {
   if [ "$PM" = "apt" ]; then
     pkg_install \
       ca-certificates curl git openssl \
-      iproute2 iptables \
+      iproute2 iptables net-tools \
       wireguard-tools openvpn dnsmasq \
       python3 python3-venv python3-pip
   else
     pkg_install \
       ca-certificates curl git openssl \
-      iproute iptables \
+      iproute iptables net-tools \
       wireguard-tools openvpn dnsmasq \
       python3 python3-pip
   fi

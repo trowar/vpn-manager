@@ -182,9 +182,20 @@ install_base_deps() {
   retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd update
   retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y \
     ca-certificates curl git openssl \
+    net-tools \
     python3 python3-venv python3-pip \
     postgresql postgresql-contrib
   repair_apt_state
+}
+
+ensure_net_tools_installed() {
+  if has_cmd netstat; then
+    return 0
+  fi
+  log "net-tools is missing, installing net-tools"
+  repair_apt_state
+  retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd update
+  retry_cmd "${APT_RETRY_COUNT}" "${APT_RETRY_DELAY_SECONDS}" apt_cmd install -y --no-install-recommends net-tools
 }
 
 setup_repo() {
@@ -684,6 +695,7 @@ main() {
       install_base_deps
     fi
   fi
+  ensure_net_tools_installed
 
   setup_repo
   load_existing_settings_if_any
