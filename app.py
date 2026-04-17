@@ -168,7 +168,7 @@ except ValueError:
     OPENVPN_ENDPOINT_PORT = 1194
 if OPENVPN_ENDPOINT_PORT <= 0 or OPENVPN_ENDPOINT_PORT > 65535:
     OPENVPN_ENDPOINT_PORT = 1194
-OPENVPN_PROTO = os.environ.get("OPENVPN_PROTO", "udp").strip().lower() or "udp"
+OPENVPN_PROTO = os.environ.get("OPENVPN_PROTO", "tcp").strip().lower() or "tcp"
 OPENVPN_CLIENT_DNS = os.environ.get("OPENVPN_CLIENT_DNS", WG_CLIENT_DNS).strip()
 OPENVPN_CIPHER = os.environ.get("OPENVPN_CIPHER", "AES-256-GCM").strip() or "AES-256-GCM"
 OPENVPN_AUTH = os.environ.get("OPENVPN_AUTH", "SHA256").strip() or "SHA256"

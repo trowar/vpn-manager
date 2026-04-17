@@ -33,6 +33,7 @@ services:
     ports:
       - "${WG_PUBLIC_PORT:-51820}:51820/udp"
       - "${OPENVPN_PUBLIC_PORT:-1194}:1194/udp"
+      - "${OPENVPN_PUBLIC_PORT:-1194}:1194/tcp"
       - "${DNS_PUBLIC_PORT:-53}:53/udp"
       - "${DNS_PUBLIC_PORT:-53}:53/tcp"
       - "${VPN_API_PUBLIC_PORT:-8081}:8081/tcp"
