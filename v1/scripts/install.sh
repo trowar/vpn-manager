@@ -425,9 +425,11 @@ backup_postgres_before_upgrade() {
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   backup_file="${backup_dir}/postgres-${POSTGRES_DB}-${ts}.dump"
   mkdir -p "${backup_dir}"
+  chmod 700 "${backup_dir}" 2>/dev/null || true
 
   log "Upgrade mode: creating database backup at ${backup_file}"
-  runuser -u postgres -- pg_dump -Fc --dbname="${POSTGRES_DB}" --file="${backup_file}"
+  runuser -u postgres -- pg_dump -Fc --dbname="${POSTGRES_DB}" > "${backup_file}"
+  chmod 600 "${backup_file}" 2>/dev/null || true
   UPGRADE_DB_BACKUP_FILE="${backup_file}"
 }
 
