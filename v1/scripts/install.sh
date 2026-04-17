@@ -622,6 +622,58 @@ deploy_local_vpn_server() {
   bash "${script_path}"
 }
 
+ensure_openvpn_updown_wrapper_compat() {
+  local conf up_script down_script iptables_bin up_line uplink_if
+  conf="/etc/openvpn/server/server.conf"
+  up_script="/etc/openvpn/server/vpnmanager-up.sh"
+  down_script="/etc/openvpn/server/vpnmanager-down.sh"
+
+  if [ ! -f "${conf}" ]; then
+    return 0
+  fi
+
+  up_line="$(grep -E '^up "' "${conf}" 2>/dev/null | head -n 1 || true)"
+  if printf '%s' "${up_line}" | grep -q "vpnmanager-up.sh"; then
+    return 0
+  fi
+
+  iptables_bin="$(command -v iptables || true)"
+  if [ -z "${iptables_bin}" ]; then
+    iptables_bin="/sbin/iptables"
+  fi
+
+  uplink_if="$(printf '%s' "${up_line}" | sed -n 's/.* -o \([^ ]*\) .*/\1/p' | head -n 1)"
+  if [ -z "${uplink_if}" ]; then
+    uplink_if="eth0"
+  fi
+
+  log "Applying OpenVPN up/down compatibility wrapper (uplink=${uplink_if})"
+  cat > "${up_script}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if ! ${iptables_bin} -t nat -C POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1; then
+  ${iptables_bin} -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE
+fi
+exit 0
+EOF
+  chmod 755 "${up_script}"
+
+  cat > "${down_script}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+${iptables_bin} -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1 || true
+exit 0
+EOF
+  chmod 755 "${down_script}"
+
+  sed -i 's|^up ".*"|up "/etc/openvpn/server/vpnmanager-up.sh"|' "${conf}"
+  sed -i 's|^down ".*"|down "/etc/openvpn/server/vpnmanager-down.sh"|' "${conf}"
+
+  if has_cmd systemctl; then
+    systemctl restart vpnmanager-openvpn.service || true
+  fi
+}
+
 verify_components() {
   if ! systemctl is-active --quiet postgresql; then
     err "postgresql service is not active"
@@ -727,6 +779,7 @@ main() {
   write_web_systemd_unit
   start_or_restart_web_service
   deploy_local_vpn_server
+  ensure_openvpn_updown_wrapper_compat
   verify_components
   print_summary
 }
