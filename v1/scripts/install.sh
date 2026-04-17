@@ -382,14 +382,14 @@ ensure_postgres_ready() {
 
 setup_postgres_db() {
   local role_exists db_exists
-  role_exists="$(runuser -u postgres -- psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'\" | tr -d '[:space:]' || true)"
+  role_exists="$(runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'" | tr -d '[:space:]' || true)"
   if [ "${role_exists}" != "1" ]; then
     runuser -u postgres -- psql -c "CREATE USER ${POSTGRES_USER} WITH PASSWORD '${POSTGRES_PASSWORD}';"
   else
     runuser -u postgres -- psql -c "ALTER USER ${POSTGRES_USER} WITH PASSWORD '${POSTGRES_PASSWORD}';"
   fi
 
-  db_exists="$(runuser -u postgres -- psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'\" | tr -d '[:space:]' || true)"
+  db_exists="$(runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" | tr -d '[:space:]' || true)"
   if [ "${db_exists}" != "1" ]; then
     runuser -u postgres -- psql -c "CREATE DATABASE ${POSTGRES_DB} OWNER ${POSTGRES_USER};"
   fi
@@ -397,13 +397,13 @@ setup_postgres_db() {
 
 ensure_postgres_db_exists_for_upgrade() {
   local db_exists users_exists
-  db_exists="$(runuser -u postgres -- psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'\" | tr -d '[:space:]' || true)"
+  db_exists="$(runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" | tr -d '[:space:]' || true)"
   if [ "${db_exists}" != "1" ]; then
     err "Upgrade mode: database '${POSTGRES_DB}' does not exist. Refusing to create a new empty database."
     exit 1
   fi
 
-  users_exists="$(runuser -u postgres -- psql -d "${POSTGRES_DB}" -tAc \"SELECT to_regclass('public.users') IS NOT NULL\" | tr -d '[:space:]' || true)"
+  users_exists="$(runuser -u postgres -- psql -d "${POSTGRES_DB}" -tAc "SELECT to_regclass('public.users') IS NOT NULL" | tr -d '[:space:]' || true)"
   if [ "${users_exists}" != "t" ] && [ "${users_exists}" != "true" ]; then
     err "Upgrade mode: table 'users' not found in '${POSTGRES_DB}'. Refusing migration to protect existing data."
     exit 1
