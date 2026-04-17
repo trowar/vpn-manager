@@ -750,7 +750,10 @@ with portal.app.app_context():
     db.commit()
     print(f"local server record upserted: id={server_id}, host={host}")
 PY
-  ) || warn "Failed to register local vpn-server record in portal database"
+  ) || {
+    err "Failed to register local vpn-server record in portal database"
+    exit 1
+  }
 }
 
 ensure_openvpn_updown_wrapper_compat() {
