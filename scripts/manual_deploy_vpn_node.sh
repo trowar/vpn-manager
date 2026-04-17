@@ -36,6 +36,8 @@ OPENVPN_DIR="/etc/openvpn/server"
 OPENVPN_SERVER_CONF="${OPENVPN_DIR}/server.conf"
 OPENVPN_PID_FILE="/run/openvpn-server.pid"
 OPENVPN_STATUS_FILE="/run/openvpn-status.log"
+OPENVPN_UP_SCRIPT="${OPENVPN_DIR}/vpnmanager-up.sh"
+OPENVPN_DOWN_SCRIPT="${OPENVPN_DIR}/vpnmanager-down.sh"
 DNSMASQ_CONF="/etc/dnsmasq.d/vpn.conf"
 WG_SERVER_PUBLIC_KEY_FILE="/srv/vpn-shared/server_public.key"
 
@@ -368,8 +370,12 @@ EOF
 }
 
 write_openvpn_config() {
-  local uplink_if auth_lines
+  local uplink_if auth_lines iptables_bin
   uplink_if="$(detect_uplink_interface)"
+  iptables_bin="$(command -v iptables || true)"
+  if [ -z "${iptables_bin}" ]; then
+    iptables_bin="/sbin/iptables"
+  fi
 
   auth_lines="script-security 2"
   if [ "${OPENVPN_ENFORCE_DB_AUTH}" = "1" ]; then
@@ -381,6 +387,24 @@ management 127.0.0.1 7505
 EOF
 )"
   fi
+
+  cat > "${OPENVPN_UP_SCRIPT}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if ! ${iptables_bin} -t nat -C POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1; then
+  ${iptables_bin} -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE
+fi
+exit 0
+EOF
+  chmod 755 "${OPENVPN_UP_SCRIPT}"
+
+  cat > "${OPENVPN_DOWN_SCRIPT}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+${iptables_bin} -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1 || true
+exit 0
+EOF
+  chmod 755 "${OPENVPN_DOWN_SCRIPT}"
 
   cat > "${OPENVPN_SERVER_CONF}" <<EOF
 port ${OPENVPN_PUBLIC_PORT}
@@ -413,8 +437,8 @@ ${auth_lines}
 push "redirect-gateway def1"
 push "dhcp-option DNS 10.7.0.1"
 
-up "/sbin/iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE"
-down "/sbin/iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE"
+up "${OPENVPN_UP_SCRIPT}"
+down "${OPENVPN_DOWN_SCRIPT}"
 
 status ${OPENVPN_STATUS_FILE}
 verb 3
