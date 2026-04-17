@@ -766,6 +766,10 @@ ensure_openvpn_updown_wrapper_compat() {
     return 0
   fi
 
+  if grep -Eq '^proto[[:space:]]+tcp$' "${conf}" 2>/dev/null; then
+    sed -i '/^explicit-exit-notify /d' "${conf}" || true
+  fi
+
   up_line="$(grep -E '^up "' "${conf}" 2>/dev/null | head -n 1 || true)"
   if printf '%s' "${up_line}" | grep -q "vpnmanager-up.sh"; then
     return 0

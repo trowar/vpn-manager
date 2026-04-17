@@ -370,11 +370,15 @@ EOF
 }
 
 write_openvpn_config() {
-  local uplink_if auth_lines iptables_bin
+  local uplink_if auth_lines iptables_bin explicit_exit_line
   uplink_if="$(detect_uplink_interface)"
   iptables_bin="$(command -v iptables || true)"
   if [ -z "${iptables_bin}" ]; then
     iptables_bin="/sbin/iptables"
+  fi
+  explicit_exit_line=""
+  if [ "${OPENVPN_PROTO}" = "udp" ]; then
+    explicit_exit_line="explicit-exit-notify 1"
   fi
 
   auth_lines="script-security 2"
@@ -427,7 +431,7 @@ auth SHA256
 keepalive 10 120
 persist-key
 persist-tun
-explicit-exit-notify 1
+${explicit_exit_line}
 
 user nobody
 group nogroup
