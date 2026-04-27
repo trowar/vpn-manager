@@ -13176,24 +13176,56 @@ def admin_create_payment_method():
         sort_order = 0
 
     now_iso = utcnow_iso()
-    db.execute(
+    placeholder = db.execute(
         """
-        INSERT INTO payment_methods (
-            method_code, method_name, network, receive_address,
-            is_active, sort_order, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+        SELECT id
+        FROM payment_methods
+        WHERE method_code = ?
+          AND network = ?
+          AND trim(COALESCE(receive_address, '')) = ''
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
         """,
-        (
-            method_code,
-            method_name,
-            network,
-            receive_address,
-            sort_order,
-            now_iso,
-            now_iso,
-        ),
-    )
+        (method_code, network),
+    ).fetchone()
+    if placeholder:
+        db.execute(
+            """
+            UPDATE payment_methods
+            SET method_name = ?,
+                receive_address = ?,
+                is_active = 1,
+                sort_order = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                method_name,
+                receive_address,
+                sort_order,
+                now_iso,
+                int(placeholder["id"]),
+            ),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO payment_methods (
+                method_code, method_name, network, receive_address,
+                is_active, sort_order, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+            """,
+            (
+                method_code,
+                method_name,
+                network,
+                receive_address,
+                sort_order,
+                now_iso,
+                now_iso,
+            ),
+        )
     sync_legacy_payment_settings_with_default_method(db)
     db.commit()
     flash("付款方式已添加。", "success")
