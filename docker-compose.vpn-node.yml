@@ -23,7 +23,6 @@ services:
       VPN_ENABLE_DNSMASQ: ${VPN_ENABLE_DNSMASQ:-1}
       OPENVPN_SERVER_CONF: /etc/openvpn/server/server.conf
       DNSMASQ_CONF: /etc/dnsmasq.d/vpn.conf
-      PORTAL_DB_PATH: /app/data/portal.db
     volumes:
       - ./docker/vpn/wireguard:/etc/wireguard
       - ./docker/vpn/openvpn:/etc/openvpn/server

@@ -26,7 +26,6 @@ DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-0}"
 DISABLE_SYSTEMD_RESOLVED="${DISABLE_SYSTEMD_RESOLVED:-1}"
 
 PY_VENV_DIR="${PY_VENV_DIR:-${APP_DIR}/.venv-vpn}"
-PORTAL_DB_PATH="${PORTAL_DB_PATH:-}"
 
 SHADOWSOCKS_CONF_DIR="/etc/shadowsocks-libev"
 SHADOWSOCKS_CONF_FILE="${SHADOWSOCKS_CONF_DIR}/vpnmanager.json"
@@ -216,22 +215,6 @@ setup_repo() {
   log "cloning repository to ${APP_DIR}"
   rm -rf "${APP_DIR}"
   retry_cmd 1 1 sh -c 'for u in "$1" "$2" "$3" "$4"; do rm -rf "$5"; if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 45s git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; else GIT_TERMINAL_PROMPT=0 git -c http.connectTimeout=10 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 clone --depth 1 --branch "$6" "$u" "$5" && exit 0; fi; done; exit 128' _ "${REPO_URL}" "https://gitclone.com/github.com/trowar/vpn-manager.git" "https://ghproxy.com/https://github.com/trowar/vpn-manager.git" "https://mirror.ghproxy.com/https://github.com/trowar/vpn-manager.git" "${APP_DIR}" "${BRANCH}"
-}
-
-resolve_portal_db_path() {
-  if [ -n "${PORTAL_DB_PATH}" ]; then
-    echo "${PORTAL_DB_PATH}"
-    return
-  fi
-  if [ -f /srv/vpn-platform-v1/data/portal.db ]; then
-    echo "/srv/vpn-platform-v1/data/portal.db"
-    return
-  fi
-  if [ -f /opt/vpn-platform-v1/data/portal.db ]; then
-    echo "/opt/vpn-platform-v1/data/portal.db"
-    return
-  fi
-  echo "${APP_DIR}/data/portal.db"
 }
 
 disable_systemd_resolved_if_needed() {
@@ -479,7 +462,6 @@ Type=simple
 WorkingDirectory=${APP_DIR}/docker/vpn
 Environment=PATH=${PY_VENV_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=VPN_API_TOKEN=${VPN_API_TOKEN}
-Environment=PORTAL_DB_PATH=${PORTAL_DB_PATH}
 ExecStart=${PY_VENV_DIR}/bin/gunicorn --workers 1 --bind 0.0.0.0:${VPN_API_PUBLIC_PORT} vpn_api:app
 Restart=always
 RestartSec=3
@@ -534,7 +516,6 @@ print_summary() {
   if is_enabled "${KCPTUN_ENABLED}"; then
     echo "KCPTUN_KEY: ${KCPTUN_KEY}"
   fi
-  echo "PORTAL_DB_PATH: ${PORTAL_DB_PATH}"
   echo
   echo "Service status checks:"
   systemctl --no-pager --full status "${SHADOWSOCKS_SERVICE_NAME}" | sed -n '1,6p' || true
@@ -563,8 +544,6 @@ main() {
   if is_enabled "${KCPTUN_ENABLED}" && [ -z "${KCPTUN_KEY}" ]; then
     KCPTUN_KEY="$(generate_token)"
   fi
-
-  PORTAL_DB_PATH="$(resolve_portal_db_path)"
 
   if is_enabled "${KCPTUN_ENABLED}"; then
     ensure_kcptun_binary

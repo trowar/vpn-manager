@@ -463,8 +463,7 @@ prepare_env_install() {
   upsert_env "PORTAL_POSTGRES_USER" "${POSTGRES_USER}"
   upsert_env "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
   upsert_env "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
-  upsert_env "PORTAL_SQLITE_MIGRATION_SOURCE" "${APP_DIR}/data/portal.db"
-  upsert_env "PORTAL_SKIP_SQLITE_IMPORT" "0"
+  upsert_env "PORTAL_SKIP_SQLITE_IMPORT" "1"
 
   upsert_env "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
   upsert_env "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
@@ -522,7 +521,6 @@ prepare_env_upgrade() {
   upsert_env_if_missing "PORTAL_POSTGRES_USER" "${POSTGRES_USER}"
   upsert_env_if_missing "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
   upsert_env_if_missing "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
-  upsert_env_if_missing "PORTAL_SQLITE_MIGRATION_SOURCE" "${APP_DIR}/data/portal.db"
   upsert_env "PORTAL_SKIP_SQLITE_IMPORT" "1"
 
   upsert_env_if_missing "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"

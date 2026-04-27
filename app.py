@@ -59,9 +59,9 @@ from werkzeug.security import check_password_hash, generate_password_hash
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("PORTAL_DATA_DIR", BASE_DIR / "data"))
 DB_PATH = Path(os.environ.get("PORTAL_DB_PATH", DATA_DIR / "portal.db"))
-DB_BACKEND = os.environ.get("PORTAL_DB_BACKEND", "sqlite").strip().lower()
-if DB_BACKEND not in {"sqlite", "postgres"}:
-    DB_BACKEND = "sqlite"
+DB_BACKEND = os.environ.get("PORTAL_DB_BACKEND", "postgres").strip().lower()
+if DB_BACKEND != "postgres":
+    DB_BACKEND = "postgres"
 POSTGRES_DSN = os.environ.get(
     "PORTAL_POSTGRES_DSN",
     "postgresql://vpnportal:vpnportal@postgres:5432/vpnportal",
@@ -1961,7 +1961,6 @@ def build_host_web_upgrade_script(current_version: str) -> str:
         f"""
         set -eu
         LOG_FILE=/app/data/system-upgrade.log
-        DB_PATH=/app/data/portal.db
         DB_BACKEND={quoted_db_backend}
         POSTGRES_DSN={quoted_postgres_dsn}
         STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
@@ -1980,7 +1979,6 @@ def build_host_web_upgrade_script(current_version: str) -> str:
           fi
           python3 - "$1" "$2" "$3" "$4" <<'PY'
 import os
-import sqlite3
 import sys
 from datetime import datetime, timezone
 
@@ -1990,31 +1988,20 @@ except Exception:
     psycopg2 = None
 
 status, summary, started_at, finished_at = sys.argv[1:5]
-db_backend = (os.environ.get("DB_BACKEND") or "sqlite").strip().lower()
+db_backend = (os.environ.get("DB_BACKEND") or "postgres").strip().lower()
 conn = None
 try:
-    if db_backend == "postgres" and psycopg2 and os.environ.get("POSTGRES_DSN"):
-        conn = psycopg2.connect(os.environ["POSTGRES_DSN"])
-    else:
-        db_path = "/app/data/portal.db"
-        conn = sqlite3.connect(db_path)
+    if db_backend != "postgres" or not psycopg2 or not os.environ.get("POSTGRES_DSN"):
+        sys.exit(0)
+    conn = psycopg2.connect(os.environ["POSTGRES_DSN"])
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    if db_backend == "postgres":
-        upsert_sql = '''
-            INSERT INTO app_settings (setting_key, setting_value, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT(setting_key) DO UPDATE SET
-                setting_value = excluded.setting_value,
-                updated_at = excluded.updated_at
-        '''
-    else:
-        upsert_sql = '''
-            INSERT INTO app_settings (setting_key, setting_value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(setting_key) DO UPDATE SET
-                setting_value = excluded.setting_value,
-                updated_at = excluded.updated_at
-        '''
+    upsert_sql = '''
+        INSERT INTO app_settings (setting_key, setting_value, updated_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT(setting_key) DO UPDATE SET
+            setting_value = excluded.setting_value,
+            updated_at = excluded.updated_at
+    '''
     for key, value in (
         ("system_upgrade_status", status),
         ("system_upgrade_summary", summary[:1000]),
@@ -5302,14 +5289,6 @@ class PostgresCompatConnection:
         self._raw_conn.close()
 
 
-def connect_sqlite_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
 def connect_postgres_db() -> PostgresCompatConnection:
     if not POSTGRES_DSN:
         raise RuntimeError("PORTAL_POSTGRES_DSN is empty")
@@ -5318,28 +5297,19 @@ def connect_postgres_db() -> PostgresCompatConnection:
 
 
 def open_direct_db_connection():
-    if DB_BACKEND == "postgres":
-        return connect_postgres_db()
-    return connect_sqlite_db()
+    return connect_postgres_db()
 
 
 def begin_immediate(db) -> None:
-    if DB_BACKEND == "postgres":
-        db.execute("BEGIN")
-    else:
-        db.execute("BEGIN IMMEDIATE")
+    db.execute("BEGIN")
 
 
-DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
+DB_INTEGRITY_ERRORS = (psycopg.IntegrityError,)
 
 
 def get_db():
     if "db" not in g:
-        if DB_BACKEND == "postgres":
-            conn = connect_postgres_db()
-        else:
-            conn = connect_sqlite_db()
-        g.db = conn
+        g.db = connect_postgres_db()
     return g.db
 
 
@@ -13787,8 +13757,6 @@ def bootstrap() -> None:
         with app.app_context():
             init_db()
             db = get_db()
-            if DB_BACKEND == "sqlite":
-                db.execute("PRAGMA journal_mode=WAL")
             ensure_admin_user()
     finally:
         release_db_init_lock()

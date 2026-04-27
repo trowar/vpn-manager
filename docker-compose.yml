@@ -75,7 +75,6 @@ services:
     environment:
       PORTAL_DB_BACKEND: ${PORTAL_DB_BACKEND:-postgres}
       PORTAL_POSTGRES_DSN: ${PORTAL_POSTGRES_DSN:-postgresql://vpnportal:vpnportal@postgres:5432/vpnportal}
-      PORTAL_SQLITE_MIGRATION_SOURCE: ${PORTAL_SQLITE_MIGRATION_SOURCE:-/app/data/portal.db}
       PORTAL_SECRET_KEY: ${PORTAL_SECRET_KEY}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
