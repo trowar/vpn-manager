@@ -16,7 +16,7 @@ LOCAL_VPN_APP_DIR="${LOCAL_VPN_APP_DIR:-/srv/vpn-node}"
 INSTALL_LOCAL_VPN_SERVER="${INSTALL_LOCAL_VPN_SERVER:-1}"
 SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
 KCPTUN_SERVER_PORT="${KCPTUN_SERVER_PORT:-29900}"
-KCPTUN_ENABLED="${KCPTUN_ENABLED:-1}"
+KCPTUN_ENABLED="${KCPTUN_ENABLED:-}"
 SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
 SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
 KCPTUN_KEY="${KCPTUN_KEY:-}"
@@ -440,13 +440,17 @@ backup_postgres_before_upgrade() {
 }
 
 prepare_env_install() {
-  local ip portal_secret api_token ss_password kcptun_key
+  local ip portal_secret api_token ss_password kcptun_key kcptun_enabled_final
   ip="$(resolve_preferred_ip)"
   portal_secret="$(generate_secret)"
   api_token="$(generate_secret)"
   ss_password="$(generate_secret)"
   kcptun_key="$(generate_secret)"
   INSTALL_API_TOKEN="${api_token}"
+  kcptun_enabled_final="${KCPTUN_ENABLED}"
+  if [ -z "${kcptun_enabled_final}" ]; then
+    kcptun_enabled_final="1"
+  fi
 
   mkdir -p "${APP_DIR}"
   touch "$(env_path)"
@@ -470,7 +474,7 @@ prepare_env_install() {
   upsert_env "VPN_ENABLE_WIREGUARD" "0"
   upsert_env "OPENVPN_ENABLED" "0"
   upsert_env "SHADOWSOCKS_ENABLED" "1"
-  upsert_env "KCPTUN_ENABLED" "${KCPTUN_ENABLED}"
+  upsert_env "KCPTUN_ENABLED" "${kcptun_enabled_final}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
   upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
   upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
@@ -480,7 +484,7 @@ prepare_env_install() {
 }
 
 prepare_env_upgrade() {
-  local ip portal_secret api_token ss_password kcptun_key
+  local ip portal_secret api_token ss_password kcptun_key kcptun_enabled_final
   ip="$(resolve_preferred_ip)"
   mkdir -p "${APP_DIR}"
   touch "$(env_path)"
@@ -502,6 +506,13 @@ prepare_env_upgrade() {
     kcptun_key="$(generate_secret)"
   fi
   INSTALL_API_TOKEN="${api_token}"
+  kcptun_enabled_final="${KCPTUN_ENABLED}"
+  if [ -z "${kcptun_enabled_final}" ]; then
+    kcptun_enabled_final="$(read_env_value KCPTUN_ENABLED || true)"
+  fi
+  if [ -z "${kcptun_enabled_final}" ]; then
+    kcptun_enabled_final="1"
+  fi
 
   upsert_env_if_missing "PORTAL_SECRET_KEY" "${portal_secret}"
   upsert_env_if_missing "ADMIN_USERNAME" "admin"
@@ -522,7 +533,7 @@ prepare_env_upgrade() {
   upsert_env "VPN_ENABLE_WIREGUARD" "0"
   upsert_env "OPENVPN_ENABLED" "0"
   upsert_env "SHADOWSOCKS_ENABLED" "1"
-  upsert_env "KCPTUN_ENABLED" "${KCPTUN_ENABLED}"
+  upsert_env "KCPTUN_ENABLED" "${kcptun_enabled_final}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
   upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
   upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
@@ -625,7 +636,7 @@ deploy_local_vpn_server() {
   REPO_URL="${REPO_URL}" \
   BRANCH="${BRANCH}" \
   KCPTUN_SERVER_PORT="${WG_PUBLIC_PORT}" \
-  KCPTUN_ENABLED="${KCPTUN_ENABLED}" \
+  KCPTUN_ENABLED="$(read_env_value KCPTUN_ENABLED || echo "${KCPTUN_ENABLED:-1}")" \
   SHADOWSOCKS_SERVER_PORT="${OPENVPN_PUBLIC_PORT}" \
   SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD}" \
   SHADOWSOCKS_PASSWORD="$(read_env_value SHADOWSOCKS_PASSWORD || true)" \
@@ -828,6 +839,12 @@ EOF
 }
 
 verify_components() {
+  local kcptun_enabled_current
+  kcptun_enabled_current="$(read_env_value KCPTUN_ENABLED || true)"
+  if [ -z "${kcptun_enabled_current}" ]; then
+    kcptun_enabled_current="${KCPTUN_ENABLED:-1}"
+  fi
+
   if ! systemctl is-active --quiet postgresql; then
     err "postgresql service is not active"
     systemctl --no-pager --full status postgresql || true
@@ -846,7 +863,7 @@ verify_components() {
       systemctl --no-pager --full status "vpnmanager-shadowsocks.service" || true
       exit 1
     fi
-    if [ "${KCPTUN_ENABLED}" = "1" ]; then
+    if [ "${kcptun_enabled_current}" = "1" ]; then
       if ! systemctl is-active --quiet "vpnmanager-kcptun.service"; then
         err "vpnmanager-kcptun.service is not active"
         systemctl --no-pager --full status "vpnmanager-kcptun.service" || true
