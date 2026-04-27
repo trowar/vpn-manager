@@ -64,8 +64,8 @@
 
   <div class="actions">
     {% if admin_vpn_ready and shadowsocks_enabled %}
-      <a class="btn" href="{{ url_for('admin_download_config', format='yaml') }}">下载管理员 Shadowsocks 配置</a>
-      <a class="btn secondary" href="{{ url_for('admin_download_kcptun_config', format='yaml') }}">下载管理员 kcptun 配置</a>
+      <a class="btn" href="{{ admin_ss_download_link }}">下载管理员 Shadowsocks 配置</a>
+      <a class="btn secondary" href="{{ admin_kcptun_download_link }}">下载管理员 kcptun 配置</a>
     {% elif not shadowsocks_enabled %}
       <button type="button" disabled>Shadowsocks 已关闭</button>
       <button type="button" class="secondary" disabled>kcptun 已关闭</button>

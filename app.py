@@ -6284,6 +6284,51 @@ def current_user():
     return user
 
 
+def build_download_access_token(user, scope: str) -> str:
+    user_id = int(row_get(user, "id", 0) or 0)
+    session_version = int(row_get(user, "session_version", 1) or 1)
+    payload = f"{user_id}:{session_version}:{scope}"
+    secret = str(app.config.get("SECRET_KEY", "change-this-secret")).encode("utf-8")
+    signature = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{user_id}.{session_version}.{signature}"
+
+
+def resolve_download_access_user(
+    db: sqlite3.Connection,
+    access_token: str,
+    scope: str,
+):
+    token = (access_token or "").strip()
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    user_id_raw, session_version_raw, signature = parts
+    if (not user_id_raw.isdigit()) or (not session_version_raw.isdigit()) or (not signature):
+        return None
+    user_id = int(user_id_raw)
+    session_version = int(session_version_raw)
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return None
+    current_session_version = int(row_get(user, "session_version", 1) or 1)
+    if current_session_version != session_version:
+        return None
+    payload = f"{user_id}:{session_version}:{scope}"
+    secret = str(app.config.get("SECRET_KEY", "change-this-secret")).encode("utf-8")
+    expected_signature = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_signature, signature):
+        return None
+    return user
+
+
+def config_download_error(message: str, status: int = 403) -> Response:
+    return Response(
+        (message or "download denied") + "\n",
+        status=status,
+        mimetype="text/plain; charset=utf-8",
+    )
+
+
 def admin_must_change_password(user) -> bool:
     if not user or row_get(user, "role") != "admin":
         return False
@@ -9112,9 +9157,17 @@ def dashboard_config():
     elif health_overview["abnormal"] > 0:
         node_alert_text = "当前节点异常，系统正在切换。"
 
-    ss_download_link = absolute_url_for("download_config", format="yaml") if SHADOWSOCKS_ENABLED else ""
+    ss_access_token = build_download_access_token(user, "download-config-user")
+    kcptun_access_token = build_download_access_token(user, "download-kcptun-user")
+    ss_download_link = (
+        absolute_url_for("download_config", format="yaml", access=ss_access_token)
+        if SHADOWSOCKS_ENABLED
+        else ""
+    )
     kcptun_download_link = (
-        absolute_url_for("download_kcptun_config", format="yaml") if KCPTUN_ENABLED else ""
+        absolute_url_for("download_kcptun_config", format="yaml", access=kcptun_access_token)
+        if KCPTUN_ENABLED
+        else ""
     )
     ss_qr_link = absolute_url_for("download_qr") if SHADOWSOCKS_ENABLED else ""
 
@@ -11373,11 +11426,21 @@ def admin_configs():
     if selected_default_server_id <= 0 and target_server is not None:
         selected_default_server_id = int(row_get(target_server, "id", 0) or 0)
 
+    admin_ss_access_token = build_download_access_token(admin, "download-config-admin")
+    admin_kcptun_access_token = build_download_access_token(admin, "download-kcptun-admin")
     admin_ss_download_link = (
-        absolute_url_for("admin_download_config", format="yaml") if SHADOWSOCKS_ENABLED else ""
+        absolute_url_for("admin_download_config", format="yaml", access=admin_ss_access_token)
+        if SHADOWSOCKS_ENABLED
+        else ""
     )
     admin_kcptun_download_link = (
-        absolute_url_for("admin_download_kcptun_config", format="yaml") if KCPTUN_ENABLED else ""
+        absolute_url_for(
+            "admin_download_kcptun_config",
+            format="yaml",
+            access=admin_kcptun_access_token,
+        )
+        if KCPTUN_ENABLED
+        else ""
     )
     admin_ss_qr_link = absolute_url_for("admin_download_qr") if SHADOWSOCKS_ENABLED else ""
 
@@ -13280,21 +13343,35 @@ def usdt_payment_webhook():
 
 
 @app.route("/download/config")
-@login_required
 def download_config():
-    user = current_user()
-    if user["role"] != "user":
-        flash("管理员无需下载客户端配置。", "error")
-        return redirect(url_for("dashboard"))
     if not SHADOWSOCKS_ENABLED:
-        flash("Shadowsocks 当前未启用。", "error")
-        return redirect(url_for("dashboard"))
+        return config_download_error("Shadowsocks is disabled", status=503)
 
     db = get_db()
+    user = current_user()
+    used_access_token = False
+    if not user:
+        user = resolve_download_access_user(
+            db,
+            request.args.get("access", ""),
+            "download-config-user",
+        )
+        used_access_token = True
+    if not user:
+        return config_download_error("invalid or missing access token", status=401)
+    if row_get(user, "role") != "user":
+        if used_access_token:
+            return config_download_error("forbidden", status=403)
+        flash("管理员无需下载客户端配置。", "error")
+        return redirect(url_for("dashboard"))
+
     reconcile_expired_subscriptions(db)
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
-
+    if not user:
+        return config_download_error("user not found", status=404)
     if not is_subscription_active(user):
+        if used_access_token:
+            return config_download_error("subscription inactive", status=403)
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
@@ -13321,20 +13398,34 @@ def download_config():
 
 
 @app.route("/admin/download/config")
-@login_required
-@admin_required
 def admin_download_config():
-    if not SHADOWSOCKS_ENABLED:
-        flash("Shadowsocks 当前未启用。", "error")
-        return redirect(url_for("admin_home"))
     db = get_db()
+    if not SHADOWSOCKS_ENABLED:
+        return config_download_error("Shadowsocks is disabled", status=503)
+
+    admin = current_user()
+    used_access_token = False
+    if not admin:
+        admin = resolve_download_access_user(
+            db,
+            request.args.get("access", ""),
+            "download-config-admin",
+        )
+        used_access_token = True
+    if not admin:
+        return config_download_error("invalid or missing access token", status=401)
+    if row_get(admin, "role") != "admin":
+        if used_access_token:
+            return config_download_error("forbidden", status=403)
+        flash("仅管理员可访问。", "error")
+        return redirect(url_for("dashboard"))
+
     admin = db.execute(
         "SELECT * FROM users WHERE id = ? AND role = 'admin'",
-        (current_user()["id"],),
+        (admin["id"],),
     ).fetchone()
     if not admin:
-        flash("管理员账号不存在。", "error")
-        return redirect(url_for("admin_home"))
+        return config_download_error("admin not found", status=404)
 
     output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
     build_raw = output_format in {"json", "raw"}
@@ -13359,20 +13450,35 @@ def admin_download_config():
 
 
 @app.route("/download/kcptun")
-@login_required
 def download_kcptun_config():
-    user = current_user()
-    if user["role"] != "user":
-        flash("管理员无需下载客户端配置。", "error")
-        return redirect(url_for("dashboard"))
     if not KCPTUN_ENABLED:
-        flash("kcptun 当前未启用。", "error")
-        return redirect(url_for("dashboard"))
+        return config_download_error("kcptun is disabled", status=503)
 
     db = get_db()
+    user = current_user()
+    used_access_token = False
+    if not user:
+        user = resolve_download_access_user(
+            db,
+            request.args.get("access", ""),
+            "download-kcptun-user",
+        )
+        used_access_token = True
+    if not user:
+        return config_download_error("invalid or missing access token", status=401)
+    if row_get(user, "role") != "user":
+        if used_access_token:
+            return config_download_error("forbidden", status=403)
+        flash("管理员无需下载客户端配置。", "error")
+        return redirect(url_for("dashboard"))
+
     reconcile_expired_subscriptions(db)
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if not user:
+        return config_download_error("user not found", status=404)
     if not is_subscription_active(user):
+        if used_access_token:
+            return config_download_error("subscription inactive", status=403)
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
@@ -13399,21 +13505,34 @@ def download_kcptun_config():
 
 
 @app.route("/admin/download/kcptun")
-@login_required
-@admin_required
 def admin_download_kcptun_config():
     if not KCPTUN_ENABLED:
-        flash("kcptun 当前未启用。", "error")
-        return redirect(url_for("admin_home"))
+        return config_download_error("kcptun is disabled", status=503)
 
     db = get_db()
+    admin = current_user()
+    used_access_token = False
+    if not admin:
+        admin = resolve_download_access_user(
+            db,
+            request.args.get("access", ""),
+            "download-kcptun-admin",
+        )
+        used_access_token = True
+    if not admin:
+        return config_download_error("invalid or missing access token", status=401)
+    if row_get(admin, "role") != "admin":
+        if used_access_token:
+            return config_download_error("forbidden", status=403)
+        flash("仅管理员可访问。", "error")
+        return redirect(url_for("dashboard"))
+
     admin = db.execute(
         "SELECT * FROM users WHERE id = ? AND role = 'admin'",
-        (current_user()["id"],),
+        (admin["id"],),
     ).fetchone()
     if not admin:
-        flash("管理员账号不存在。", "error")
-        return redirect(url_for("admin_home"))
+        return config_download_error("admin not found", status=404)
 
     output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
     build_raw = output_format in {"json", "raw"}

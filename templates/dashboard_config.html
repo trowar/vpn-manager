@@ -71,9 +71,9 @@
         <p>当前系统默认协议。建议先下载 kcptun 配置，再在 Shadowsocks 客户端中将服务器地址指向 kcptun 本地端口。</p>
         <div class="actions">
           {% if active and shadowsocks_enabled %}
-            <a class="btn" href="{{ url_for('download_config', format='yaml') }}">下载 Shadowsocks 配置</a>
+            <a class="btn" href="{{ ss_download_link }}">下载 Shadowsocks 配置</a>
             {% if kcptun_enabled %}
-              <a class="btn secondary" href="{{ url_for('download_kcptun_config', format='yaml') }}">下载 kcptun 配置</a>
+              <a class="btn secondary" href="{{ kcptun_download_link }}">下载 kcptun 配置</a>
             {% endif %}
           {% elif not shadowsocks_enabled %}
             <button type="button" disabled>Shadowsocks 已关闭</button>
