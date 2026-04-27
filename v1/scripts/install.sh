@@ -648,6 +648,8 @@ start_or_restart_web_service() {
 }
 
 deploy_local_vpn_server() {
+  local kcptun_enabled_value ss_password_value kcptun_key_value
+
   if [ "${INSTALL_LOCAL_VPN_SERVER}" != "1" ]; then
     log "Skipping local vpn-server deploy (INSTALL_LOCAL_VPN_SERVER=${INSTALL_LOCAL_VPN_SERVER})"
     return 0
@@ -665,16 +667,23 @@ deploy_local_vpn_server() {
     exit 1
   fi
 
+  kcptun_enabled_value="$(read_env_value KCPTUN_ENABLED || true)"
+  if [ -z "${kcptun_enabled_value}" ]; then
+    kcptun_enabled_value="${KCPTUN_ENABLED:-1}"
+  fi
+  ss_password_value="$(read_env_value SHADOWSOCKS_PASSWORD || true)"
+  kcptun_key_value="$(read_env_value KCPTUN_KEY || true)"
+
   log "Deploying local vpn-server on host (systemd mode)"
   APP_DIR="${LOCAL_VPN_APP_DIR}" \
   REPO_URL="${REPO_URL}" \
   BRANCH="${BRANCH}" \
   KCPTUN_SERVER_PORT="${WG_PUBLIC_PORT}" \
-  KCPTUN_ENABLED="$(read_env_value KCPTUN_ENABLED || echo "${KCPTUN_ENABLED:-1}")" \
+  KCPTUN_ENABLED="${kcptun_enabled_value}" \
   SHADOWSOCKS_SERVER_PORT="${OPENVPN_PUBLIC_PORT}" \
   SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD}" \
-  SHADOWSOCKS_PASSWORD="$(read_env_value SHADOWSOCKS_PASSWORD || true)" \
-  KCPTUN_KEY="$(read_env_value KCPTUN_KEY || true)" \
+  SHADOWSOCKS_PASSWORD="${ss_password_value}" \
+  KCPTUN_KEY="${kcptun_key_value}" \
   VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT}" \
   VPN_API_TOKEN="${INSTALL_API_TOKEN}" \
   DISABLE_SYSTEMD_RESOLVED="${DISABLE_SYSTEMD_RESOLVED}" \
