@@ -7370,6 +7370,22 @@ def ensure_user_vpn_ready(
     target_server_runtime_id = int(target_server["id"]) if target_server else 0
     server_changed = previous_server_runtime_id != target_server_runtime_id
 
+    if not WIREGUARD_ENABLED:
+        result: dict[str, str | int] = {
+            "assigned_ip": row_get(user, "assigned_ip"),
+            "client_private_key": row_get(user, "client_private_key", "") or "",
+            "client_public_key": row_get(user, "client_public_key", "") or "",
+            "client_psk": row_get(user, "client_psk", "") or "",
+            "config_path": row_get(user, "config_path", "") or "",
+            "qr_path": row_get(user, "qr_path", "") or "",
+            # Keep legacy gating flag enabled so subscription checks continue to work
+            # in Shadowsocks-only deployments.
+            "wg_enabled": 1,
+        }
+        if target_server:
+            result["assigned_server_id"] = int(target_server["id"])
+        return result
+
     has_crypto_keys = all(
         [
             user["client_private_key"],
