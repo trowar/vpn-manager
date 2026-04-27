@@ -7199,11 +7199,57 @@ def get_wireguard_transfer_bytes(
     return int(state["rx"]), int(state["tx"])
 
 
+def get_user_runtime_transfer_bytes(
+    user: DatabaseRow,
+    *,
+    server_row: DatabaseRow | None = None,
+    window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
+) -> tuple[int, int]:
+    hydrated_user = prepare_user_for_transport(user)
+    runtime_server = server_row or get_runtime_server_for_account(hydrated_user)
+
+    if SHADOWSOCKS_ENABLED:
+        try:
+            ss_port = get_user_shadowsocks_server_port(hydrated_user)
+            _peers, _mode, peer_stats, aggregate_stats, port_stats = get_runtime_active_peer_hosts(
+                user=hydrated_user,
+                server_row=runtime_server,
+                window_seconds=window_seconds,
+                requested_ports=[ss_port],
+            )
+            stats_by_port = port_stats.get(ss_port, {})
+            rx_by_port = to_non_negative_int(stats_by_port.get("rx_bytes", 0))
+            tx_by_port = to_non_negative_int(stats_by_port.get("tx_bytes", 0))
+            if rx_by_port > 0 or tx_by_port > 0:
+                return rx_by_port, tx_by_port
+
+            login_ip = normalize_public_client_ip(row_get(hydrated_user, "last_login_ip", ""))
+            if login_ip:
+                peer_state = peer_stats.get(login_ip, {})
+                rx_by_ip = to_non_negative_int(peer_state.get("rx_bytes", 0))
+                tx_by_ip = to_non_negative_int(peer_state.get("tx_bytes", 0))
+                if rx_by_ip > 0 or tx_by_ip > 0:
+                    return rx_by_ip, tx_by_ip
+
+            rx_fallback = to_non_negative_int(aggregate_stats.get("rx_bytes", 0))
+            tx_fallback = to_non_negative_int(aggregate_stats.get("tx_bytes", 0))
+            if rx_fallback > 0 or tx_fallback > 0:
+                return rx_fallback, tx_fallback
+        except Exception:
+            app.logger.exception("Failed to collect shadowsocks runtime transfer bytes")
+
+    if WIREGUARD_ENABLED:
+        return get_wireguard_transfer_bytes(
+            row_get(hydrated_user, "client_public_key"),
+            user=hydrated_user,
+            server_row=runtime_server,
+        )
+
+    return 0, 0
+
+
 def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
-    rx_bytes, tx_bytes = get_wireguard_transfer_bytes(
-        user["client_public_key"],
-        user=user,
-    )
+    rx_bytes, tx_bytes = get_user_runtime_transfer_bytes(user)
     total_bytes = rx_bytes + tx_bytes
     quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
     used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
@@ -8122,10 +8168,7 @@ def sync_user_traffic_usage(
     used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
     last_total_bytes = to_non_negative_int(row_get(user, "traffic_last_total_bytes", 0))
     if current_total_bytes is None:
-        rx_bytes, tx_bytes = get_wireguard_transfer_bytes(
-            row_get(user, "client_public_key"),
-            user=user,
-        )
+        rx_bytes, tx_bytes = get_user_runtime_transfer_bytes(user)
         current_total_bytes = rx_bytes + tx_bytes
     current_total_bytes = max(0, int(current_total_bytes))
 
@@ -8341,15 +8384,12 @@ def settle_order_paid(
     current_last_total_bytes = to_non_negative_int(
         row_get(user, "traffic_last_total_bytes", 0)
     )
-    if row_get(user, "client_public_key"):
-        rx_now, tx_now = get_wireguard_transfer_bytes(
-            user["client_public_key"],
-            user=user,
-        )
-        current_total_bytes = rx_now + tx_now
-        delta_bytes = current_total_bytes - current_last_total_bytes
-        if delta_bytes > 0 and current_quota_bytes > 0:
-            current_used_bytes = min(current_quota_bytes, current_used_bytes + delta_bytes)
+    rx_now, tx_now = get_user_runtime_transfer_bytes(user)
+    current_total_bytes = rx_now + tx_now
+    delta_bytes = current_total_bytes - current_last_total_bytes
+    if delta_bytes > 0 and current_quota_bytes > 0:
+        current_used_bytes = min(current_quota_bytes, current_used_bytes + delta_bytes)
+    if current_total_bytes > 0 or current_last_total_bytes > 0:
         current_last_total_bytes = current_total_bytes
 
     added_traffic_bytes = 0
