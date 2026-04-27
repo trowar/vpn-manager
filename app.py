@@ -7107,6 +7107,49 @@ def build_user_kcptun_config(
     return json.dumps(config_obj, ensure_ascii=False, indent=2) + "\n"
 
 
+def build_user_kcptun_clash_profile(
+    user: sqlite3.Row,
+    *,
+    server_row: sqlite3.Row | None = None,
+) -> str:
+    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
+    if not host:
+        raise RuntimeError("未找到可用的 kcptun 节点地址。")
+    username = (row_get(user, "username", "") or "").strip() or "vpn-user"
+    proxy_name = f"kcptun-{safe_name(username)}"
+
+    def yaml_str(value: str) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    return textwrap.dedent(
+        f"""\
+        mixed-port: 7890
+        mode: rule
+        proxies:
+          - name: {yaml_str(proxy_name)}
+            type: ss
+            server: {yaml_str(host)}
+            port: {KCPTUN_SERVER_PORT}
+            cipher: {yaml_str(SHADOWSOCKS_METHOD)}
+            password: {yaml_str(derive_user_shadowsocks_password(user))}
+            udp: true
+            plugin: "kcptun"
+            plugin-opts:
+              key: {yaml_str(KCPTUN_KEY)}
+              crypt: "aes"
+              mode: "fast3"
+              mtu: 1350
+        proxy-groups:
+          - name: "PROXY"
+            type: select
+            proxies:
+              - {yaml_str(proxy_name)}
+        rules:
+          - MATCH,PROXY
+        """
+    )
+
+
 def build_user_shadowsocks_uri(
     user: sqlite3.Row,
     *,
@@ -13212,15 +13255,22 @@ def download_kcptun_config():
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
+    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    build_raw = output_format in {"json", "raw"}
     try:
-        config_text = build_user_kcptun_config(user)
+        config_text = (
+            build_user_kcptun_config(user)
+            if build_raw
+            else build_user_kcptun_clash_profile(user)
+        )
     except Exception as exc:
         flash(f"kcptun 配置生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"kcptun-{safe_name(user['username'])}.json"
+    filename = f"kcptun-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
     headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="application/json")
+    mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
+    return Response(config_text, headers=headers, mimetype=mimetype)
 
 
 @app.route("/admin/download/kcptun")
@@ -13240,15 +13290,22 @@ def admin_download_kcptun_config():
         flash("管理员账号不存在。", "error")
         return redirect(url_for("admin_home"))
 
+    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    build_raw = output_format in {"json", "raw"}
     try:
-        config_text = build_user_kcptun_config(admin)
+        config_text = (
+            build_user_kcptun_config(admin)
+            if build_raw
+            else build_user_kcptun_clash_profile(admin)
+        )
     except Exception as exc:
         flash(f"管理员 kcptun 配置生成失败：{exc}", "error")
         return redirect(url_for("admin_home"))
 
-    filename = f"kcptun-admin-{safe_name(admin['username'])}.json"
+    filename = f"kcptun-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
     headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="application/json")
+    mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
+    return Response(config_text, headers=headers, mimetype=mimetype)
 
 
 @app.route("/download/openvpn")
