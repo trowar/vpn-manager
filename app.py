@@ -823,6 +823,22 @@ def get_client_ip() -> str:
     return (request.remote_addr or "").strip() or "unknown"
 
 
+def normalize_public_client_ip(raw_value: str | None) -> str:
+    raw = (raw_value or "").strip()
+    if not raw:
+        return ""
+    host = host_without_optional_port(raw)
+    if not host:
+        return ""
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if ip_obj.is_loopback:
+            return ""
+        return str(ip_obj)
+    except Exception:
+        return host
+
+
 def load_allowed_ips_from_file(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -5373,6 +5389,8 @@ def init_db() -> None:
             openvpn_client_key TEXT,
             config_path TEXT,
             qr_path TEXT,
+            last_login_ip TEXT,
+            last_login_at TEXT,
             created_at TEXT NOT NULL,
             approved_at TEXT,
             subscription_expires_at TEXT,
@@ -5714,6 +5732,10 @@ def migrate_schema(db: DatabaseConnection) -> None:
         db.execute("ALTER TABLE users ADD COLUMN openvpn_client_cert TEXT")
     if "openvpn_client_key" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN openvpn_client_key TEXT")
+    if "last_login_ip" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN last_login_ip TEXT")
+    if "last_login_at" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT")
     if "session_version" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
 
@@ -6314,6 +6336,20 @@ def login_user_session(user) -> None:
     session[SESSION_LAST_ACTIVITY_KEY] = int(time.time())
 
 
+def record_user_login_activity(db: DatabaseConnection, user_id: int) -> None:
+    client_ip = normalize_public_client_ip(get_client_ip())
+    db.execute(
+        """
+        UPDATE users
+        SET last_login_ip = ?,
+            last_login_at = ?
+        WHERE id = ?
+        """,
+        (client_ip, utcnow_iso(), int(user_id)),
+    )
+    db.commit()
+
+
 def user_api_payload(user) -> dict:
     return {
         "id": user["id"],
@@ -6702,6 +6738,110 @@ def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]
             "endpoint": endpoint,
         }
     return peers
+
+
+def parse_shadowsocks_active_peer_hosts(raw_text: str, server_port: int) -> list[str]:
+    peers: set[str] = set()
+    suffix = f":{int(server_port)}"
+    for raw_line in (raw_text or "").splitlines():
+        tokens = [token.strip() for token in raw_line.split() if token.strip()]
+        if len(tokens) < 2:
+            continue
+        for idx, token in enumerate(tokens):
+            if not token.endswith(suffix):
+                continue
+            if idx + 1 >= len(tokens):
+                continue
+            host = normalize_public_client_ip(tokens[idx + 1])
+            if not host:
+                continue
+            peers.add(host)
+    return sorted(peers)
+
+
+def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
+    peers: set[str] = set()
+    pattern = re.compile(r"(?:remote address:\s*|in:\s*)(\S+)")
+    for raw_line in (raw_text or "").splitlines():
+        line = (raw_line or "").strip()
+        if not line:
+            continue
+        match = pattern.search(line)
+        if not match:
+            continue
+        host = normalize_public_client_ip(match.group(1))
+        if not host:
+            continue
+        peers.add(host)
+    return sorted(peers)
+
+
+def get_local_shadowsocks_active_peer_hosts() -> list[str]:
+    raw = run_command(
+        [
+            "ss",
+            "-Htn",
+            "state",
+            "established",
+            f"( sport = :{SHADOWSOCKS_SERVER_PORT} )",
+        ],
+        check=False,
+    )
+    return parse_shadowsocks_active_peer_hosts(raw, SHADOWSOCKS_SERVER_PORT)
+
+
+def get_local_kcptun_active_peer_hosts(window_seconds: int) -> list[str]:
+    window = max(30, int(window_seconds or ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS))
+    raw = run_command(
+        [
+            "journalctl",
+            "-u",
+            "vpnmanager-kcptun.service",
+            "--since",
+            f"-{window} seconds",
+            "--no-pager",
+            "-n",
+            "800",
+        ],
+        check=False,
+    )
+    return parse_kcptun_active_peer_hosts(raw)
+
+
+def get_runtime_active_peer_hosts(
+    *,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
+    window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
+) -> tuple[list[str], str]:
+    if KCPTUN_ENABLED:
+        detect_mode = "kcptun"
+    else:
+        detect_mode = "shadowsocks"
+    if use_vpn_api(user=user, server_row=server_row):
+        if KCPTUN_ENABLED:
+            path = (
+                f"/kcptun/active-peers?window={int(max(30, window_seconds))}&limit=800"
+            )
+        else:
+            path = "/shadowsocks/active-peers"
+        result = vpn_api_request(
+            "GET",
+            path,
+            user=user,
+            server_row=server_row,
+            allow_reassign=False,
+        )
+        peers = result.get("peers") if isinstance(result, dict) else []
+        cleaned: list[str] = []
+        for item in peers or []:
+            host = normalize_public_client_ip(str(item or ""))
+            if host:
+                cleaned.append(host)
+        return sorted(set(cleaned)), detect_mode
+    if KCPTUN_ENABLED:
+        return get_local_kcptun_active_peer_hosts(window_seconds), detect_mode
+    return get_local_shadowsocks_active_peer_hosts(), detect_mode
 
 
 def get_wireguard_server_public_key(
@@ -8791,7 +8931,8 @@ def register():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    registration_open = is_registration_open(get_db())
+    db = get_db()
+    registration_open = is_registration_open(db)
     if request.method == "POST":
         identity = request.form.get("identity", "").strip()
         password = request.form.get("password", "")
@@ -8810,6 +8951,7 @@ def login():
             return render_template("login.html", registration_open=registration_open)
 
         login_user_session(user)
+        record_user_login_activity(db, int(user["id"]))
         if admin_must_change_password(user):
             flash("首次登录请先修改管理员密码。", "error")
             return redirect(url_for("admin_change_password"))
@@ -8820,6 +8962,7 @@ def login():
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
+    db = get_db()
     payload = request.get_json(silent=True) or {}
     identity = str(payload.get("identity", "")).strip()
     password = str(payload.get("password", ""))
@@ -8843,6 +8986,7 @@ def api_login():
         }, 403
 
     login_user_session(user)
+    record_user_login_activity(db, int(user["id"]))
     redirect_url = url_for("dashboard")
     require_password_change = admin_must_change_password(user)
     if require_password_change:
@@ -9710,27 +9854,51 @@ def load_admin_online_users(
     *,
     online_window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
 ) -> tuple[list[dict], dict]:
-    users = db.execute(
-        """
-        SELECT
-            id,
-            role,
-            username,
-            email,
-            assigned_ip,
-            assigned_server_id,
-            client_public_key,
-            subscription_expires_at,
-            traffic_used_bytes,
-            wg_enabled
-        FROM users
-        WHERE role IN ('user', 'admin')
-          AND wg_enabled = 1
-          AND client_public_key IS NOT NULL
-          AND trim(client_public_key) <> ''
-        ORDER BY id DESC
-        """
-    ).fetchall()
+    use_wireguard_source = bool(WIREGUARD_ENABLED)
+    if use_wireguard_source:
+        users = db.execute(
+            """
+            SELECT
+                id,
+                role,
+                username,
+                email,
+                assigned_ip,
+                assigned_server_id,
+                client_public_key,
+                subscription_expires_at,
+                traffic_used_bytes,
+                wg_enabled,
+                last_login_ip
+            FROM users
+            WHERE role IN ('user', 'admin')
+              AND wg_enabled = 1
+              AND client_public_key IS NOT NULL
+              AND trim(client_public_key) <> ''
+            ORDER BY id DESC
+            """
+        ).fetchall()
+    else:
+        users = db.execute(
+            """
+            SELECT
+                id,
+                role,
+                username,
+                email,
+                assigned_ip,
+                assigned_server_id,
+                client_public_key,
+                subscription_expires_at,
+                traffic_used_bytes,
+                wg_enabled,
+                last_login_ip
+            FROM users
+            WHERE role IN ('user', 'admin')
+              AND wg_enabled = 1
+            ORDER BY id DESC
+            """
+        ).fetchall()
     servers = db.execute(
         """
         SELECT *
@@ -9748,16 +9916,21 @@ def load_admin_online_users(
     now_dt = utcnow()
     now_ts = int(now_dt.timestamp())
     peer_cache: dict[str, dict[str, dict[str, int | str]]] = {}
+    active_peer_hosts_by_source: dict[str, set[str]] = {}
     cache_errors: dict[str, str] = {}
     online_users: list[dict] = []
+    source_labels: dict[str, str] = {}
+    user_source_meta: dict[int, tuple[str, DatabaseRow | None, str]] = {}
+    if use_wireguard_source:
+        detect_mode = "wireguard"
+    elif KCPTUN_ENABLED:
+        detect_mode = "kcptun"
+    else:
+        detect_mode = "shadowsocks"
 
-    for user in users:
-        public_key = (row_get(user, "client_public_key", "") or "").strip()
-        if not public_key:
-            continue
-
+    def resolve_user_source(user_row: DatabaseRow) -> tuple[str, DatabaseRow | None, str]:
         server_row = None
-        assigned_server_id = row_get(user, "assigned_server_id")
+        assigned_server_id = row_get(user_row, "assigned_server_id")
         if assigned_server_id is not None and str(assigned_server_id).strip():
             try:
                 server_row = servers_by_id.get(int(assigned_server_id))
@@ -9765,7 +9938,7 @@ def load_admin_online_users(
                 server_row = None
         if server_row is None:
             try:
-                server_row = get_persisted_runtime_server_for_account(db, user)
+                server_row = get_persisted_runtime_server_for_account(db, user_row)
             except Exception:
                 server_row = None
 
@@ -9776,72 +9949,195 @@ def load_admin_online_users(
                 or (row_get(server_row, "host", "") or "").strip()
                 or f"#{int(server_row['id'])}"
             )
-        elif VPN_API_URL:
-            source_key = "global-api"
-            server_name = "全局 VPN API"
-        else:
-            source_key = "local"
-            server_name = "本机 VPN"
+            return source_key, server_row, server_name
+        if VPN_API_URL:
+            return "global-api", None, "全局 VPN API"
+        return "local", None, "本机 VPN"
 
-        if source_key not in peer_cache:
-            try:
-                if server_row is not None:
-                    if use_vpn_api(server_row=server_row):
-                        dump_text = get_wireguard_dump_text(server_row=server_row)
-                    else:
-                        dump_text = ""
-                else:
-                    dump_text = get_wireguard_dump_text()
-                peer_cache[source_key] = parse_wireguard_dump_peers(dump_text)
-            except Exception as exc:
-                peer_cache[source_key] = {}
-                cache_errors[source_key] = str(exc)
-
-        peer_state = peer_cache[source_key].get(
-            public_key,
-            {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""},
-        )
-        rx_bytes = max(0, int(peer_state.get("rx", 0) or 0))
-        tx_bytes = max(0, int(peer_state.get("tx", 0) or 0))
-        total_bytes = rx_bytes + tx_bytes
-        latest_handshake = max(0, int(peer_state.get("latest_handshake", 0) or 0))
-        handshake_age_seconds = (
-            now_ts - latest_handshake if latest_handshake > 0 else 10**9
-        )
-        is_online = latest_handshake > 0 and handshake_age_seconds <= online_window_seconds
-        if not is_online:
-            continue
-
-        role_value = (row_get(user, "role", "") or "").strip().lower()
-        username_display = (row_get(user, "username", "") or "").strip()
+    def build_online_row(
+        user_row: DatabaseRow,
+        *,
+        server_name: str,
+        endpoint: str,
+        latest_handshake: int,
+        rx_bytes: int = 0,
+        tx_bytes: int = 0,
+    ) -> dict:
+        role_value = (row_get(user_row, "role", "") or "").strip().lower()
+        username_display = (row_get(user_row, "username", "") or "").strip()
         if role_value == "admin":
             username_display = f"{username_display or '管理员'}（管理员）"
+        rx_clean = max(0, int(rx_bytes or 0))
+        tx_clean = max(0, int(tx_bytes or 0))
+        total_bytes = rx_clean + tx_clean
+        return {
+            "id": int(user_row["id"]),
+            "role": role_value or "user",
+            "username": username_display,
+            "email": (row_get(user_row, "email", "") or "").strip(),
+            "assigned_ip": (row_get(user_row, "assigned_ip", "") or "").strip(),
+            "server_name": server_name,
+            "endpoint": (endpoint or "").strip() or "-",
+            "latest_handshake": int(max(0, latest_handshake)),
+            "latest_handshake_at": handshake_epoch_to_iso(latest_handshake),
+            "handshake_age_seconds": max(0, now_ts - int(max(0, latest_handshake))),
+            "rx_bytes": rx_clean,
+            "tx_bytes": tx_clean,
+            "total_bytes": total_bytes,
+            "rx_human": format_bytes(rx_clean),
+            "tx_human": format_bytes(tx_clean),
+            "total_human": format_bytes(total_bytes),
+            "traffic_used_bytes": to_non_negative_int(row_get(user_row, "traffic_used_bytes", 0)),
+            "traffic_used_human": format_bytes(
+                to_non_negative_int(row_get(user_row, "traffic_used_bytes", 0))
+            ),
+            "subscription_expires_at": row_get(user_row, "subscription_expires_at", ""),
+        }
 
-        online_users.append(
-            {
-                "id": int(user["id"]),
-                "role": role_value or "user",
-                "username": username_display,
-                "email": (row_get(user, "email", "") or "").strip(),
-                "assigned_ip": (row_get(user, "assigned_ip", "") or "").strip(),
-                "server_name": server_name,
-                "endpoint": (peer_state.get("endpoint", "") or "").strip(),
-                "latest_handshake": latest_handshake,
-                "latest_handshake_at": handshake_epoch_to_iso(latest_handshake),
-                "handshake_age_seconds": max(0, handshake_age_seconds),
-                "rx_bytes": rx_bytes,
-                "tx_bytes": tx_bytes,
-                "total_bytes": total_bytes,
-                "rx_human": format_bytes(rx_bytes),
-                "tx_human": format_bytes(tx_bytes),
-                "total_human": format_bytes(total_bytes),
-                "traffic_used_bytes": to_non_negative_int(row_get(user, "traffic_used_bytes", 0)),
-                "traffic_used_human": format_bytes(
-                    to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
-                ),
-                "subscription_expires_at": row_get(user, "subscription_expires_at", ""),
-            }
-        )
+    for user in users:
+        source_key, server_row, server_name = resolve_user_source(user)
+        user_source_meta[int(user["id"])] = (source_key, server_row, server_name)
+        source_labels[source_key] = server_name
+
+    if use_wireguard_source:
+        for user in users:
+            public_key = (row_get(user, "client_public_key", "") or "").strip()
+            if not public_key:
+                continue
+
+            source_key, server_row, server_name = user_source_meta[int(user["id"])]
+
+            if source_key not in peer_cache:
+                try:
+                    if server_row is not None:
+                        if use_vpn_api(server_row=server_row):
+                            dump_text = get_wireguard_dump_text(server_row=server_row)
+                        else:
+                            dump_text = ""
+                    else:
+                        dump_text = get_wireguard_dump_text()
+                    peer_cache[source_key] = parse_wireguard_dump_peers(dump_text)
+                except Exception as exc:
+                    peer_cache[source_key] = {}
+                    cache_errors[source_key] = str(exc)
+
+            peer_state = peer_cache[source_key].get(
+                public_key,
+                {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""},
+            )
+            rx_bytes = max(0, int(peer_state.get("rx", 0) or 0))
+            tx_bytes = max(0, int(peer_state.get("tx", 0) or 0))
+            latest_handshake = max(0, int(peer_state.get("latest_handshake", 0) or 0))
+            handshake_age_seconds = (
+                now_ts - latest_handshake if latest_handshake > 0 else 10**9
+            )
+            is_online = (
+                latest_handshake > 0 and handshake_age_seconds <= online_window_seconds
+            )
+            if not is_online:
+                continue
+            online_users.append(
+                build_online_row(
+                    user,
+                    server_name=server_name,
+                    endpoint=(peer_state.get("endpoint", "") or "").strip(),
+                    latest_handshake=latest_handshake,
+                    rx_bytes=rx_bytes,
+                    tx_bytes=tx_bytes,
+                )
+            )
+    else:
+        for user in users:
+            source_key, server_row, _ = user_source_meta[int(user["id"])]
+            if source_key in active_peer_hosts_by_source:
+                continue
+            try:
+                peers, source_mode = get_runtime_active_peer_hosts(
+                    user=user,
+                    server_row=server_row,
+                    window_seconds=online_window_seconds,
+                )
+                active_peer_hosts_by_source[source_key] = set(peers)
+                detect_mode = source_mode or detect_mode
+            except Exception as exc:
+                active_peer_hosts_by_source[source_key] = set()
+                cache_errors[source_key] = str(exc)
+
+        matched_user_ids: set[int] = set()
+        matched_peer_by_source: dict[str, set[str]] = {
+            key: set() for key in active_peer_hosts_by_source
+        }
+
+        for user in users:
+            user_id = int(user["id"])
+            source_key, _, server_name = user_source_meta[user_id]
+            peers = active_peer_hosts_by_source.get(source_key, set())
+            if not peers:
+                continue
+            login_ip = normalize_public_client_ip(row_get(user, "last_login_ip", ""))
+            if not login_ip or login_ip not in peers:
+                continue
+            matched_user_ids.add(user_id)
+            matched_peer_by_source.setdefault(source_key, set()).add(login_ip)
+            online_users.append(
+                build_online_row(
+                    user,
+                    server_name=server_name,
+                    endpoint=login_ip,
+                    latest_handshake=now_ts,
+                )
+            )
+
+        unknown_counter = 0
+        for source_key, peers in active_peer_hosts_by_source.items():
+            if not peers:
+                continue
+            unmatched_peers = [p for p in sorted(peers) if p not in matched_peer_by_source.get(source_key, set())]
+            if not unmatched_peers:
+                continue
+            candidate_users = [
+                user
+                for user in users
+                if int(user["id"]) not in matched_user_ids
+                and user_source_meta[int(user["id"])][0] == source_key
+            ]
+            if len(candidate_users) == 1 and len(unmatched_peers) == 1:
+                user = candidate_users[0]
+                matched_user_ids.add(int(user["id"]))
+                online_users.append(
+                    build_online_row(
+                        user,
+                        server_name=source_labels.get(source_key, "-"),
+                        endpoint=unmatched_peers[0],
+                        latest_handshake=now_ts,
+                    )
+                )
+                continue
+            for peer_host in unmatched_peers:
+                unknown_counter += 1
+                online_users.append(
+                    {
+                        "id": -100000 - unknown_counter,
+                        "role": "unknown",
+                        "username": "未知来源（无法映射到具体用户）",
+                        "email": "-",
+                        "assigned_ip": "-",
+                        "server_name": source_labels.get(source_key, "-"),
+                        "endpoint": peer_host,
+                        "latest_handshake": now_ts,
+                        "latest_handshake_at": handshake_epoch_to_iso(now_ts),
+                        "handshake_age_seconds": 0,
+                        "rx_bytes": 0,
+                        "tx_bytes": 0,
+                        "total_bytes": 0,
+                        "rx_human": "0 B",
+                        "tx_human": "0 B",
+                        "total_human": "0 B",
+                        "traffic_used_bytes": 0,
+                        "traffic_used_human": "0 B",
+                        "subscription_expires_at": "",
+                    }
+                )
 
     online_users.sort(
         key=lambda item: (
@@ -9858,8 +10154,12 @@ def load_admin_online_users(
         "total_traffic_bytes": sum(int(item["total_bytes"]) for item in online_users),
         "source_errors": len(cache_errors),
         "source_errors_text": " | ".join(
-            f"{name}: {message}" for name, message in cache_errors.items()
+            f"{source_labels.get(name, name)}: {message}" for name, message in cache_errors.items()
         ).strip(),
+        "detect_mode": detect_mode,
+        "unknown_online_sources": sum(
+            1 for item in online_users if str(item.get("role", "")) == "unknown"
+        ),
     }
     summary["total_download_human"] = format_bytes(summary["total_download_bytes"])
     summary["total_upload_human"] = format_bytes(summary["total_upload_bytes"])

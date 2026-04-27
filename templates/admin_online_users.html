@@ -2,7 +2,13 @@
 {% block content %}
 <section class="card">
   <h2>在线用户</h2>
-  <p class="helper">每 {{ refresh_seconds }} 秒自动刷新一次。在线判定窗口：最近 {{ online_window_seconds }} 秒内有握手。</p>
+  {% if summary["detect_mode"] == "wireguard" %}
+    <p class="helper">每 {{ refresh_seconds }} 秒自动刷新一次。在线判定窗口：最近 {{ online_window_seconds }} 秒内有 WireGuard 握手。</p>
+  {% elif summary["detect_mode"] == "kcptun" %}
+    <p class="helper">每 {{ refresh_seconds }} 秒自动刷新一次。在线判定窗口：最近 {{ online_window_seconds }} 秒内有 kcptun 活跃连接。</p>
+  {% else %}
+    <p class="helper">每 {{ refresh_seconds }} 秒自动刷新一次。在线判定窗口：最近 {{ online_window_seconds }} 秒内有 Shadowsocks 活跃连接。</p>
+  {% endif %}
 </section>
 
 <section class="card">

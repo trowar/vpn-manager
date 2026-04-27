@@ -1,6 +1,8 @@
 import os
+import re
 import subprocess
 import tempfile
+import ipaddress
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -29,6 +31,24 @@ OPENVPN_STATUS_FILE = Path(
 OPENVPN_PID_FILE = Path(
     os.environ.get("OPENVPN_PID_FILE", "/run/openvpn-server.pid")
 )
+SHADOWSOCKS_SERVER_PORT_RAW = os.environ.get("SHADOWSOCKS_SERVER_PORT", "8388").strip()
+KCPTUN_SERVER_PORT_RAW = os.environ.get("KCPTUN_SERVER_PORT", "29900").strip()
+KCPTUN_SYSTEMD_UNIT = (
+    os.environ.get("KCPTUN_SYSTEMD_UNIT", "vpnmanager-kcptun.service").strip()
+    or "vpnmanager-kcptun.service"
+)
+try:
+    SHADOWSOCKS_SERVER_PORT = int(SHADOWSOCKS_SERVER_PORT_RAW)
+except Exception:
+    SHADOWSOCKS_SERVER_PORT = 8388
+if SHADOWSOCKS_SERVER_PORT <= 0 or SHADOWSOCKS_SERVER_PORT > 65535:
+    SHADOWSOCKS_SERVER_PORT = 8388
+try:
+    KCPTUN_SERVER_PORT = int(KCPTUN_SERVER_PORT_RAW)
+except Exception:
+    KCPTUN_SERVER_PORT = 29900
+if KCPTUN_SERVER_PORT <= 0 or KCPTUN_SERVER_PORT > 65535:
+    KCPTUN_SERVER_PORT = 29900
 
 app = Flask(__name__)
 
@@ -75,6 +95,69 @@ def is_openvpn_running() -> bool:
     return False
 
 
+def endpoint_host(endpoint: str) -> str:
+    raw = (endpoint or "").strip()
+    if not raw or raw in {"*", "*:*"}:
+        return ""
+    if raw.startswith("[") and "]" in raw:
+        right = raw.find("]")
+        if right > 1:
+            return raw[1:right]
+    if raw.count(":") == 1:
+        host, port = raw.rsplit(":", 1)
+        if host and port.isdigit():
+            return host
+    return raw
+
+
+def is_loopback_host(raw_host: str) -> bool:
+    host = (raw_host or "").strip().lower()
+    if not host:
+        return True
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except Exception:
+        return False
+
+
+def parse_ss_peer_hosts(raw_text: str, local_port: int) -> list[str]:
+    peers: set[str] = set()
+    suffix = f":{int(local_port)}"
+    for raw_line in (raw_text or "").splitlines():
+        tokens = [token.strip() for token in raw_line.split() if token.strip()]
+        if len(tokens) < 2:
+            continue
+        for idx, token in enumerate(tokens):
+            if not token.endswith(suffix):
+                continue
+            if idx + 1 >= len(tokens):
+                continue
+            peer = endpoint_host(tokens[idx + 1])
+            if not peer or is_loopback_host(peer):
+                continue
+            peers.add(peer)
+    return sorted(peers)
+
+
+def parse_kcptun_peer_hosts(raw_text: str) -> list[str]:
+    peers: set[str] = set()
+    pattern = re.compile(r"(?:remote address:\s*|in:\s*)(\S+)")
+    for raw_line in (raw_text or "").splitlines():
+        line = (raw_line or "").strip()
+        if not line:
+            continue
+        match = pattern.search(line)
+        if not match:
+            continue
+        candidate = endpoint_host(match.group(1))
+        if not candidate or is_loopback_host(candidate):
+            continue
+        peers.add(candidate)
+    return sorted(peers)
+
+
 @app.before_request
 def require_token():
     if request.path == "/healthz":
@@ -108,6 +191,62 @@ def wireguard_dump():
     interface = (request.args.get("interface") or WG_INTERFACE).strip() or WG_INTERFACE
     dump = run_command(["wg", "show", interface, "dump"], check=False)
     return {"ok": True, "dump": dump}
+
+
+@app.route("/shadowsocks/active-peers")
+def shadowsocks_active_peers():
+    raw = run_command(
+        [
+            "ss",
+            "-Htn",
+            "state",
+            "established",
+            f"( sport = :{SHADOWSOCKS_SERVER_PORT} )",
+        ],
+        check=False,
+    )
+    peers = parse_ss_peer_hosts(raw, SHADOWSOCKS_SERVER_PORT)
+    return {
+        "ok": True,
+        "mode": "shadowsocks",
+        "port": SHADOWSOCKS_SERVER_PORT,
+        "peers": peers,
+    }
+
+
+@app.route("/kcptun/active-peers")
+def kcptun_active_peers():
+    window_raw = (request.args.get("window") or "").strip()
+    limit_raw = (request.args.get("limit") or "").strip()
+    try:
+        window = max(30, min(3600, int(window_raw or "180")))
+    except Exception:
+        window = 180
+    try:
+        limit = max(50, min(3000, int(limit_raw or "800")))
+    except Exception:
+        limit = 800
+    log_text = run_command(
+        [
+            "journalctl",
+            "-u",
+            KCPTUN_SYSTEMD_UNIT,
+            "--since",
+            f"-{window} seconds",
+            "--no-pager",
+            "-n",
+            str(limit),
+        ],
+        check=False,
+    )
+    peers = parse_kcptun_peer_hosts(log_text)
+    return {
+        "ok": True,
+        "mode": "kcptun",
+        "port": KCPTUN_SERVER_PORT,
+        "window_seconds": window,
+        "peers": peers,
+    }
 
 
 def parse_openvpn_active_identities(raw_text: str) -> list[str]:
