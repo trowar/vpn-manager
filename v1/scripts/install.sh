@@ -369,7 +369,6 @@ if os.path.isfile(kcptun_path):
             port = int(match.group(1))
             if 0 < port < 65536:
                 emit("KCPTUN_SERVER_PORT", port)
-        emit("KCPTUN_ENABLED", "1")
     except Exception:
         pass
 PY
@@ -391,7 +390,6 @@ PY
       SHADOWSOCKS_SERVER_PORT) OPENVPN_PUBLIC_PORT="${value}" ;;
       KCPTUN_KEY) KCPTUN_KEY="${value}" ;;
       KCPTUN_SERVER_PORT) WG_PUBLIC_PORT="${value}" ;;
-      KCPTUN_ENABLED) KCPTUN_ENABLED="${value}" ;;
     esac
   done <<< "${runtime_lines}"
 }
