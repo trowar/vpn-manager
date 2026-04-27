@@ -309,6 +309,30 @@ download_with_mirrors() {
 
 ensure_kcptun_binary() {
   local arch url tmp_tar tmp_dir
+  local system_bin
+
+  system_bin="$(command -v kcptun-server 2>/dev/null || true)"
+  if [ -n "${system_bin}" ] && [ -x "${system_bin}" ]; then
+    KCPTUN_BIN="${system_bin}"
+    log "using system kcptun binary: ${KCPTUN_BIN}"
+    return 0
+  fi
+
+  if [ "${PM}" = "apt" ]; then
+    local candidate
+    candidate="$(apt-cache policy kcptun 2>/dev/null | awk '/Candidate:/ {print $2; exit}' || true)"
+    if [ -n "${candidate}" ] && [ "${candidate}" != "(none)" ]; then
+      log "installing kcptun from apt package (candidate=${candidate})"
+      pkg_install kcptun || true
+      system_bin="$(command -v kcptun-server 2>/dev/null || true)"
+      if [ -n "${system_bin}" ] && [ -x "${system_bin}" ]; then
+        KCPTUN_BIN="${system_bin}"
+        log "using apt kcptun binary: ${KCPTUN_BIN}"
+        return 0
+      fi
+    fi
+  fi
+
   if [ -x "${KCPTUN_BIN}" ]; then
     log "kcptun binary already exists at ${KCPTUN_BIN}, skip download"
     return 0
