@@ -28,7 +28,6 @@
           <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_settings') }}">设置</a>
         {% else %}
           <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
-          <a class="site-nav-link {% if dashboard_page == 'plans' %}active{% endif %}" href="{{ url_for('dashboard_plans') }}">套餐</a>
           <a class="site-nav-link {% if dashboard_page == 'orders' %}active{% endif %}" href="{{ url_for('dashboard_orders') }}">订单管理</a>
           <a class="site-nav-link {% if dashboard_page == 'config' %}active{% endif %}" href="{{ url_for('dashboard_config') }}">配置</a>
           <a class="site-nav-link {% if dashboard_page == 'profile' %}active{% endif %}" href="{{ url_for('dashboard_profile') }}">个人中心</a>

@@ -9548,13 +9548,7 @@ def dashboard_plans():
     user = current_user()
     if user["role"] == "admin":
         return redirect(url_for("admin_home"))
-    db = get_db()
-    available_plans = load_subscription_plans(db, active_only=True)
-    return render_template(
-        "dashboard_plans.html",
-        available_plans=available_plans,
-        dashboard_page="plans",
-    )
+    return redirect(url_for("dashboard_orders"))
 
 
 @app.route("/dashboard/config")
