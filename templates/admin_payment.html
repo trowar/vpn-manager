@@ -37,16 +37,27 @@
                 {% endif %}
               </td>
               <td>
-                <button
-                  type="button"
-                  class="btn secondary open-payment-method-inline-edit"
-                  data-update-url="{{ url_for('admin_update_payment_method', method_id=method['id']) }}"
-                  data-method-code="{{ method['method_code'] }}"
-                  data-method-name="{{ method['method_name'] }}"
-                  data-network="{{ method['network'] }}"
-                  data-receive-address="{{ method['receive_address'] }}"
-                  data-sort-order="{{ method['sort_order'] }}"
-                >编辑</button>
+                <div class="subscription-actions">
+                  <button
+                    type="button"
+                    class="btn secondary open-payment-method-inline-edit"
+                    data-update-url="{{ url_for('admin_update_payment_method', method_id=method['id']) }}"
+                    data-method-code="{{ method['method_code'] }}"
+                    data-method-name="{{ method['method_name'] }}"
+                    data-network="{{ method['network'] }}"
+                    data-receive-address="{{ method['receive_address'] }}"
+                    data-sort-order="{{ method['sort_order'] }}"
+                  >编辑</button>
+                  <form
+                    method="post"
+                    action="{{ url_for('admin_delete_payment_method', method_id=method['id']) }}"
+                    class="inline-form"
+                    onsubmit="return confirm('确定删除该支付方式吗？');"
+                  >
+                    <input type="hidden" name="redirect_to" value="payment">
+                    <button type="submit" class="danger">删除</button>
+                  </form>
+                </div>
               </td>
             </tr>
           {% endfor %}
