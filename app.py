@@ -9018,7 +9018,9 @@ def dashboard_config():
         node_alert_text = "当前节点异常，系统正在切换。"
 
     ss_download_link = absolute_url_for("download_config") if SHADOWSOCKS_ENABLED else ""
-    kcptun_download_link = absolute_url_for("download_kcptun_config") if KCPTUN_ENABLED else ""
+    kcptun_download_link = (
+        absolute_url_for("download_kcptun_config", format="yaml") if KCPTUN_ENABLED else ""
+    )
     ss_qr_link = absolute_url_for("download_qr") if SHADOWSOCKS_ENABLED else ""
 
     return render_template(
@@ -11278,7 +11280,7 @@ def admin_configs():
 
     admin_ss_download_link = absolute_url_for("admin_download_config") if SHADOWSOCKS_ENABLED else ""
     admin_kcptun_download_link = (
-        absolute_url_for("admin_download_kcptun_config") if KCPTUN_ENABLED else ""
+        absolute_url_for("admin_download_kcptun_config", format="yaml") if KCPTUN_ENABLED else ""
     )
     admin_ss_qr_link = absolute_url_for("admin_download_qr") if SHADOWSOCKS_ENABLED else ""
 
@@ -13268,7 +13270,11 @@ def download_kcptun_config():
         return redirect(url_for("dashboard_home"))
 
     filename = f"kcptun-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
-    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    headers = {
+        "Content-Disposition": f'attachment; filename=\"{filename}\"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
     mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
     return Response(config_text, headers=headers, mimetype=mimetype)
 
@@ -13303,7 +13309,11 @@ def admin_download_kcptun_config():
         return redirect(url_for("admin_home"))
 
     filename = f"kcptun-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
-    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    headers = {
+        "Content-Disposition": f'attachment; filename=\"{filename}\"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
     mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
     return Response(config_text, headers=headers, mimetype=mimetype)
 

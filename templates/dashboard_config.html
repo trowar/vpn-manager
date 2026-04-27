@@ -73,7 +73,7 @@
           {% if active and shadowsocks_enabled %}
             <a class="btn" href="{{ url_for('download_config') }}">下载 Shadowsocks 配置</a>
             {% if kcptun_enabled %}
-              <a class="btn secondary" href="{{ url_for('download_kcptun_config') }}">下载 kcptun 配置</a>
+              <a class="btn secondary" href="{{ url_for('download_kcptun_config', format='yaml') }}">下载 kcptun 配置</a>
             {% endif %}
           {% elif not shadowsocks_enabled %}
             <button type="button" disabled>Shadowsocks 已关闭</button>
