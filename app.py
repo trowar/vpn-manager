@@ -6757,23 +6757,67 @@ def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]
     return peers
 
 
-def parse_shadowsocks_active_peer_hosts(raw_text: str, server_port: int) -> list[str]:
-    peers: set[str] = set()
+def _extract_ss_connection_host(raw_line: str, server_port: int) -> str:
+    tokens = [token.strip() for token in (raw_line or "").split() if token.strip()]
+    if len(tokens) < 2:
+        return ""
     suffix = f":{int(server_port)}"
-    for raw_line in (raw_text or "").splitlines():
-        tokens = [token.strip() for token in raw_line.split() if token.strip()]
-        if len(tokens) < 2:
+    for idx, token in enumerate(tokens):
+        if not token.endswith(suffix):
             continue
-        for idx, token in enumerate(tokens):
-            if not token.endswith(suffix):
-                continue
-            if idx + 1 >= len(tokens):
-                continue
-            host = normalize_public_client_ip(tokens[idx + 1])
-            if not host:
-                continue
+        if idx + 1 >= len(tokens):
+            continue
+        return normalize_public_client_ip(tokens[idx + 1])
+    return ""
+
+
+def parse_shadowsocks_active_peer_snapshot(
+    raw_text: str, server_port: int
+) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int]]:
+    peers: set[str] = set()
+    peer_stats: dict[str, dict[str, int]] = {}
+    aggregate_rx = 0
+    aggregate_tx = 0
+    current_host = ""
+    for raw_line in (raw_text or "").splitlines():
+        line = (raw_line or "").strip()
+        if not line:
+            continue
+        host = _extract_ss_connection_host(line, server_port)
+        if host:
+            current_host = host
             peers.add(host)
-    return sorted(peers)
+            peer_stats.setdefault(host, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0})
+        elif line and not line.startswith(("bbr", "cubic", "reno", "wscale", "rto", "rtt")):
+            # Treat lines without a connection tuple as details of the previous socket.
+            pass
+
+        rx_match = re.search(r"bytes_received[:=](\d+)", line)
+        tx_ack_match = re.search(r"bytes_acked[:=](\d+)", line)
+        tx_sent_match = re.search(r"bytes_sent[:=](\d+)", line)
+        if not (rx_match or tx_ack_match or tx_sent_match):
+            continue
+        rx_bytes = int(rx_match.group(1)) if rx_match else 0
+        tx_bytes = int(tx_ack_match.group(1)) if tx_ack_match else (
+            int(tx_sent_match.group(1)) if tx_sent_match else 0
+        )
+        rx_bytes = max(0, rx_bytes)
+        tx_bytes = max(0, tx_bytes)
+        aggregate_rx += rx_bytes
+        aggregate_tx += tx_bytes
+        if current_host:
+            stats = peer_stats.setdefault(
+                current_host, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
+            )
+            stats["rx_bytes"] += rx_bytes
+            stats["tx_bytes"] += tx_bytes
+            stats["total_bytes"] += rx_bytes + tx_bytes
+    aggregate = {
+        "rx_bytes": max(0, aggregate_rx),
+        "tx_bytes": max(0, aggregate_tx),
+        "total_bytes": max(0, aggregate_rx + aggregate_tx),
+    }
+    return sorted(peers), peer_stats, aggregate
 
 
 def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
@@ -6794,18 +6838,24 @@ def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
     return sorted(peers)
 
 
-def get_local_shadowsocks_active_peer_hosts() -> list[str]:
+def get_local_shadowsocks_active_peer_snapshot(
+) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int]]:
     raw = run_command(
         [
             "ss",
-            "-Htn",
+            "-Htni",
             "state",
             "established",
             f"( sport = :{SHADOWSOCKS_SERVER_PORT} )",
         ],
         check=False,
     )
-    return parse_shadowsocks_active_peer_hosts(raw, SHADOWSOCKS_SERVER_PORT)
+    return parse_shadowsocks_active_peer_snapshot(raw, SHADOWSOCKS_SERVER_PORT)
+
+
+def get_local_shadowsocks_active_peer_hosts() -> list[str]:
+    peers, _peer_stats, _aggregate = get_local_shadowsocks_active_peer_snapshot()
+    return peers
 
 
 def get_local_kcptun_active_peer_hosts(window_seconds: int) -> list[str]:
@@ -6831,7 +6881,7 @@ def get_runtime_active_peer_hosts(
     user: DatabaseRow | None = None,
     server_row: DatabaseRow | None = None,
     window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
-) -> tuple[list[str], str]:
+) -> tuple[list[str], str, dict[str, dict[str, int]], dict[str, int]]:
     if KCPTUN_ENABLED:
         detect_mode = "kcptun"
     else:
@@ -6851,15 +6901,47 @@ def get_runtime_active_peer_hosts(
             allow_reassign=False,
         )
         peers = result.get("peers") if isinstance(result, dict) else []
+        peer_stats_raw = result.get("peer_stats") if isinstance(result, dict) else {}
+        aggregate_raw = result.get("aggregate") if isinstance(result, dict) else {}
         cleaned: list[str] = []
         for item in peers or []:
             host = normalize_public_client_ip(str(item or ""))
             if host:
                 cleaned.append(host)
-        return sorted(set(cleaned)), detect_mode
+        peer_stats: dict[str, dict[str, int]] = {}
+        if isinstance(peer_stats_raw, dict):
+            for host_raw, stat_raw in peer_stats_raw.items():
+                host = normalize_public_client_ip(str(host_raw or ""))
+                if not host:
+                    continue
+                stat_obj = stat_raw if isinstance(stat_raw, dict) else {}
+                rx = to_non_negative_int(stat_obj.get("rx_bytes", 0))
+                tx = to_non_negative_int(stat_obj.get("tx_bytes", 0))
+                peer_stats[host] = {
+                    "rx_bytes": rx,
+                    "tx_bytes": tx,
+                    "total_bytes": to_non_negative_int(stat_obj.get("total_bytes", rx + tx)),
+                }
+        aggregate = {
+            "rx_bytes": to_non_negative_int(
+                (aggregate_raw.get("rx_bytes", 0) if isinstance(aggregate_raw, dict) else 0)
+            ),
+            "tx_bytes": to_non_negative_int(
+                (aggregate_raw.get("tx_bytes", 0) if isinstance(aggregate_raw, dict) else 0)
+            ),
+            "total_bytes": to_non_negative_int(
+                (aggregate_raw.get("total_bytes", 0) if isinstance(aggregate_raw, dict) else 0)
+            ),
+        }
+        if aggregate["total_bytes"] <= 0:
+            aggregate["total_bytes"] = aggregate["rx_bytes"] + aggregate["tx_bytes"]
+        return sorted(set(cleaned)), detect_mode, peer_stats, aggregate
     if KCPTUN_ENABLED:
-        return get_local_kcptun_active_peer_hosts(window_seconds), detect_mode
-    return get_local_shadowsocks_active_peer_hosts(), detect_mode
+        peers = get_local_kcptun_active_peer_hosts(window_seconds)
+        _ss_peers, _ss_stats, ss_aggregate = get_local_shadowsocks_active_peer_snapshot()
+        return peers, detect_mode, {}, ss_aggregate
+    peers, peer_stats, aggregate = get_local_shadowsocks_active_peer_snapshot()
+    return peers, detect_mode, peer_stats, aggregate
 
 
 def get_wireguard_server_public_key(
@@ -9941,6 +10023,8 @@ def load_admin_online_users(
     now_ts = int(now_dt.timestamp())
     peer_cache: dict[str, dict[str, dict[str, int | str]]] = {}
     active_peer_hosts_by_source: dict[str, set[str]] = {}
+    active_peer_stats_by_source: dict[str, dict[str, dict[str, int]]] = {}
+    aggregate_stats_by_source: dict[str, dict[str, int]] = {}
     cache_errors: dict[str, str] = {}
     online_users: list[dict] = []
     source_labels: dict[str, str] = {}
@@ -9982,6 +10066,7 @@ def load_admin_online_users(
         user_row: DatabaseRow,
         *,
         server_name: str,
+        source_key: str,
         endpoint: str,
         latest_handshake: int,
         rx_bytes: int = 0,
@@ -10001,6 +10086,7 @@ def load_admin_online_users(
             "email": (row_get(user_row, "email", "") or "").strip(),
             "assigned_ip": (row_get(user_row, "assigned_ip", "") or "").strip(),
             "server_name": server_name,
+            "__source_key": source_key,
             "endpoint": (endpoint or "").strip() or "-",
             "latest_handshake": int(max(0, latest_handshake)),
             "latest_handshake_at": handshake_epoch_to_iso(latest_handshake),
@@ -10064,6 +10150,7 @@ def load_admin_online_users(
                 build_online_row(
                     user,
                     server_name=server_name,
+                    source_key=source_key,
                     endpoint=(peer_state.get("endpoint", "") or "").strip(),
                     latest_handshake=latest_handshake,
                     rx_bytes=rx_bytes,
@@ -10076,15 +10163,27 @@ def load_admin_online_users(
             if source_key in active_peer_hosts_by_source:
                 continue
             try:
-                peers, source_mode = get_runtime_active_peer_hosts(
+                peers, source_mode, peer_stats, aggregate_stats = get_runtime_active_peer_hosts(
                     user=user,
                     server_row=server_row,
                     window_seconds=online_window_seconds,
                 )
                 active_peer_hosts_by_source[source_key] = set(peers)
+                active_peer_stats_by_source[source_key] = peer_stats or {}
+                aggregate_stats_by_source[source_key] = aggregate_stats or {
+                    "rx_bytes": 0,
+                    "tx_bytes": 0,
+                    "total_bytes": 0,
+                }
                 detect_mode = source_mode or detect_mode
             except Exception as exc:
                 active_peer_hosts_by_source[source_key] = set()
+                active_peer_stats_by_source[source_key] = {}
+                aggregate_stats_by_source[source_key] = {
+                    "rx_bytes": 0,
+                    "tx_bytes": 0,
+                    "total_bytes": 0,
+                }
                 cache_errors[source_key] = str(exc)
 
         matched_user_ids: set[int] = set()
@@ -10103,12 +10202,16 @@ def load_admin_online_users(
                 continue
             matched_user_ids.add(user_id)
             matched_peer_by_source.setdefault(source_key, set()).add(login_ip)
+            peer_state = active_peer_stats_by_source.get(source_key, {}).get(login_ip, {})
             online_users.append(
                 build_online_row(
                     user,
                     server_name=server_name,
+                    source_key=source_key,
                     endpoint=login_ip,
                     latest_handshake=now_ts,
+                    rx_bytes=to_non_negative_int(peer_state.get("rx_bytes", 0)),
+                    tx_bytes=to_non_negative_int(peer_state.get("tx_bytes", 0)),
                 )
             )
 
@@ -10132,8 +10235,19 @@ def load_admin_online_users(
                     build_online_row(
                         user,
                         server_name=source_labels.get(source_key, "-"),
+                        source_key=source_key,
                         endpoint=unmatched_peers[0],
                         latest_handshake=now_ts,
+                        rx_bytes=to_non_negative_int(
+                            active_peer_stats_by_source.get(source_key, {})
+                            .get(unmatched_peers[0], {})
+                            .get("rx_bytes", 0)
+                        ),
+                        tx_bytes=to_non_negative_int(
+                            active_peer_stats_by_source.get(source_key, {})
+                            .get(unmatched_peers[0], {})
+                            .get("tx_bytes", 0)
+                        ),
                     )
                 )
                 continue
@@ -10147,6 +10261,7 @@ def load_admin_online_users(
                         "email": "-",
                         "assigned_ip": "-",
                         "server_name": source_labels.get(source_key, "-"),
+                        "__source_key": source_key,
                         "endpoint": peer_host,
                         "latest_handshake": now_ts,
                         "latest_handshake_at": handshake_epoch_to_iso(now_ts),
@@ -10163,6 +10278,36 @@ def load_admin_online_users(
                     }
                 )
 
+        # kcptun traffic usually appears as loopback shadowsocks sockets.
+        # When one mapped user is online on a source, apply aggregate socket bytes to that user row.
+        if detect_mode == "kcptun":
+            by_source: dict[str, list[dict]] = {}
+            for row in online_users:
+                key = str(row.get("__source_key", "") or "")
+                if not key:
+                    continue
+                by_source.setdefault(key, []).append(row)
+            for source_key, rows in by_source.items():
+                aggregate = aggregate_stats_by_source.get(source_key, {})
+                agg_rx = to_non_negative_int(aggregate.get("rx_bytes", 0))
+                agg_tx = to_non_negative_int(aggregate.get("tx_bytes", 0))
+                agg_total = to_non_negative_int(aggregate.get("total_bytes", agg_rx + agg_tx))
+                if agg_total <= 0:
+                    continue
+                mapped_rows = [r for r in rows if str(r.get("role", "")) != "unknown"]
+                if len(mapped_rows) != 1:
+                    continue
+                row = mapped_rows[0]
+                current_total = to_non_negative_int(row.get("total_bytes", 0))
+                if current_total > 0:
+                    continue
+                row["rx_bytes"] = agg_rx
+                row["tx_bytes"] = agg_tx
+                row["total_bytes"] = max(0, agg_rx + agg_tx)
+                row["rx_human"] = format_bytes(row["rx_bytes"])
+                row["tx_human"] = format_bytes(row["tx_bytes"])
+                row["total_human"] = format_bytes(row["total_bytes"])
+
     online_users.sort(
         key=lambda item: (
             int(item.get("latest_handshake", 0) or 0),
@@ -10170,6 +10315,8 @@ def load_admin_online_users(
         ),
         reverse=True,
     )
+    for item in online_users:
+        item.pop("__source_key", None)
     summary = {
         "tracked_users": len(users),
         "online_users": len(online_users),

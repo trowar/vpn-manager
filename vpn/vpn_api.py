@@ -122,23 +122,68 @@ def is_loopback_host(raw_host: str) -> bool:
         return False
 
 
-def parse_ss_peer_hosts(raw_text: str, local_port: int) -> list[str]:
-    peers: set[str] = set()
+def extract_ss_connection_host(raw_line: str, local_port: int) -> str:
+    tokens = [token.strip() for token in (raw_line or "").split() if token.strip()]
+    if len(tokens) < 2:
+        return ""
     suffix = f":{int(local_port)}"
-    for raw_line in (raw_text or "").splitlines():
-        tokens = [token.strip() for token in raw_line.split() if token.strip()]
-        if len(tokens) < 2:
+    for idx, token in enumerate(tokens):
+        if not token.endswith(suffix):
             continue
-        for idx, token in enumerate(tokens):
-            if not token.endswith(suffix):
-                continue
-            if idx + 1 >= len(tokens):
-                continue
-            peer = endpoint_host(tokens[idx + 1])
-            if not peer or is_loopback_host(peer):
-                continue
-            peers.add(peer)
-    return sorted(peers)
+        if idx + 1 >= len(tokens):
+            continue
+        peer = endpoint_host(tokens[idx + 1])
+        if not peer or is_loopback_host(peer):
+            return ""
+        return peer
+    return ""
+
+
+def parse_ss_peer_snapshot(
+    raw_text: str, local_port: int
+) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int]]:
+    peers: set[str] = set()
+    peer_stats: dict[str, dict[str, int]] = {}
+    aggregate_rx = 0
+    aggregate_tx = 0
+    current_host = ""
+    for raw_line in (raw_text or "").splitlines():
+        line = (raw_line or "").strip()
+        if not line:
+            continue
+        host = extract_ss_connection_host(line, local_port)
+        if host:
+            current_host = host
+            peers.add(host)
+            peer_stats.setdefault(host, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0})
+
+        rx_match = re.search(r"bytes_received[:=](\d+)", line)
+        tx_ack_match = re.search(r"bytes_acked[:=](\d+)", line)
+        tx_sent_match = re.search(r"bytes_sent[:=](\d+)", line)
+        if not (rx_match or tx_ack_match or tx_sent_match):
+            continue
+        rx_bytes = int(rx_match.group(1)) if rx_match else 0
+        tx_bytes = int(tx_ack_match.group(1)) if tx_ack_match else (
+            int(tx_sent_match.group(1)) if tx_sent_match else 0
+        )
+        rx_bytes = max(0, rx_bytes)
+        tx_bytes = max(0, tx_bytes)
+        aggregate_rx += rx_bytes
+        aggregate_tx += tx_bytes
+        if current_host:
+            stats = peer_stats.setdefault(
+                current_host, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
+            )
+            stats["rx_bytes"] += rx_bytes
+            stats["tx_bytes"] += tx_bytes
+            stats["total_bytes"] += rx_bytes + tx_bytes
+
+    aggregate = {
+        "rx_bytes": max(0, aggregate_rx),
+        "tx_bytes": max(0, aggregate_tx),
+        "total_bytes": max(0, aggregate_rx + aggregate_tx),
+    }
+    return sorted(peers), peer_stats, aggregate
 
 
 def parse_kcptun_peer_hosts(raw_text: str) -> list[str]:
@@ -198,19 +243,21 @@ def shadowsocks_active_peers():
     raw = run_command(
         [
             "ss",
-            "-Htn",
+            "-Htni",
             "state",
             "established",
             f"( sport = :{SHADOWSOCKS_SERVER_PORT} )",
         ],
         check=False,
     )
-    peers = parse_ss_peer_hosts(raw, SHADOWSOCKS_SERVER_PORT)
+    peers, peer_stats, aggregate = parse_ss_peer_snapshot(raw, SHADOWSOCKS_SERVER_PORT)
     return {
         "ok": True,
         "mode": "shadowsocks",
         "port": SHADOWSOCKS_SERVER_PORT,
         "peers": peers,
+        "peer_stats": peer_stats,
+        "aggregate": aggregate,
     }
 
 
@@ -240,12 +287,27 @@ def kcptun_active_peers():
         check=False,
     )
     peers = parse_kcptun_peer_hosts(log_text)
+    ss_raw = run_command(
+        [
+            "ss",
+            "-Htni",
+            "state",
+            "established",
+            f"( sport = :{SHADOWSOCKS_SERVER_PORT} )",
+        ],
+        check=False,
+    )
+    _ss_peers, _ss_peer_stats, ss_aggregate = parse_ss_peer_snapshot(
+        ss_raw, SHADOWSOCKS_SERVER_PORT
+    )
     return {
         "ok": True,
         "mode": "kcptun",
         "port": KCPTUN_SERVER_PORT,
         "window_seconds": window,
         "peers": peers,
+        "peer_stats": {},
+        "aggregate": ss_aggregate,
     }
 
 
