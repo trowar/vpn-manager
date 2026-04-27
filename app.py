@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+import secrets
 import smtplib
 import socket
 import sqlite3
@@ -313,6 +314,16 @@ except ValueError:
     SESSION_IDLE_TIMEOUT_MINUTES = 30
 SESSION_IDLE_TIMEOUT_SECONDS = SESSION_IDLE_TIMEOUT_MINUTES * 60
 SESSION_LAST_ACTIVITY_KEY = "last_activity_ts"
+DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS_RAW = os.environ.get(
+    "PORTAL_DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS",
+    "2592000",  # 30 days
+).strip()
+try:
+    DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS = max(
+        300, int(DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS_RAW)
+    )
+except ValueError:
+    DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS = 2592000
 SSH_CONNECT_MAX_RETRIES_RAW = os.environ.get("PORTAL_SSH_CONNECT_MAX_RETRIES", "3").strip()
 try:
     SSH_CONNECT_MAX_RETRIES = max(1, int(SSH_CONNECT_MAX_RETRIES_RAW))
@@ -6287,10 +6298,20 @@ def current_user():
 def build_download_access_token(user, scope: str) -> str:
     user_id = int(row_get(user, "id", 0) or 0)
     session_version = int(row_get(user, "session_version", 1) or 1)
-    payload = f"{user_id}:{session_version}:{scope}"
+    now_ts = int(time.time())
+    payload_obj = {
+        "uid": user_id,
+        "sv": session_version,
+        "scp": str(scope or "").strip(),
+        "iat": now_ts,
+        "exp": now_ts + DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS,
+        "rnd": secrets.token_urlsafe(18),
+    }
+    payload = json.dumps(payload_obj, ensure_ascii=False, separators=(",", ":"))
+    payload_b64 = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
     secret = str(app.config.get("SECRET_KEY", "change-this-secret")).encode("utf-8")
-    signature = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"{user_id}.{session_version}.{signature}"
+    signature = hmac.new(secret, payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{signature}"
 
 
 def resolve_download_access_user(
@@ -6299,7 +6320,50 @@ def resolve_download_access_user(
     scope: str,
 ):
     token = (access_token or "").strip()
+    if not token:
+        return None
+
+    # New opaque token format: base64url(payload_json).hex_hmac
     parts = token.split(".")
+    if len(parts) == 2:
+        payload_b64, signature = parts
+        if payload_b64 and signature:
+            secret = str(app.config.get("SECRET_KEY", "change-this-secret")).encode("utf-8")
+            expected_signature = hmac.new(
+                secret, payload_b64.encode("ascii"), hashlib.sha256
+            ).hexdigest()
+            if hmac.compare_digest(expected_signature, signature):
+                try:
+                    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+                    payload_raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+                    payload_obj = json.loads(payload_raw.decode("utf-8"))
+                except Exception:
+                    payload_obj = None
+                if isinstance(payload_obj, dict):
+                    token_scope = str(payload_obj.get("scp", "") or "").strip()
+                    user_id = int(payload_obj.get("uid", 0) or 0)
+                    session_version = int(payload_obj.get("sv", 0) or 0)
+                    expire_ts = int(payload_obj.get("exp", 0) or 0)
+                    now_ts = int(time.time())
+                    if (
+                        token_scope == str(scope or "").strip()
+                        and user_id > 0
+                        and session_version > 0
+                        and expire_ts >= now_ts
+                    ):
+                        user = db.execute(
+                            "SELECT * FROM users WHERE id = ?",
+                            (user_id,),
+                        ).fetchone()
+                        if not user:
+                            return None
+                        current_session_version = int(
+                            row_get(user, "session_version", 1) or 1
+                        )
+                        if current_session_version == session_version:
+                            return user
+
+    # Legacy format compatibility: user_id.session_version.hex_hmac
     if len(parts) != 3:
         return None
     user_id_raw, session_version_raw, signature = parts
