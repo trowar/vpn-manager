@@ -20,6 +20,7 @@
             <th>网络</th>
             <th>收款地址</th>
             <th>状态</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -34,6 +35,18 @@
                 {% else %}
                   <span class="tag tag-warn">已停用</span>
                 {% endif %}
+              </td>
+              <td>
+                <button
+                  type="button"
+                  class="btn secondary open-payment-method-inline-edit"
+                  data-update-url="{{ url_for('admin_update_payment_method', method_id=method['id']) }}"
+                  data-method-code="{{ method['method_code'] }}"
+                  data-method-name="{{ method['method_name'] }}"
+                  data-network="{{ method['network'] }}"
+                  data-receive-address="{{ method['receive_address'] }}"
+                  data-sort-order="{{ method['sort_order'] }}"
+                >编辑</button>
               </td>
             </tr>
           {% endfor %}
@@ -220,6 +233,36 @@
   </div>
 </div>
 
+<div class="payment-modal" id="payment-method-inline-edit-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>编辑支付方式</h4>
+      <button type="button" class="btn secondary" id="close-payment-method-inline-edit-modal">关闭</button>
+    </div>
+    <form method="post" id="payment-method-inline-edit-form" class="form">
+      <input type="hidden" name="redirect_to" value="payment">
+      <input type="hidden" name="method_code" id="payment-method-inline-edit-code" value="usdt">
+      <label>显示名称
+        <input type="text" name="method_name" id="payment-method-inline-edit-name" required>
+      </label>
+      <label>网络
+        <select name="network" id="payment-method-inline-edit-network" required>
+          {% for network in usdt_network_options %}
+            <option value="{{ network }}">{{ network }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>收款地址
+        <input type="text" name="receive_address" id="payment-method-inline-edit-address" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" id="payment-method-inline-edit-sort" min="0" step="1" value="100">
+      </label>
+      <button type="submit">保存</button>
+    </form>
+  </div>
+</div>
+
 <div class="payment-modal" id="plan-create-modal" hidden>
   <div class="payment-modal-card plan-create-modal-card">
     <div class="section-title-row">
@@ -329,6 +372,15 @@
     var paymentCreateOpenBtn = document.getElementById("open-payment-method-create-modal");
     var paymentCreateCloseBtn = document.getElementById("close-payment-method-create-modal");
     var paymentCreateModal = document.getElementById("payment-method-create-modal");
+    var paymentInlineEditButtons = document.querySelectorAll(".open-payment-method-inline-edit");
+    var paymentInlineEditModal = document.getElementById("payment-method-inline-edit-modal");
+    var paymentInlineEditCloseBtn = document.getElementById("close-payment-method-inline-edit-modal");
+    var paymentInlineEditForm = document.getElementById("payment-method-inline-edit-form");
+    var paymentInlineEditCode = document.getElementById("payment-method-inline-edit-code");
+    var paymentInlineEditName = document.getElementById("payment-method-inline-edit-name");
+    var paymentInlineEditNetwork = document.getElementById("payment-method-inline-edit-network");
+    var paymentInlineEditAddress = document.getElementById("payment-method-inline-edit-address");
+    var paymentInlineEditSort = document.getElementById("payment-method-inline-edit-sort");
 
     var createOpenBtn = document.getElementById("open-plan-create-modal");
     var createCloseBtn = document.getElementById("close-plan-create-modal");
@@ -437,6 +489,36 @@
       });
     }
     bindOverlayClose(paymentCreateModal);
+    if (paymentInlineEditCloseBtn) {
+      paymentInlineEditCloseBtn.addEventListener("click", function () {
+        closeModal(paymentInlineEditModal);
+      });
+    }
+    bindOverlayClose(paymentInlineEditModal);
+    paymentInlineEditButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!paymentInlineEditForm) {
+          return;
+        }
+        paymentInlineEditForm.action = btn.dataset.updateUrl || "";
+        if (paymentInlineEditCode) {
+          paymentInlineEditCode.value = btn.dataset.methodCode || "usdt";
+        }
+        if (paymentInlineEditName) {
+          paymentInlineEditName.value = btn.dataset.methodName || "";
+        }
+        if (paymentInlineEditNetwork) {
+          paymentInlineEditNetwork.value = btn.dataset.network || "TRC20";
+        }
+        if (paymentInlineEditAddress) {
+          paymentInlineEditAddress.value = btn.dataset.receiveAddress || "";
+        }
+        if (paymentInlineEditSort) {
+          paymentInlineEditSort.value = btn.dataset.sortOrder || "100";
+        }
+        openModal(paymentInlineEditModal);
+      });
+    });
 
     if (createOpenBtn) {
       createOpenBtn.addEventListener("click", function () {
