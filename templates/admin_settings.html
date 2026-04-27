@@ -31,15 +31,13 @@
       <input type="number" name="gift_traffic_gb" min="0" step="1" value="{{ system_settings['gift_traffic_gb'] }}" required>
     </label>
 
-    <input type="hidden" name="wireguard_open" value="0">
-    <input type="hidden" name="openvpn_open" value="0">
 
     <label>Telegram 联系方式（可选）
       <input type="text" name="telegram_contact" value="{{ system_settings['telegram_contact'] }}" placeholder="@your_tg 或 t.me/xxx">
     </label>
 
     <p class="helper">默认站点标题：新世界发展科技有限公司边缘节点网络管理系统。</p>
-    <p class="helper">当前协议已切换为 Shadowsocks，WireGuard/OpenVPN 配置入口默认关闭。</p>
+    <p class="helper">当前协议已切换为 Shadowsocks/KCPTUN。</p>
     <p class="helper">赠送策略仅影响后续新注册用户；可同时赠送时长和流量。</p>
     <button type="submit">保存系统设置</button>
   </form>

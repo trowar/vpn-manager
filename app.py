@@ -141,18 +141,9 @@ WIREGUARD_DOWNLOAD_LINKS = {
     "android_apk": "https://download.wireguard.com/android-client/",
     "official": "https://www.wireguard.com/install/",
 }
-OPENVPN_ENABLED = os.environ.get("OPENVPN_ENABLED", "0").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-WIREGUARD_ENABLED = os.environ.get("VPN_ENABLE_WIREGUARD", "0").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
+# OpenVPN/WireGuard are retired from this deployment line.
+OPENVPN_ENABLED = False
+WIREGUARD_ENABLED = False
 SHADOWSOCKS_ENABLED = os.environ.get("SHADOWSOCKS_ENABLED", "1").strip().lower() in (
     "1",
     "true",
@@ -383,8 +374,14 @@ VPN_RELAY_ENABLED = os.environ.get("PORTAL_ENABLE_UDP_RELAY", "0").strip().lower
 VPN_RELAY_PUBLIC_HOST = os.environ.get("VPN_RELAY_PUBLIC_HOST", "").strip()
 WG_RELAY_PORT_START_RAW = os.environ.get("WG_RELAY_PORT_START", "24000").strip()
 WG_RELAY_PORT_END_RAW = os.environ.get("WG_RELAY_PORT_END", "28999").strip()
-OPENVPN_RELAY_PORT_START_RAW = os.environ.get("OPENVPN_RELAY_PORT_START", "29000").strip()
-OPENVPN_RELAY_PORT_END_RAW = os.environ.get("OPENVPN_RELAY_PORT_END", "33999").strip()
+SHADOWSOCKS_RELAY_PORT_START_RAW = os.environ.get(
+    "SHADOWSOCKS_RELAY_PORT_START",
+    os.environ.get("OPENVPN_RELAY_PORT_START", "29000"),
+).strip()
+SHADOWSOCKS_RELAY_PORT_END_RAW = os.environ.get(
+    "SHADOWSOCKS_RELAY_PORT_END",
+    os.environ.get("OPENVPN_RELAY_PORT_END", "33999"),
+).strip()
 try:
     WG_RELAY_PORT_START = int(WG_RELAY_PORT_START_RAW)
 except ValueError:
@@ -394,13 +391,16 @@ try:
 except ValueError:
     WG_RELAY_PORT_END = 28999
 try:
-    OPENVPN_RELAY_PORT_START = int(OPENVPN_RELAY_PORT_START_RAW)
+    SHADOWSOCKS_RELAY_PORT_START = int(SHADOWSOCKS_RELAY_PORT_START_RAW)
 except ValueError:
-    OPENVPN_RELAY_PORT_START = 29000
+    SHADOWSOCKS_RELAY_PORT_START = 29000
 try:
-    OPENVPN_RELAY_PORT_END = int(OPENVPN_RELAY_PORT_END_RAW)
+    SHADOWSOCKS_RELAY_PORT_END = int(SHADOWSOCKS_RELAY_PORT_END_RAW)
 except ValueError:
-    OPENVPN_RELAY_PORT_END = 33999
+    SHADOWSOCKS_RELAY_PORT_END = 33999
+# Backward-compatible aliases for old constant names.
+OPENVPN_RELAY_PORT_START = SHADOWSOCKS_RELAY_PORT_START
+OPENVPN_RELAY_PORT_END = SHADOWSOCKS_RELAY_PORT_END
 NODE_HEARTBEAT_TIMEOUT_SECONDS = 60
 ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS_RAW = os.environ.get(
     "ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS", "180"
@@ -447,7 +447,9 @@ ONBOARDING_SETTINGS_DEFAULTS = {
     ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY: "",
 }
 SERVER_DEPLOY_DEFAULT_WG_PORT = 29900
-SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 8388
+SERVER_DEPLOY_DEFAULT_SHADOWSOCKS_PORT = 8388
+# Backward-compatible alias for legacy references.
+SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = SERVER_DEPLOY_DEFAULT_SHADOWSOCKS_PORT
 SERVER_DEPLOY_DEFAULT_DNS_PORT = 53
 SERVER_DEPLOY_DEFAULT_VPN_API_PORT = 8081
 PRD_BLOCKED_ADMIN_ENDPOINT_MARKERS = ("onboarding", "cloudflare", "payment_method")
@@ -1886,13 +1888,8 @@ def ensure_user_openvpn_client_identity(
 
 
 def ensure_shared_vpn_server_materials() -> dict[str, str]:
-    wg_private_key, wg_public_key = ensure_shared_wireguard_materials()
-    openvpn_materials = ensure_shared_openvpn_materials()
-    return {
-        "wg_private_key": wg_private_key,
-        "wg_public_key": wg_public_key,
-        **openvpn_materials,
-    }
+    # Legacy helper kept for backward compatibility.
+    return {}
 
 
 def load_system_settings(db: DatabaseConnection) -> dict[str, int | bool | str]:
@@ -1911,8 +1908,6 @@ def load_system_settings(db: DatabaseConnection) -> dict[str, int | bool | str]:
     if (site_title or "").strip() == legacy_site_title:
         site_title = default_site_title
         upsert_app_setting(db, SETTING_SITE_TITLE, default_site_title)
-    wireguard_open_raw = get_app_setting(db, SETTING_WIREGUARD_OPEN, "0")
-    openvpn_open_raw = get_app_setting(db, SETTING_OPENVPN_OPEN, "0")
     order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
     return {
         "registration_open": parse_bool_setting(registration_open_raw, True),
@@ -1921,8 +1916,8 @@ def load_system_settings(db: DatabaseConnection) -> dict[str, int | bool | str]:
         "gift_traffic_gb": parse_int_setting(gift_traffic_gb_raw, 0, min_value=0),
         "telegram_contact": (telegram_contact or "").strip(),
         "site_title": (site_title or "").strip() or default_site_title,
-        "wireguard_open": parse_bool_setting(wireguard_open_raw, False),
-        "openvpn_open": parse_bool_setting(openvpn_open_raw, True),
+        "wireguard_open": False,
+        "openvpn_open": False,
     }
 
 
@@ -5078,15 +5073,9 @@ def build_vpn_node_deploy_script(
     *,
     vpn_api_token: str,
     wg_port: int,
-    openvpn_port: int,
+    shadowsocks_port: int,
     dns_port: int,
     skip_os_upgrade: bool,
-    wg_private_key_b64: str,
-    wg_public_key_b64: str,
-    openvpn_ca_cert_b64: str,
-    openvpn_server_cert_b64: str,
-    openvpn_server_key_b64: str,
-    openvpn_tls_crypt_key_b64: str,
 ) -> str:
     manual_script_path = BASE_DIR / "scripts" / "manual_deploy_vpn_node.sh"
     manual_script = manual_script_path.read_text(encoding="utf-8")
@@ -5099,7 +5088,7 @@ def build_vpn_node_deploy_script(
         export BRANCH="main"
         export DEPLOY_SKIP_OS_UPGRADE={"1" if skip_os_upgrade else "0"}
         export KCPTUN_SERVER_PORT="{wg_port}"
-        export SHADOWSOCKS_SERVER_PORT="{openvpn_port}"
+        export SHADOWSOCKS_SERVER_PORT="{shadowsocks_port}"
         export SHADOWSOCKS_PORT_RANGE_START="{OPENVPN_RELAY_PORT_START}"
         export SHADOWSOCKS_PORT_RANGE_END="{OPENVPN_RELAY_PORT_END}"
         export SHADOWSOCKS_METHOD="{SHADOWSOCKS_METHOD}"
@@ -5123,14 +5112,13 @@ def deploy_vpn_node_server(
     password: str,
     private_key_text: str = "",
     wg_port: int,
-    openvpn_port: int,
+    shadowsocks_port: int,
     dns_port: int,
     vpn_api_token: str | None = None,
 ) -> tuple[bool, str, str, str]:
     safe_token = (vpn_api_token or "").strip()
     if not safe_token:
         safe_token = hashlib.sha256(os.urandom(32)).hexdigest()[:48]
-    shared_materials = ensure_shared_vpn_server_materials()
 
     normalized_host = normalize_remote_host(host)
     normalized_port = normalize_server_port(port, 22)
@@ -5138,29 +5126,11 @@ def deploy_vpn_node_server(
     script = build_vpn_node_deploy_script(
         vpn_api_token=safe_token,
         wg_port=normalize_server_port(wg_port, SERVER_DEPLOY_DEFAULT_WG_PORT),
-        openvpn_port=normalize_server_port(
-            openvpn_port, SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
+        shadowsocks_port=normalize_server_port(
+            shadowsocks_port, SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
         ),
         dns_port=normalize_server_port(dns_port, SERVER_DEPLOY_DEFAULT_DNS_PORT),
         skip_os_upgrade=SERVER_DEPLOY_SKIP_OS_UPGRADE,
-        wg_private_key_b64=base64.b64encode(
-            shared_materials["wg_private_key"].encode("utf-8")
-        ).decode("ascii"),
-        wg_public_key_b64=base64.b64encode(
-            shared_materials["wg_public_key"].encode("utf-8")
-        ).decode("ascii"),
-        openvpn_ca_cert_b64=base64.b64encode(
-            shared_materials["ca_cert"].encode("utf-8")
-        ).decode("ascii"),
-        openvpn_server_cert_b64=base64.b64encode(
-            shared_materials["server_cert"].encode("utf-8")
-        ).decode("ascii"),
-        openvpn_server_key_b64=base64.b64encode(
-            shared_materials["server_key"].encode("utf-8")
-        ).decode("ascii"),
-        openvpn_tls_crypt_key_b64=base64.b64encode(
-            shared_materials["tls_crypt_key"].encode("utf-8")
-        ).decode("ascii"),
     )
 
     client: paramiko.SSHClient | None = None
@@ -8488,62 +8458,34 @@ def healthz():
 
 @app.route("/wireguard/download")
 def wireguard_download_page():
-    if not is_wireguard_open():
-        flash("WireGuard 当前已关闭。", "error")
-        return redirect(url_for("index"))
-    user = current_user()
-    dashboard_page = "guide" if user and user["role"] == "user" else None
-    return render_template(
-        "wireguard_download.html",
-        dashboard_page=dashboard_page,
-        wireguard_download_links=WIREGUARD_DOWNLOAD_LINKS,
-    )
+    flash("系统已切换为 Shadowsocks，WireGuard 下载入口已停用。", "error")
+    return redirect(url_for("dashboard_config"))
 
 
 @app.route("/wireguard/download/auto")
 def wireguard_download_auto():
-    if not is_wireguard_open():
-        flash("WireGuard 当前已关闭。", "error")
-        return redirect(url_for("index"))
-    platform = detect_wireguard_platform(request.headers.get("User-Agent", ""))
-    return redirect(url_for("wireguard_download_redirect", platform=platform))
+    return redirect(url_for("wireguard_download_page"))
 
 
 @app.route("/wireguard/download/<platform>")
 def wireguard_download_redirect(platform: str):
-    key = (platform or "").strip().lower()
-    target_url = WIREGUARD_DOWNLOAD_LINKS.get(key, WIREGUARD_DOWNLOAD_FALLBACK)
-    return redirect(target_url, code=302)
+    return redirect(url_for("wireguard_download_page"))
 
 
 @app.route("/openvpn/download")
 def openvpn_download_page():
-    if not is_openvpn_open():
-        flash("OpenVPN 当前已关闭。", "error")
-        return redirect(url_for("index"))
-    user = current_user()
-    dashboard_page = "guide" if user and user["role"] == "user" else None
-    return render_template(
-        "openvpn_download.html",
-        dashboard_page=dashboard_page,
-        openvpn_download_links=OPENVPN_DOWNLOAD_LINKS,
-    )
+    flash("系统已切换为 Shadowsocks，OpenVPN 下载入口已停用。", "error")
+    return redirect(url_for("dashboard_config"))
 
 
 @app.route("/openvpn/download/auto")
 def openvpn_download_auto():
-    if not is_openvpn_open():
-        flash("OpenVPN 当前已关闭。", "error")
-        return redirect(url_for("index"))
-    platform = detect_openvpn_platform(request.headers.get("User-Agent", ""))
-    return redirect(url_for("openvpn_download_redirect", platform=platform))
+    return redirect(url_for("openvpn_download_page"))
 
 
 @app.route("/openvpn/download/<platform>")
 def openvpn_download_redirect(platform: str):
-    key = (platform or "").strip().lower()
-    target_url = OPENVPN_DOWNLOAD_LINKS.get(key, OPENVPN_DOWNLOAD_FALLBACK)
-    return redirect(target_url, code=302)
+    return redirect(url_for("openvpn_download_page"))
 
 
 def captcha_session_key(scene: str) -> str:
@@ -11030,7 +10972,7 @@ def run_server_deploy_task(server_id: int) -> None:
                 password=row["password"],
                 private_key_text=row_get(row, "ssh_private_key", ""),
                 wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-                openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+                shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
                 dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
                 vpn_api_token=row_get(row, "vpn_api_token", ""),
             )
@@ -11335,7 +11277,7 @@ def admin_onboarding_step_server():
         ssh_private_key=server_private_key,
         domain="",
         wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-        openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+        shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
         dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
         vpn_api_token=deploy_token,
         status="deploying",
@@ -11354,7 +11296,7 @@ def admin_onboarding_step_server():
         password=server_password,
         private_key_text=server_private_key,
         wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-        openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+        shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
         dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
         vpn_api_token=deploy_token,
     )
@@ -11629,7 +11571,7 @@ def admin_onboarding():
             ssh_private_key="",
             domain="",
             wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-            openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+            shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
             dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
             vpn_api_token=deploy_token,
             status="deploying",
@@ -11647,7 +11589,7 @@ def admin_onboarding():
             username=server_username,
             password=server_password,
             wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-            openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+            shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
             dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
             vpn_api_token=deploy_token,
         )
@@ -11760,7 +11702,7 @@ def admin_create_server():
         ssh_private_key=ssh_private_key,
         domain="",
         wg_port=wg_port,
-        openvpn_port=openvpn_port,
+        shadowsocks_port=openvpn_port,
         dns_port=dns_port,
         vpn_api_token=deploy_token,
         status="deploying",
@@ -13126,8 +13068,6 @@ def admin_update_system_settings():
     gift_traffic_raw = request.form.get("gift_traffic_gb", "").strip()
     telegram_contact = request.form.get("telegram_contact", "").strip()
     site_title = request.form.get("site_title", "").strip()
-    wireguard_open = request.form.get("wireguard_open", "0").strip() == "1"
-    openvpn_open = request.form.get("openvpn_open", "1").strip() == "1"
 
     try:
         order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
@@ -13135,12 +13075,6 @@ def admin_update_system_settings():
         gift_traffic_gb = parse_int_setting(gift_traffic_raw, 0, min_value=0)
     except Exception:
         flash("系统设置参数无效。", "error")
-        return redirect(url_for("admin_settings"))
-    if wireguard_open and not WIREGUARD_ENABLED:
-        flash("当前环境未启用 WireGuard 服务，无法开启。", "error")
-        return redirect(url_for("admin_settings"))
-    if openvpn_open and not OPENVPN_ENABLED:
-        flash("当前环境未启用 OpenVPN 服务，无法开启。", "error")
         return redirect(url_for("admin_settings"))
 
     if not site_title:
@@ -13156,19 +13090,8 @@ def admin_update_system_settings():
     upsert_app_setting(db, SETTING_GIFT_TRAFFIC_GB, str(gift_traffic_gb))
     upsert_app_setting(db, SETTING_TELEGRAM_CONTACT, telegram_contact[:160])
     upsert_app_setting(db, SETTING_SITE_TITLE, site_title[:120])
-    upsert_app_setting(db, SETTING_WIREGUARD_OPEN, "1" if wireguard_open else "0")
-    upsert_app_setting(db, SETTING_OPENVPN_OPEN, "1" if openvpn_open else "0")
-    if wireguard_open or openvpn_open:
-        try:
-            sync_runtime_protocol_state(
-                db,
-                wireguard_open=wireguard_open,
-                openvpn_open=openvpn_open,
-            )
-        except Exception as exc:
-            db.rollback()
-            flash(f"协议状态同步到 VPN 节点失败：{exc}", "error")
-            return redirect(url_for("admin_settings"))
+    upsert_app_setting(db, SETTING_WIREGUARD_OPEN, "0")
+    upsert_app_setting(db, SETTING_OPENVPN_OPEN, "0")
     db.commit()
     flash("系统设置已更新。", "success")
     return redirect(url_for("admin_settings"))

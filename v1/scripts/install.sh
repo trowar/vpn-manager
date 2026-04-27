@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/srv/vpn-platform-v1}"
@@ -23,9 +23,8 @@ KCPTUN_KEY="${KCPTUN_KEY:-}"
 KCPTUN_CRYPT="${KCPTUN_CRYPT:-aes}"
 KCPTUN_MODE="${KCPTUN_MODE:-fast3}"
 KCPTUN_MTU="${KCPTUN_MTU:-1350}"
-WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-${KCPTUN_SERVER_PORT}}"
-OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-${SHADOWSOCKS_SERVER_PORT}}"
-OPENVPN_PROTO="${OPENVPN_PROTO:-tcp}"
+KCPTUN_PUBLIC_PORT="${KCPTUN_PUBLIC_PORT:-${KCPTUN_SERVER_PORT}}"
+SHADOWSOCKS_PUBLIC_PORT="${SHADOWSOCKS_PUBLIC_PORT:-${SHADOWSOCKS_SERVER_PORT}}"
 DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-53}"
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-1}"
@@ -393,12 +392,12 @@ PY
     case "${key}" in
       SHADOWSOCKS_PASSWORD) SHADOWSOCKS_PASSWORD="${value}" ;;
       SHADOWSOCKS_METHOD) SHADOWSOCKS_METHOD="${value}" ;;
-      SHADOWSOCKS_SERVER_PORT) OPENVPN_PUBLIC_PORT="${value}" ;;
+      SHADOWSOCKS_SERVER_PORT) SHADOWSOCKS_PUBLIC_PORT="${value}" ;;
       KCPTUN_KEY) KCPTUN_KEY="${value}" ;;
       KCPTUN_CRYPT) KCPTUN_CRYPT="${value}" ;;
       KCPTUN_MODE) KCPTUN_MODE="${value}" ;;
       KCPTUN_MTU) KCPTUN_MTU="${value}" ;;
-      KCPTUN_SERVER_PORT) WG_PUBLIC_PORT="${value}" ;;
+      KCPTUN_SERVER_PORT) KCPTUN_PUBLIC_PORT="${value}" ;;
     esac
   done <<< "${runtime_lines}"
 }
@@ -517,15 +516,13 @@ prepare_env_install() {
 
   upsert_env "VPN_API_TOKEN" "${api_token}"
   upsert_env "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
-  upsert_env "VPN_ENABLE_WIREGUARD" "0"
-  upsert_env "OPENVPN_ENABLED" "0"
   upsert_env "SHADOWSOCKS_ENABLED" "1"
   upsert_env "KCPTUN_ENABLED" "${kcptun_enabled_final}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
-  upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
+  upsert_env "SHADOWSOCKS_SERVER_PORT" "${SHADOWSOCKS_PUBLIC_PORT}"
   upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
   upsert_env "SHADOWSOCKS_PASSWORD" "${ss_password}"
-  upsert_env "KCPTUN_SERVER_PORT" "${WG_PUBLIC_PORT}"
+  upsert_env "KCPTUN_SERVER_PORT" "${KCPTUN_PUBLIC_PORT}"
   upsert_env "KCPTUN_KEY" "${kcptun_key}"
   upsert_env "KCPTUN_CRYPT" "${KCPTUN_CRYPT}"
   upsert_env "KCPTUN_MODE" "${KCPTUN_MODE}"
@@ -577,15 +574,13 @@ prepare_env_upgrade() {
 
   upsert_env_if_missing "VPN_API_TOKEN" "${api_token}"
   upsert_env_if_missing "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
-  upsert_env "VPN_ENABLE_WIREGUARD" "0"
-  upsert_env "OPENVPN_ENABLED" "0"
   upsert_env "SHADOWSOCKS_ENABLED" "1"
   upsert_env "KCPTUN_ENABLED" "${kcptun_enabled_final}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
-  upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
+  upsert_env "SHADOWSOCKS_SERVER_PORT" "${SHADOWSOCKS_PUBLIC_PORT}"
   upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
   upsert_env "SHADOWSOCKS_PASSWORD" "${ss_password}"
-  upsert_env "KCPTUN_SERVER_PORT" "${WG_PUBLIC_PORT}"
+  upsert_env "KCPTUN_SERVER_PORT" "${KCPTUN_PUBLIC_PORT}"
   upsert_env "KCPTUN_KEY" "${kcptun_key}"
   upsert_env "KCPTUN_CRYPT" "${KCPTUN_CRYPT}"
   upsert_env "KCPTUN_MODE" "${KCPTUN_MODE}"
@@ -706,9 +701,9 @@ deploy_local_vpn_server() {
   APP_DIR="${LOCAL_VPN_APP_DIR}" \
   REPO_URL="${REPO_URL}" \
   BRANCH="${BRANCH}" \
-  KCPTUN_SERVER_PORT="${WG_PUBLIC_PORT}" \
+  KCPTUN_SERVER_PORT="${KCPTUN_PUBLIC_PORT}" \
   KCPTUN_ENABLED="${kcptun_enabled_value}" \
-  SHADOWSOCKS_SERVER_PORT="${OPENVPN_PUBLIC_PORT}" \
+  SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_PUBLIC_PORT}" \
   SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD}" \
   SHADOWSOCKS_PASSWORD="${ss_password_value}" \
   KCPTUN_KEY="${kcptun_key_value}" \
@@ -749,8 +744,8 @@ register_local_vpn_server_record() {
     LOCAL_SERVER_NAME="${server_name}" \
     LOCAL_SERVER_REGION="Local" \
     LOCAL_VPN_API_TOKEN="${api_token}" \
-    LOCAL_WG_PORT="${WG_PUBLIC_PORT}" \
-    LOCAL_OPENVPN_PORT="${OPENVPN_PUBLIC_PORT}" \
+    LOCAL_KCPTUN_PORT="${KCPTUN_PUBLIC_PORT}" \
+    LOCAL_SHADOWSOCKS_PORT="${SHADOWSOCKS_PUBLIC_PORT}" \
     LOCAL_DNS_PORT="${DNS_PUBLIC_PORT}" \
     "${APP_DIR}/.venv/bin/python" - <<'PY'
 import os
@@ -761,8 +756,8 @@ host = (os.environ.get("LOCAL_SERVER_HOST") or "").strip()
 server_name = (os.environ.get("LOCAL_SERVER_NAME") or "").strip() or host
 server_region = (os.environ.get("LOCAL_SERVER_REGION") or "Local").strip()
 vpn_api_token = (os.environ.get("LOCAL_VPN_API_TOKEN") or "").strip()
-wg_port = portal.normalize_server_port(os.environ.get("LOCAL_WG_PORT"), portal.SERVER_DEPLOY_DEFAULT_WG_PORT)
-openvpn_port = portal.normalize_server_port(os.environ.get("LOCAL_OPENVPN_PORT"), portal.SERVER_DEPLOY_DEFAULT_OPENVPN_PORT)
+kcptun_port = portal.normalize_server_port(os.environ.get("LOCAL_KCPTUN_PORT"), portal.SERVER_DEPLOY_DEFAULT_WG_PORT)
+shadowsocks_port = portal.normalize_server_port(os.environ.get("LOCAL_SHADOWSOCKS_PORT"), portal.SERVER_DEPLOY_DEFAULT_SHADOWSOCKS_PORT)
 dns_port = portal.normalize_server_port(os.environ.get("LOCAL_DNS_PORT"), portal.SERVER_DEPLOY_DEFAULT_DNS_PORT)
 now_iso = portal.utcnow_iso()
 message = "Local vpn-server deployed by install script."
@@ -796,7 +791,7 @@ with portal.app.app_context():
                 domain = COALESCE(domain, ''),
                 vpn_api_token = ?,
                 wg_port = ?,
-                openvpn_port = ?,
+                shadowsocks_port = ?,
                 dns_port = ?,
                 status = 'online',
                 last_test_at = ?,
@@ -810,8 +805,8 @@ with portal.app.app_context():
                 server_region,
                 host,
                 vpn_api_token,
-                wg_port,
-                openvpn_port,
+                kcptun_port,
+                shadowsocks_port,
                 dns_port,
                 now_iso,
                 message,
@@ -830,8 +825,8 @@ with portal.app.app_context():
             password="",
             ssh_private_key="",
             domain="",
-            wg_port=wg_port,
-            openvpn_port=openvpn_port,
+            wg_port=kcptun_port,
+            shadowsocks_port=shadowsocks_port,
             dns_port=dns_port,
             vpn_api_token=vpn_api_token,
             status="online",
@@ -854,62 +849,6 @@ PY
     err "Failed to register local vpn-server record in portal database"
     exit 1
   }
-}
-
-ensure_openvpn_updown_wrapper_compat() {
-  local conf up_script down_script iptables_bin up_line uplink_if
-  conf="/etc/openvpn/server/server.conf"
-  up_script="/etc/openvpn/server/vpnmanager-up.sh"
-  down_script="/etc/openvpn/server/vpnmanager-down.sh"
-
-  if [ ! -f "${conf}" ]; then
-    return 0
-  fi
-
-  if grep -Eq '^proto[[:space:]]+tcp$' "${conf}" 2>/dev/null; then
-    sed -i '/^explicit-exit-notify /d' "${conf}" || true
-  fi
-
-  up_line="$(grep -E '^up "' "${conf}" 2>/dev/null | head -n 1 || true)"
-  if printf '%s' "${up_line}" | grep -q "vpnmanager-up.sh"; then
-    return 0
-  fi
-
-  iptables_bin="$(command -v iptables || true)"
-  if [ -z "${iptables_bin}" ]; then
-    iptables_bin="/sbin/iptables"
-  fi
-
-  uplink_if="$(printf '%s' "${up_line}" | sed -n 's/.* -o \([^ ]*\) .*/\1/p' | head -n 1)"
-  if [ -z "${uplink_if}" ]; then
-    uplink_if="eth0"
-  fi
-
-  log "Applying OpenVPN up/down compatibility wrapper (uplink=${uplink_if})"
-  cat > "${up_script}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-if ! ${iptables_bin} -t nat -C POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1; then
-  ${iptables_bin} -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE
-fi
-exit 0
-EOF
-  chmod 755 "${up_script}"
-
-  cat > "${down_script}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-${iptables_bin} -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1 || true
-exit 0
-EOF
-  chmod 755 "${down_script}"
-
-  sed -i 's|^up ".*"|up "/etc/openvpn/server/vpnmanager-up.sh"|' "${conf}"
-  sed -i 's|^down ".*"|down "/etc/openvpn/server/vpnmanager-down.sh"|' "${conf}"
-
-  if has_cmd systemctl; then
-    systemctl restart vpnmanager-openvpn.service || true
-  fi
 }
 
 verify_components() {
@@ -1033,3 +972,4 @@ main() {
 }
 
 main "$@"
+
