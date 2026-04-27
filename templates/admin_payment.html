@@ -3,6 +3,30 @@
 <section class="card">
   <h2>套餐管理</h2>
   <p class="helper">按行管理可售套餐，支持按时长收费与按流量收费。</p>
+  <div class="section-title-row" style="margin-top:16px;">
+    <h3>收款配置</h3>
+    <a class="btn secondary" href="{{ url_for('admin_payment_methods') }}">高级支付方式管理</a>
+  </div>
+  <form method="post" action="{{ url_for('admin_update_payment_settings') }}" class="form">
+    <label>USDT 收款地址
+      <input
+        type="text"
+        name="usdt_receive_address"
+        value="{{ payment_settings['usdt_receive_address'] if payment_settings is defined else usdt_receive_address }}"
+        placeholder="请输入收款地址"
+        required
+      >
+    </label>
+    <label>默认网络
+      <select name="usdt_default_network" required>
+        {% set current_network = payment_settings['usdt_default_network'] if payment_settings is defined else usdt_default_network %}
+        {% for network in usdt_network_options %}
+          <option value="{{ network }}" {% if network == current_network %}selected{% endif %}>{{ network }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">保存收款配置</button>
+  </form>
 
   <div class="section-title-row">
     <h3>套餐列表</h3>

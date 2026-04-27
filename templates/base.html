@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -11,29 +11,29 @@
   <div class="app-shell{% if not current_user %} app-shell-guest{% endif %}">
     {% if current_user %}
     <aside class="site-sidebar">
-      <h1 class="site-brand"><a href="{{ url_for('index') }}">VPN 门户</a></h1>
+      <h1 class="site-brand"><a href="{{ url_for('index') }}">VPN 闂ㄦ埛</a></h1>
 
-      <p class="site-user">当前用户：<span class="tag">{{ current_user["username"] }}</span></p>
+      <p class="site-user">褰撳墠鐢ㄦ埛锛?span class="tag">{{ current_user["username"] }}</span></p>
 
       <nav class="site-nav">
         {% if current_user["role"] == "admin" %}
-          <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">仪表盘</a>
-          <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">订单</a>
-          <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐管理</a>
-          <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户</a>
-          <a class="site-nav-link {% if admin_page == 'online_users' %}active{% endif %}" href="{{ url_for('admin_online_users') }}">在线用户</a>
-          <a class="site-nav-link {% if admin_page == 'configs' %}active{% endif %}" href="{{ url_for('admin_configs') }}">配置下载</a>
-          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器</a>
-          <a class="site-nav-link {% if admin_page == 'mail_servers' %}active{% endif %}" href="{{ url_for('admin_mail_servers') }}">邮件服务器配置</a>
-          <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_settings') }}">设置</a>
+          <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">浠〃鐩?/a>
+          <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">璁㈠崟</a>
+          <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐与收款</a>
+          <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">鐢ㄦ埛</a>
+          <a class="site-nav-link {% if admin_page == 'online_users' %}active{% endif %}" href="{{ url_for('admin_online_users') }}">鍦ㄧ嚎鐢ㄦ埛</a>
+          <a class="site-nav-link {% if admin_page == 'configs' %}active{% endif %}" href="{{ url_for('admin_configs') }}">閰嶇疆涓嬭浇</a>
+          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">鏈嶅姟鍣?/a>
+          <a class="site-nav-link {% if admin_page == 'mail_servers' %}active{% endif %}" href="{{ url_for('admin_mail_servers') }}">閭欢鏈嶅姟鍣ㄩ厤缃?/a>
+          <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_settings') }}">璁剧疆</a>
         {% else %}
-          <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
-          <a class="site-nav-link {% if dashboard_page == 'plans' %}active{% endif %}" href="{{ url_for('dashboard_plans') }}">套餐</a>
-          <a class="site-nav-link {% if dashboard_page == 'orders' %}active{% endif %}" href="{{ url_for('dashboard_orders') }}">订单管理</a>
-          <a class="site-nav-link {% if dashboard_page == 'config' %}active{% endif %}" href="{{ url_for('dashboard_config') }}">配置</a>
-          <a class="site-nav-link {% if dashboard_page == 'profile' %}active{% endif %}" href="{{ url_for('dashboard_profile') }}">个人中心</a>
+          <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">棣栭〉</a>
+          <a class="site-nav-link {% if dashboard_page == 'plans' %}active{% endif %}" href="{{ url_for('dashboard_plans') }}">濂楅</a>
+          <a class="site-nav-link {% if dashboard_page == 'orders' %}active{% endif %}" href="{{ url_for('dashboard_orders') }}">璁㈠崟绠＄悊</a>
+          <a class="site-nav-link {% if dashboard_page == 'config' %}active{% endif %}" href="{{ url_for('dashboard_config') }}">閰嶇疆</a>
+          <a class="site-nav-link {% if dashboard_page == 'profile' %}active{% endif %}" href="{{ url_for('dashboard_profile') }}">涓汉涓績</a>
         {% endif %}
-        <a class="site-nav-link" href="{{ url_for('logout') }}">退出登录</a>
+        <a class="site-nav-link" href="{{ url_for('logout') }}">閫€鍑虹櫥褰?/a>
       </nav>
     </aside>
     {% endif %}
@@ -53,3 +53,4 @@
   </div>
 </body>
 </html>
+

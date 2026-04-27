@@ -12464,10 +12464,12 @@ def admin_payment_settings():
     reconcile_expired_subscriptions(db)
     plans = load_subscription_plans(db, active_only=False)
     pending_orders = load_admin_pending_orders(db)
+    payment_settings = load_payment_settings(db)
     return render_template(
         "admin_payment.html",
         plans=plans,
         pending_orders=pending_orders,
+        payment_settings=payment_settings,
         usdt_explorer_link=usdt_explorer_link,
         admin_page="payment",
     )
@@ -13116,7 +13118,7 @@ def admin_update_payment_settings():
     upsert_app_setting(db, "usdt_default_network", network)
     db.commit()
     flash("基础支付设置已更新。", "success")
-    return redirect(url_for("admin_payment_methods"))
+    return redirect(url_for("admin_payment_settings"))
 
 
 @app.route("/admin/payment-methods/create", methods=["POST"])
