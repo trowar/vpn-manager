@@ -6140,6 +6140,23 @@ def migrate_schema(db: DatabaseConnection) -> None:
             "ALTER TABLE managed_domains ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
         )
 
+    # Normalize role values from historical/dirty data so admin user list queries stay stable.
+    db.execute(
+        """
+        UPDATE users
+        SET role = CASE
+            WHEN role IS NULL OR trim(role) = '' THEN 'user'
+            WHEN lower(trim(role)) = 'admin' THEN 'admin'
+            WHEN lower(trim(role)) = 'user' THEN 'user'
+            ELSE 'user'
+        END
+        WHERE role IS NULL
+           OR trim(role) = ''
+           OR lower(trim(role)) NOT IN ('admin', 'user')
+           OR role <> lower(trim(role))
+        """
+    )
+
 
 def ensure_admin_user() -> None:
     admin_username = os.environ.get("ADMIN_USERNAME", DEFAULT_ADMIN_USERNAME)
@@ -9773,6 +9790,7 @@ def load_admin_paid_orders(db: DatabaseConnection):
 
 
 def load_admin_subscriptions(db: DatabaseConnection, email_query: str = ""):
+    normalized_role_sql = "COALESCE(NULLIF(lower(trim(role)), ''), 'user')"
     base_sql = """
         SELECT
             id,
@@ -9783,14 +9801,19 @@ def load_admin_subscriptions(db: DatabaseConnection, email_query: str = ""):
             subscription_expires_at,
             wg_enabled
         FROM users
-        WHERE role IN ('user', 'admin')
+        WHERE {normalized_role_sql} IN ('user', 'admin')
     """
     params = []
     normalized_query = (email_query or "").strip()
     if normalized_query:
         base_sql += " AND lower(email) LIKE lower(?)"
         params.append(f"%{normalized_query}%")
-    base_sql += " ORDER BY subscription_expires_at DESC, id DESC"
+    base_sql += (
+        " ORDER BY CASE WHEN "
+        + normalized_role_sql
+        + " = 'admin' THEN 1 ELSE 0 END, COALESCE(subscription_expires_at, '') DESC, id DESC"
+    )
+    base_sql = base_sql.format(normalized_role_sql=normalized_role_sql)
     return db.execute(base_sql, params).fetchall()
 
 
@@ -9811,7 +9834,7 @@ def load_expiring_subscriptions(
             email,
             subscription_expires_at
         FROM users
-        WHERE role = 'user'
+        WHERE COALESCE(NULLIF(lower(trim(role)), ''), 'user') = 'user'
           AND wg_enabled = 1
           AND subscription_expires_at IS NOT NULL
         ORDER BY subscription_expires_at ASC
@@ -11636,7 +11659,7 @@ def admin_home():
         "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'pending'"
     ).fetchone()["cnt"]
     total_users = db.execute(
-        "SELECT COUNT(*) AS cnt FROM users WHERE role='user'"
+        "SELECT COUNT(*) AS cnt FROM users WHERE COALESCE(NULLIF(lower(trim(role)), ''), 'user')='user'"
     ).fetchone()["cnt"]
     server_overview = refresh_server_health_status(db)
     expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=50)
