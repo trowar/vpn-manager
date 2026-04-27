@@ -12478,11 +12478,13 @@ def admin_payment_settings():
     plans = load_subscription_plans(db, active_only=False)
     pending_orders = load_admin_pending_orders(db)
     payment_settings = load_payment_settings(db)
+    payment_methods = load_payment_methods(db, active_only=False)
     return render_template(
         "admin_payment.html",
         plans=plans,
         pending_orders=pending_orders,
         payment_settings=payment_settings,
+        payment_methods=payment_methods,
         usdt_explorer_link=usdt_explorer_link,
         admin_page="payment",
     )
@@ -13072,6 +13074,15 @@ def redirect_admin_order_page(default_page: str = "pending_orders"):
     return redirect(url_for("admin_pending_orders"))
 
 
+def redirect_admin_payment_method_page(default_page: str = "payment_methods"):
+    page = (request.values.get("redirect_to", "") or "").strip().lower()
+    if page == "payment":
+        return redirect(url_for("admin_payment_settings"))
+    if default_page == "payment":
+        return redirect(url_for("admin_payment_settings"))
+    return redirect(url_for("admin_payment_methods"))
+
+
 @app.route("/admin/settings/system", methods=["POST"])
 @login_required
 @admin_required
@@ -13147,13 +13158,13 @@ def admin_create_payment_method():
 
     if method_code != PAYMENT_METHOD_USDT:
         flash("当前仅支持 USDT 付款方式。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
     if network not in USDT_NETWORK_OPTIONS:
         flash("付款网络无效。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
     if not receive_address:
         flash("收款地址不能为空。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
 
     if not method_name:
         method_name = f"{payment_method_label(method_code)} {network}"
@@ -13186,7 +13197,7 @@ def admin_create_payment_method():
     sync_legacy_payment_settings_with_default_method(db)
     db.commit()
     flash("付款方式已添加。", "success")
-    return redirect(url_for("admin_payment_methods"))
+    return redirect_admin_payment_method_page()
 
 
 @app.route("/admin/payment-methods/<int:method_id>/toggle", methods=["POST"])
@@ -13205,7 +13216,7 @@ def admin_toggle_payment_method(method_id: int):
     ).fetchone()
     if not method:
         flash("付款方式不存在。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
 
     next_active = 0 if int(method["is_active"] or 0) == 1 else 1
     db.execute(
@@ -13223,7 +13234,7 @@ def admin_toggle_payment_method(method_id: int):
         flash(f"付款方式 {method['method_name']} 已启用。", "success")
     else:
         flash(f"付款方式 {method['method_name']} 已停用。", "success")
-    return redirect(url_for("admin_payment_methods"))
+    return redirect_admin_payment_method_page()
 
 
 @app.route("/admin/payment-methods/<int:method_id>/update", methods=["POST"])
@@ -13242,7 +13253,7 @@ def admin_update_payment_method(method_id: int):
     ).fetchone()
     if not method:
         flash("付款方式不存在。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
 
     method_code = normalize_payment_method(request.form.get("method_code", PAYMENT_METHOD_USDT))
     method_name = request.form.get("method_name", "").strip()
@@ -13252,13 +13263,13 @@ def admin_update_payment_method(method_id: int):
 
     if method_code != PAYMENT_METHOD_USDT:
         flash("当前仅支持 USDT 付款方式。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
     if network not in USDT_NETWORK_OPTIONS:
         flash("付款网络无效。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
     if not receive_address:
         flash("收款地址不能为空。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
     if not method_name:
         method_name = f"{payment_method_label(method_code)} {network}"
     try:
@@ -13292,7 +13303,7 @@ def admin_update_payment_method(method_id: int):
     sync_legacy_payment_settings_with_default_method(db)
     db.commit()
     flash("付款方式已更新。", "success")
-    return redirect(url_for("admin_payment_methods"))
+    return redirect_admin_payment_method_page()
 
 
 @app.route("/admin/payment-methods/<int:method_id>/delete", methods=["POST"])
@@ -13311,13 +13322,13 @@ def admin_delete_payment_method(method_id: int):
     ).fetchone()
     if not method:
         flash("付款方式不存在。", "error")
-        return redirect(url_for("admin_payment_methods"))
+        return redirect_admin_payment_method_page()
 
     db.execute("DELETE FROM payment_methods WHERE id = ?", (method_id,))
     sync_legacy_payment_settings_with_default_method(db)
     db.commit()
     flash(f"付款方式 {method['method_name']} 已删除。", "success")
-    return redirect(url_for("admin_payment_methods"))
+    return redirect_admin_payment_method_page()
 
 
 @app.route("/admin/plans/create", methods=["POST"])

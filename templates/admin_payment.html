@@ -5,7 +5,7 @@
   <p class="helper">按行管理可售套餐，支持按时长收费与按流量收费。</p>
   <div class="section-title-row" style="margin-top:16px;">
     <h3>收款配置</h3>
-    <a class="btn secondary" href="{{ url_for('admin_payment_methods') }}">高级支付方式管理</a>
+    <button type="button" class="btn secondary" id="open-payment-method-create-modal">添加支付方式</button>
   </div>
   <form method="post" action="{{ url_for('admin_update_payment_settings') }}" class="form">
     <label>USDT 收款地址
@@ -27,6 +27,42 @@
     </label>
     <button type="submit">保存收款配置</button>
   </form>
+
+  <div class="section-title-row">
+    <h3>已添加钱包地址</h3>
+  </div>
+  {% if payment_methods %}
+    <div class="table-scroll">
+      <table class="subscriptions-table">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>网络</th>
+            <th>收款地址</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for method in payment_methods %}
+            <tr>
+              <td>{{ method["method_name"] }}</td>
+              <td>{{ method["network"] }}</td>
+              <td><code class="table-code-wrap">{{ method["receive_address"] }}</code></td>
+              <td>
+                {% if method["is_active"] == 1 %}
+                  <span class="tag tag-ok">启用中</span>
+                {% else %}
+                  <span class="tag tag-warn">已停用</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="helper">暂无收款方式，点击右上角“添加支付方式”。</p>
+  {% endif %}
 
   <div class="section-title-row">
     <h3>套餐列表</h3>
@@ -170,6 +206,40 @@
   {% endif %}
 </section>
 
+<div class="payment-modal" id="payment-method-create-modal" hidden>
+  <div class="payment-modal-card plan-create-modal-card">
+    <div class="section-title-row">
+      <h4>添加支付方式</h4>
+      <button type="button" class="btn secondary" id="close-payment-method-create-modal">关闭</button>
+    </div>
+    <form method="post" action="{{ url_for('admin_create_payment_method') }}" class="form">
+      <input type="hidden" name="redirect_to" value="payment">
+      <label>支付方式
+        <select name="method_code" required>
+          <option value="usdt">USDT</option>
+        </select>
+      </label>
+      <label>显示名称
+        <input type="text" name="method_name" placeholder="例如：USDT 主钱包">
+      </label>
+      <label>网络
+        <select name="network" required>
+          {% for network in usdt_network_options %}
+            <option value="{{ network }}">{{ network }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>收款地址
+        <input type="text" name="receive_address" placeholder="请输入收款地址" required>
+      </label>
+      <label>排序（数字越小越靠前）
+        <input type="number" name="sort_order" min="0" step="1" value="100">
+      </label>
+      <button type="submit">保存</button>
+    </form>
+  </div>
+</div>
+
 <div class="payment-modal" id="plan-create-modal" hidden>
   <div class="payment-modal-card plan-create-modal-card">
     <div class="section-title-row">
@@ -276,6 +346,10 @@
 
 <script>
   (function () {
+    var paymentCreateOpenBtn = document.getElementById("open-payment-method-create-modal");
+    var paymentCreateCloseBtn = document.getElementById("close-payment-method-create-modal");
+    var paymentCreateModal = document.getElementById("payment-method-create-modal");
+
     var createOpenBtn = document.getElementById("open-plan-create-modal");
     var createCloseBtn = document.getElementById("close-plan-create-modal");
     var createModal = document.getElementById("plan-create-modal");
@@ -371,6 +445,18 @@
         }
       }
     }
+
+    if (paymentCreateOpenBtn) {
+      paymentCreateOpenBtn.addEventListener("click", function () {
+        openModal(paymentCreateModal);
+      });
+    }
+    if (paymentCreateCloseBtn) {
+      paymentCreateCloseBtn.addEventListener("click", function () {
+        closeModal(paymentCreateModal);
+      });
+    }
+    bindOverlayClose(paymentCreateModal);
 
     if (createOpenBtn) {
       createOpenBtn.addEventListener("click", function () {
