@@ -1331,6 +1331,21 @@ def absolute_url_for(endpoint: str, **values) -> str:
         return path
 
 
+def build_masked_download_link(
+    access_token: str,
+    *,
+    output_format: str = "yaml",
+) -> str:
+    token = (access_token or "").strip()
+    if not token:
+        return ""
+    fmt = (output_format or "yaml").strip().lower()
+    values: dict[str, str] = {"access_token": token}
+    if fmt in {"json", "raw"}:
+        values["f"] = fmt
+    return absolute_url_for("download_via_token", **values)
+
+
 def is_non_public_host(raw_host: str | None) -> bool:
     host = host_without_optional_port(raw_host).strip().lower().rstrip(".")
     if not host:
@@ -9109,12 +9124,12 @@ def dashboard_config():
     ss_access_token = build_download_access_token(user, "download-config-user")
     kcptun_access_token = build_download_access_token(user, "download-kcptun-user")
     ss_download_link = (
-        absolute_url_for("download_config", format="yaml", access=ss_access_token)
+        build_masked_download_link(ss_access_token, output_format="yaml")
         if SHADOWSOCKS_ENABLED
         else ""
     )
     kcptun_download_link = (
-        absolute_url_for("download_kcptun_config", format="yaml", access=kcptun_access_token)
+        build_masked_download_link(kcptun_access_token, output_format="yaml")
         if KCPTUN_ENABLED
         else ""
     )
@@ -11378,16 +11393,12 @@ def admin_configs():
     admin_ss_access_token = build_download_access_token(admin, "download-config-admin")
     admin_kcptun_access_token = build_download_access_token(admin, "download-kcptun-admin")
     admin_ss_download_link = (
-        absolute_url_for("admin_download_config", format="yaml", access=admin_ss_access_token)
+        build_masked_download_link(admin_ss_access_token, output_format="yaml")
         if SHADOWSOCKS_ENABLED
         else ""
     )
     admin_kcptun_download_link = (
-        absolute_url_for(
-            "admin_download_kcptun_config",
-            format="yaml",
-            access=admin_kcptun_access_token,
-        )
+        build_masked_download_link(admin_kcptun_access_token, output_format="yaml")
         if KCPTUN_ENABLED
         else ""
     )
@@ -13289,6 +13300,114 @@ def usdt_payment_webhook():
         return {"ok": False, "error": str(exc)}, 400
     except Exception as exc:
         return {"ok": False, "error": f"内部错误：{exc}"}, 500
+
+
+@app.route("/d/<path:access_token>")
+def download_via_token(access_token: str):
+    token = (access_token or "").strip()
+    if not token:
+        return config_download_error("invalid or missing access token", status=401)
+
+    output_format = (
+        (request.args.get("format", "") or "").strip()
+        or (request.args.get("f", "") or "").strip()
+        or "yaml"
+    ).lower()
+    build_raw = output_format in {"json", "raw"}
+    db = get_db()
+
+    def response_with_content(config_text: str, filename: str):
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        }
+        mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
+        return Response(config_text, headers=headers, mimetype=mimetype)
+
+    admin_ss = resolve_download_access_user(db, token, "download-config-admin")
+    if admin_ss is not None:
+        if not SHADOWSOCKS_ENABLED:
+            return config_download_error("Shadowsocks is disabled", status=503)
+        if row_get(admin_ss, "role") != "admin":
+            return config_download_error("forbidden", status=403)
+        admin = db.execute(
+            "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+            (admin_ss["id"],),
+        ).fetchone()
+        if not admin:
+            return config_download_error("admin not found", status=404)
+        config_text = (
+            build_user_shadowsocks_config(admin)
+            if build_raw
+            else build_user_shadowsocks_clash_profile(admin)
+        )
+        filename = f"ss-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
+        return response_with_content(config_text, filename)
+
+    user_ss = resolve_download_access_user(db, token, "download-config-user")
+    if user_ss is not None:
+        if not SHADOWSOCKS_ENABLED:
+            return config_download_error("Shadowsocks is disabled", status=503)
+        if row_get(user_ss, "role") != "user":
+            return config_download_error("forbidden", status=403)
+        reconcile_expired_subscriptions(db)
+        user = db.execute("SELECT * FROM users WHERE id = ?", (user_ss["id"],)).fetchone()
+        if not user:
+            return config_download_error("user not found", status=404)
+        if not is_subscription_active(user):
+            return config_download_error("subscription inactive", status=403)
+        config_text = (
+            build_user_shadowsocks_config(user)
+            if build_raw
+            else build_user_shadowsocks_clash_profile(user)
+        )
+        filename = f"ss-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
+        return response_with_content(config_text, filename)
+
+    admin_kcptun = resolve_download_access_user(db, token, "download-kcptun-admin")
+    if admin_kcptun is not None:
+        if not KCPTUN_ENABLED:
+            return config_download_error("kcptun is disabled", status=503)
+        if row_get(admin_kcptun, "role") != "admin":
+            return config_download_error("forbidden", status=403)
+        admin = db.execute(
+            "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+            (admin_kcptun["id"],),
+        ).fetchone()
+        if not admin:
+            return config_download_error("admin not found", status=404)
+        config_text = (
+            build_user_kcptun_config(admin)
+            if build_raw
+            else build_user_kcptun_clash_profile(admin)
+        )
+        filename = (
+            f"kcptun-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
+        )
+        return response_with_content(config_text, filename)
+
+    user_kcptun = resolve_download_access_user(db, token, "download-kcptun-user")
+    if user_kcptun is not None:
+        if not KCPTUN_ENABLED:
+            return config_download_error("kcptun is disabled", status=503)
+        if row_get(user_kcptun, "role") != "user":
+            return config_download_error("forbidden", status=403)
+        reconcile_expired_subscriptions(db)
+        user = db.execute("SELECT * FROM users WHERE id = ?", (user_kcptun["id"],)).fetchone()
+        if not user:
+            return config_download_error("user not found", status=404)
+        if not is_subscription_active(user):
+            return config_download_error("subscription inactive", status=403)
+        config_text = (
+            build_user_kcptun_config(user)
+            if build_raw
+            else build_user_kcptun_clash_profile(user)
+        )
+        filename = f"kcptun-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
+        return response_with_content(config_text, filename)
+
+    return config_download_error("invalid or missing access token", status=401)
 
 
 @app.route("/download/config")
