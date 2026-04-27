@@ -6761,7 +6761,7 @@ def parse_shadowsocks_active_peer_hosts(raw_text: str, server_port: int) -> list
 
 def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
     peers: set[str] = set()
-    pattern = re.compile(r"(?:remote address:\s*|in:\s*)(\S+)")
+    pattern = re.compile(r"(?:remote address:\s*|in:\s*)(\[[^\]]+\]:\d+|[^()\s]+)")
     for raw_line in (raw_text or "").splitlines():
         line = (raw_line or "").strip()
         if not line:
@@ -6769,7 +6769,8 @@ def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
         match = pattern.search(line)
         if not match:
             continue
-        host = normalize_public_client_ip(match.group(1))
+        endpoint = (match.group(1) or "").split("(", 1)[0].strip()
+        host = normalize_public_client_ip(endpoint)
         if not host:
             continue
         peers.add(host)

@@ -143,7 +143,7 @@ def parse_ss_peer_hosts(raw_text: str, local_port: int) -> list[str]:
 
 def parse_kcptun_peer_hosts(raw_text: str) -> list[str]:
     peers: set[str] = set()
-    pattern = re.compile(r"(?:remote address:\s*|in:\s*)(\S+)")
+    pattern = re.compile(r"(?:remote address:\s*|in:\s*)(\[[^\]]+\]:\d+|[^()\s]+)")
     for raw_line in (raw_text or "").splitlines():
         line = (raw_line or "").strip()
         if not line:
@@ -151,7 +151,7 @@ def parse_kcptun_peer_hosts(raw_text: str) -> list[str]:
         match = pattern.search(line)
         if not match:
             continue
-        candidate = endpoint_host(match.group(1))
+        candidate = endpoint_host((match.group(1) or "").split("(", 1)[0].strip())
         if not candidate or is_loopback_host(candidate):
             continue
         peers.add(candidate)
