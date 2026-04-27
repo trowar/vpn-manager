@@ -7144,6 +7144,101 @@ def build_user_kcptun_clash_profile(
             type: select
             proxies:
               - {yaml_str(proxy_name)}
+              - "DIRECT"
+          - name: "GLOBAL"
+            type: select
+            proxies:
+              - {yaml_str(proxy_name)}
+              - "DIRECT"
+        rules:
+          - MATCH,PROXY
+        """
+    )
+
+
+def build_user_shadowsocks_clash_profile(
+    user: sqlite3.Row,
+    *,
+    server_row: sqlite3.Row | None = None,
+) -> str:
+    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
+    if not host:
+        raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
+    username = (row_get(user, "username", "") or "").strip() or "vpn-user"
+    ss_proxy_name = f"ss-{safe_name(username)}"
+    kcptun_proxy_name = f"kcptun-{safe_name(username)}"
+    ss_password = derive_user_shadowsocks_password(user)
+
+    def yaml_str(value: str) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    if KCPTUN_ENABLED:
+        return textwrap.dedent(
+            f"""\
+            mixed-port: 7890
+            mode: rule
+            proxies:
+              - name: {yaml_str(kcptun_proxy_name)}
+                type: ss
+                server: {yaml_str(host)}
+                port: {KCPTUN_SERVER_PORT}
+                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
+                password: {yaml_str(ss_password)}
+                udp: true
+                plugin: "kcptun"
+                plugin-opts:
+                  key: {yaml_str(KCPTUN_KEY)}
+                  crypt: "aes"
+                  mode: "fast3"
+                  mtu: 1350
+              - name: {yaml_str(ss_proxy_name)}
+                type: ss
+                server: {yaml_str(host)}
+                port: {SHADOWSOCKS_SERVER_PORT}
+                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
+                password: {yaml_str(ss_password)}
+                udp: true
+            proxy-groups:
+              - name: "PROXY"
+                type: select
+                proxies:
+                  - {yaml_str(kcptun_proxy_name)}
+                  - {yaml_str(ss_proxy_name)}
+                  - "DIRECT"
+              - name: "GLOBAL"
+                type: select
+                proxies:
+                  - {yaml_str(kcptun_proxy_name)}
+                  - {yaml_str(ss_proxy_name)}
+                  - "DIRECT"
+            rules:
+              - MATCH,PROXY
+            """
+        )
+
+    return textwrap.dedent(
+        f"""\
+        mixed-port: 7890
+        mode: rule
+        proxies:
+          - name: {yaml_str(ss_proxy_name)}
+            type: ss
+            server: {yaml_str(host)}
+            port: {SHADOWSOCKS_SERVER_PORT}
+            cipher: {yaml_str(SHADOWSOCKS_METHOD)}
+            password: {yaml_str(ss_password)}
+            udp: true
+        proxy-groups:
+          - name: "PROXY"
+            type: select
+            proxies:
+              - {yaml_str(ss_proxy_name)}
+              - "DIRECT"
+          - name: "GLOBAL"
+            type: select
+            proxies:
+              - {yaml_str(ss_proxy_name)}
+              - "DIRECT"
         rules:
           - MATCH,PROXY
         """
@@ -9017,7 +9112,7 @@ def dashboard_config():
     elif health_overview["abnormal"] > 0:
         node_alert_text = "当前节点异常，系统正在切换。"
 
-    ss_download_link = absolute_url_for("download_config") if SHADOWSOCKS_ENABLED else ""
+    ss_download_link = absolute_url_for("download_config", format="yaml") if SHADOWSOCKS_ENABLED else ""
     kcptun_download_link = (
         absolute_url_for("download_kcptun_config", format="yaml") if KCPTUN_ENABLED else ""
     )
@@ -11278,7 +11373,9 @@ def admin_configs():
     if selected_default_server_id <= 0 and target_server is not None:
         selected_default_server_id = int(row_get(target_server, "id", 0) or 0)
 
-    admin_ss_download_link = absolute_url_for("admin_download_config") if SHADOWSOCKS_ENABLED else ""
+    admin_ss_download_link = (
+        absolute_url_for("admin_download_config", format="yaml") if SHADOWSOCKS_ENABLED else ""
+    )
     admin_kcptun_download_link = (
         absolute_url_for("admin_download_kcptun_config", format="yaml") if KCPTUN_ENABLED else ""
     )
@@ -13201,15 +13298,26 @@ def download_config():
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
+    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    build_raw = output_format in {"json", "raw"}
     try:
-        config_text = build_user_shadowsocks_config(user)
+        config_text = (
+            build_user_shadowsocks_config(user)
+            if build_raw
+            else build_user_shadowsocks_clash_profile(user)
+        )
     except Exception as exc:
         flash(f"Shadowsocks 配置生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"ss-{safe_name(user['username'])}.json"
-    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="application/json")
+    filename = f"ss-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
+    headers = {
+        "Content-Disposition": f'attachment; filename=\"{filename}\"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
+    return Response(config_text, headers=headers, mimetype=mimetype)
 
 
 @app.route("/admin/download/config")
@@ -13228,15 +13336,26 @@ def admin_download_config():
         flash("管理员账号不存在。", "error")
         return redirect(url_for("admin_home"))
 
+    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    build_raw = output_format in {"json", "raw"}
     try:
-        config_text = build_user_shadowsocks_config(admin)
+        config_text = (
+            build_user_shadowsocks_config(admin)
+            if build_raw
+            else build_user_shadowsocks_clash_profile(admin)
+        )
     except Exception as exc:
         flash(f"管理员 Shadowsocks 配置生成失败：{exc}", "error")
         return redirect(url_for("admin_home"))
 
-    filename = f"ss-admin-{safe_name(admin['username'])}.json"
-    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="application/json")
+    filename = f"ss-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
+    headers = {
+        "Content-Disposition": f'attachment; filename=\"{filename}\"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
+    return Response(config_text, headers=headers, mimetype=mimetype)
 
 
 @app.route("/download/kcptun")
