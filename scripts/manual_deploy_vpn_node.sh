@@ -18,7 +18,9 @@ KCPTUN_SERVER_PORT="${KCPTUN_SERVER_PORT:-29900}"
 KCPTUN_KEY="${KCPTUN_KEY:-}"
 KCPTUN_CRYPT="${KCPTUN_CRYPT:-aes}"
 KCPTUN_MODE="${KCPTUN_MODE:-fast3}"
+KCPTUN_MTU="${KCPTUN_MTU:-1350}"
 KCPTUN_VERSION="${KCPTUN_VERSION:-latest}"
+KCPTUN_DOWNLOAD_URL="${KCPTUN_DOWNLOAD_URL:-}"
 
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 VPN_API_TOKEN="${VPN_API_TOKEN:-}"
@@ -307,6 +309,11 @@ download_with_mirrors() {
 
 ensure_kcptun_binary() {
   local arch url tmp_tar tmp_dir
+  if [ -x "${KCPTUN_BIN}" ]; then
+    log "kcptun binary already exists at ${KCPTUN_BIN}, skip download"
+    return 0
+  fi
+
   arch="$(uname -m)"
   case "$arch" in
     x86_64|amd64) arch="amd64" ;;
@@ -318,7 +325,10 @@ ensure_kcptun_binary() {
       ;;
   esac
 
-  url="$(resolve_kcptun_download_url "$arch" || true)"
+  url="${KCPTUN_DOWNLOAD_URL}"
+  if [ -z "$url" ]; then
+    url="$(resolve_kcptun_download_url "$arch" || true)"
+  fi
   if [ -z "$url" ]; then
     err "failed to resolve kcptun release URL"
     exit 1
@@ -380,7 +390,7 @@ write_kcptun_config() {
   "key": "${KCPTUN_KEY}",
   "crypt": "${KCPTUN_CRYPT}",
   "mode": "${KCPTUN_MODE}",
-  "mtu": 1350,
+  "mtu": ${KCPTUN_MTU},
   "sndwnd": 256,
   "rcvwnd": 512,
   "datashard": 10,

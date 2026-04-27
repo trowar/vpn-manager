@@ -20,6 +20,9 @@ KCPTUN_ENABLED="${KCPTUN_ENABLED:-}"
 SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
 SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
 KCPTUN_KEY="${KCPTUN_KEY:-}"
+KCPTUN_CRYPT="${KCPTUN_CRYPT:-aes}"
+KCPTUN_MODE="${KCPTUN_MODE:-fast3}"
+KCPTUN_MTU="${KCPTUN_MTU:-1350}"
 WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-${KCPTUN_SERVER_PORT}}"
 OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-${SHADOWSOCKS_SERVER_PORT}}"
 OPENVPN_PROTO="${OPENVPN_PROTO:-tcp}"
@@ -363,6 +366,9 @@ if os.path.isfile(kcptun_path):
         with open(kcptun_path, "r", encoding="utf-8") as fh:
             kcptun = json.load(fh)
         emit("KCPTUN_KEY", kcptun.get("key"))
+        emit("KCPTUN_CRYPT", kcptun.get("crypt"))
+        emit("KCPTUN_MODE", kcptun.get("mode"))
+        emit("KCPTUN_MTU", kcptun.get("mtu"))
         listen = str(kcptun.get("listen", "")).strip()
         match = re.search(r":([0-9]{1,5})$", listen)
         if match:
@@ -389,6 +395,9 @@ PY
       SHADOWSOCKS_METHOD) SHADOWSOCKS_METHOD="${value}" ;;
       SHADOWSOCKS_SERVER_PORT) OPENVPN_PUBLIC_PORT="${value}" ;;
       KCPTUN_KEY) KCPTUN_KEY="${value}" ;;
+      KCPTUN_CRYPT) KCPTUN_CRYPT="${value}" ;;
+      KCPTUN_MODE) KCPTUN_MODE="${value}" ;;
+      KCPTUN_MTU) KCPTUN_MTU="${value}" ;;
       KCPTUN_SERVER_PORT) WG_PUBLIC_PORT="${value}" ;;
     esac
   done <<< "${runtime_lines}"
@@ -518,6 +527,9 @@ prepare_env_install() {
   upsert_env "SHADOWSOCKS_PASSWORD" "${ss_password}"
   upsert_env "KCPTUN_SERVER_PORT" "${WG_PUBLIC_PORT}"
   upsert_env "KCPTUN_KEY" "${kcptun_key}"
+  upsert_env "KCPTUN_CRYPT" "${KCPTUN_CRYPT}"
+  upsert_env "KCPTUN_MODE" "${KCPTUN_MODE}"
+  upsert_env "KCPTUN_MTU" "${KCPTUN_MTU}"
 }
 
 prepare_env_upgrade() {
@@ -575,6 +587,9 @@ prepare_env_upgrade() {
   upsert_env "SHADOWSOCKS_PASSWORD" "${ss_password}"
   upsert_env "KCPTUN_SERVER_PORT" "${WG_PUBLIC_PORT}"
   upsert_env "KCPTUN_KEY" "${kcptun_key}"
+  upsert_env "KCPTUN_CRYPT" "${KCPTUN_CRYPT}"
+  upsert_env "KCPTUN_MODE" "${KCPTUN_MODE}"
+  upsert_env "KCPTUN_MTU" "${KCPTUN_MTU}"
 }
 
 install_web_runtime() {
@@ -649,6 +664,7 @@ start_or_restart_web_service() {
 
 deploy_local_vpn_server() {
   local kcptun_enabled_value ss_password_value kcptun_key_value
+  local kcptun_crypt_value kcptun_mode_value kcptun_mtu_value
 
   if [ "${INSTALL_LOCAL_VPN_SERVER}" != "1" ]; then
     log "Skipping local vpn-server deploy (INSTALL_LOCAL_VPN_SERVER=${INSTALL_LOCAL_VPN_SERVER})"
@@ -673,6 +689,18 @@ deploy_local_vpn_server() {
   fi
   ss_password_value="$(read_env_value SHADOWSOCKS_PASSWORD || true)"
   kcptun_key_value="$(read_env_value KCPTUN_KEY || true)"
+  kcptun_crypt_value="$(read_env_value KCPTUN_CRYPT || true)"
+  if [ -z "${kcptun_crypt_value}" ]; then
+    kcptun_crypt_value="${KCPTUN_CRYPT}"
+  fi
+  kcptun_mode_value="$(read_env_value KCPTUN_MODE || true)"
+  if [ -z "${kcptun_mode_value}" ]; then
+    kcptun_mode_value="${KCPTUN_MODE}"
+  fi
+  kcptun_mtu_value="$(read_env_value KCPTUN_MTU || true)"
+  if [ -z "${kcptun_mtu_value}" ]; then
+    kcptun_mtu_value="${KCPTUN_MTU}"
+  fi
 
   log "Deploying local vpn-server on host (systemd mode)"
   APP_DIR="${LOCAL_VPN_APP_DIR}" \
@@ -684,6 +712,9 @@ deploy_local_vpn_server() {
   SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD}" \
   SHADOWSOCKS_PASSWORD="${ss_password_value}" \
   KCPTUN_KEY="${kcptun_key_value}" \
+  KCPTUN_CRYPT="${kcptun_crypt_value}" \
+  KCPTUN_MODE="${kcptun_mode_value}" \
+  KCPTUN_MTU="${kcptun_mtu_value}" \
   VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT}" \
   VPN_API_TOKEN="${INSTALL_API_TOKEN}" \
   DISABLE_SYSTEMD_RESOLVED="${DISABLE_SYSTEMD_RESOLVED}" \

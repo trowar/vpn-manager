@@ -198,6 +198,15 @@ KCPTUN_KEY = (
         (os.environ.get("PORTAL_SECRET_KEY", "change-this-secret") + ":kcptun").encode("utf-8")
     ).hexdigest()[:24]
 )
+KCPTUN_CRYPT = os.environ.get("KCPTUN_CRYPT", "aes").strip() or "aes"
+KCPTUN_MODE = os.environ.get("KCPTUN_MODE", "fast3").strip() or "fast3"
+KCPTUN_MTU_RAW = os.environ.get("KCPTUN_MTU", "1350").strip()
+try:
+    KCPTUN_MTU = int(KCPTUN_MTU_RAW)
+except ValueError:
+    KCPTUN_MTU = 1350
+if KCPTUN_MTU <= 500 or KCPTUN_MTU > 1500:
+    KCPTUN_MTU = 1350
 OPENVPN_ENDPOINT_HOST = os.environ.get("OPENVPN_ENDPOINT_HOST", "").strip()
 OPENVPN_ENDPOINT_PORT_RAW = os.environ.get("OPENVPN_ENDPOINT_PORT", "1194").strip()
 try:
@@ -4998,6 +5007,9 @@ def build_vpn_node_deploy_script(
         export SHADOWSOCKS_METHOD="{SHADOWSOCKS_METHOD}"
         export SHADOWSOCKS_PASSWORD="{SHADOWSOCKS_PASSWORD}"
         export KCPTUN_KEY="{KCPTUN_KEY}"
+        export KCPTUN_CRYPT="{KCPTUN_CRYPT}"
+        export KCPTUN_MODE="{KCPTUN_MODE}"
+        export KCPTUN_MTU="{KCPTUN_MTU}"
         export VPN_API_PUBLIC_PORT="{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}"
         export VPN_API_TOKEN="{vpn_api_token}"
         """
@@ -7048,11 +7060,11 @@ def build_user_kcptun_config(
         "remoteaddr": f"{host}:{KCPTUN_SERVER_PORT}",
         "localaddr": "127.0.0.1:12948",
         "key": KCPTUN_KEY,
-        "crypt": "aes",
-        "mode": "fast3",
+        "crypt": KCPTUN_CRYPT,
+        "mode": KCPTUN_MODE,
         "conn": 1,
         "autoexpire": 0,
-        "mtu": 1350,
+        "mtu": KCPTUN_MTU,
         "sndwnd": 256,
         "rcvwnd": 512,
         "datashard": 10,
@@ -7102,9 +7114,9 @@ def build_user_kcptun_clash_profile(
             plugin: "kcptun"
             plugin-opts:
               key: {yaml_str(KCPTUN_KEY)}
-              crypt: "aes"
-              mode: "fast3"
-              mtu: 1350
+              crypt: {yaml_str(KCPTUN_CRYPT)}
+              mode: {yaml_str(KCPTUN_MODE)}
+              mtu: {KCPTUN_MTU}
         proxy-groups:
           - name: "PROXY"
             type: select
@@ -7154,9 +7166,9 @@ def build_user_shadowsocks_clash_profile(
                 plugin: "kcptun"
                 plugin-opts:
                   key: {yaml_str(KCPTUN_KEY)}
-                  crypt: "aes"
-                  mode: "fast3"
-                  mtu: 1350
+                  crypt: {yaml_str(KCPTUN_CRYPT)}
+                  mode: {yaml_str(KCPTUN_MODE)}
+                  mtu: {KCPTUN_MTU}
               - name: {yaml_str(ss_proxy_name)}
                 type: ss
                 server: {yaml_str(host)}
