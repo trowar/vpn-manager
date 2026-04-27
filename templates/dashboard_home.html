@@ -43,22 +43,20 @@
       </div>
     </div>
 
-    {% if traffic_stats["quota_bytes"] > 0 and not traffic_stats["remaining_is_permanent"] %}
-      <div class="stats-grid">
-        <div class="stat-item">
-          <span class="stat-label">流量套餐总量</span>
-          <strong class="stat-value">{{ traffic_stats["quota_human"] }}</strong>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">流量套餐已用</span>
-          <strong class="stat-value">{{ traffic_stats["used_human"] }}</strong>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">流量套餐剩余</span>
-          <strong class="stat-value">{{ traffic_stats["remaining_human"] }}</strong>
-        </div>
+    <div class="stats-grid">
+      <div class="stat-item">
+        <span class="stat-label">Plan Total</span>
+        <strong class="stat-value">{{ traffic_stats["plan_total_display"] }}</strong>
       </div>
-    {% endif %}
+      <div class="stat-item">
+        <span class="stat-label">Plan Used</span>
+        <strong class="stat-value">{{ traffic_stats["plan_used_display"] }}</strong>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Plan Remaining</span>
+        <strong class="stat-value">{{ traffic_stats["plan_remaining_display"] }}</strong>
+      </div>
+    </div>
 
     <div class="actions">
       <a class="btn" href="{{ url_for('dashboard_plans') }}">查看套餐</a>

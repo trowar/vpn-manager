@@ -6805,6 +6805,20 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
         remaining_display = format_bytes(remaining_bytes)
     else:
         remaining_display = "-"
+
+    if has_time:
+        plan_total_display = "不限"
+        plan_used_display = format_bytes(total_bytes)
+        plan_remaining_display = "永久"
+    elif quota_bytes > 0:
+        plan_total_display = format_bytes(quota_bytes)
+        plan_used_display = format_bytes(used_bytes)
+        plan_remaining_display = format_bytes(remaining_bytes)
+    else:
+        plan_total_display = "-"
+        plan_used_display = format_bytes(total_bytes)
+        plan_remaining_display = "-"
+
     return {
         "rx_bytes": rx_bytes,
         "tx_bytes": tx_bytes,
@@ -6820,6 +6834,9 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
         "remaining_human": format_bytes(remaining_bytes),
         "remaining_is_permanent": remaining_is_permanent,
         "remaining_display": remaining_display,
+        "plan_total_display": plan_total_display,
+        "plan_used_display": plan_used_display,
+        "plan_remaining_display": plan_remaining_display,
         "has_active_time": has_time,
         "has_active_traffic": has_traffic,
     }
