@@ -218,45 +218,6 @@ setup_repo() {
   fi
 }
 
-cleanup_legacy_docker_stack() {
-  if ! has_cmd docker; then
-    return 0
-  fi
-
-  if ! docker info >/dev/null 2>&1; then
-    warn "docker command exists but daemon is unavailable, skip legacy cleanup"
-    return 0
-  fi
-
-  local had_legacy=0
-  log "Checking legacy Docker deployment"
-
-  if has_cmd systemctl; then
-    systemctl disable --now vpn-platform-v1.service >/dev/null 2>&1 || true
-  fi
-
-  for cname in vpn-web vpn-postgres vpnmanager-server; do
-    if docker ps -a --format '{{.Names}}' | grep -Fxq "${cname}"; then
-      had_legacy=1
-      docker rm -f "${cname}" >/dev/null 2>&1 || true
-    fi
-  done
-
-  if docker compose version >/dev/null 2>&1; then
-    local compose_dir
-    for compose_dir in "${APP_DIR}" "/srv/vpn-platform-v1" "/opt/vpn-platform-v1" "/root/vpn-platform-v1"; do
-      if [ -f "${compose_dir}/docker-compose.yml" ]; then
-        had_legacy=1
-        docker compose -f "${compose_dir}/docker-compose.yml" --project-name vpn-platform-v1 down --remove-orphans >/dev/null 2>&1 || true
-      fi
-    done
-  fi
-
-  if [ "${had_legacy}" = "1" ]; then
-    log "Legacy Docker stack removed"
-  fi
-}
-
 read_env_value() {
   local key="$1"
   local file
@@ -463,7 +424,6 @@ prepare_env_install() {
   upsert_env "PORTAL_POSTGRES_USER" "${POSTGRES_USER}"
   upsert_env "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
   upsert_env "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
-  upsert_env "PORTAL_SKIP_SQLITE_IMPORT" "1"
 
   upsert_env "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
   upsert_env "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
@@ -521,7 +481,6 @@ prepare_env_upgrade() {
   upsert_env_if_missing "PORTAL_POSTGRES_USER" "${POSTGRES_USER}"
   upsert_env_if_missing "PORTAL_POSTGRES_PASSWORD" "${POSTGRES_PASSWORD}"
   upsert_env_if_missing "PORTAL_POSTGRES_DSN" "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
-  upsert_env "PORTAL_SKIP_SQLITE_IMPORT" "1"
 
   upsert_env_if_missing "WEB_PUBLIC_PORT" "${WEB_PUBLIC_PORT}"
   upsert_env_if_missing "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR" "/srv/vpn-platform-v1"
@@ -558,11 +517,10 @@ run_upgrade_schema_migration() {
   set +a
   (
     cd "${APP_DIR}"
-    PORTAL_SKIP_SQLITE_IMPORT=1 "${APP_DIR}/.venv/bin/python" - <<'PY'
+    "${APP_DIR}/.venv/bin/python" - <<'PY'
 import os
 import traceback
 try:
-    os.environ["PORTAL_SKIP_SQLITE_IMPORT"] = "1"
     import app as portal
     with portal.app.app_context():
         db = portal.get_db()
@@ -926,7 +884,6 @@ main() {
 
   setup_repo
   load_existing_settings_if_any
-  cleanup_legacy_docker_stack
   if [ "${SCRIPT_MODE}" = "upgrade" ]; then
     require_upgrade_env_integrity
   fi

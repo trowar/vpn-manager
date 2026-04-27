@@ -12,8 +12,6 @@ venv/
 # Runtime data
 data/
 *.db
-*.sqlite
-*.sqlite3
 
 # Logs / temp
 *.log

@@ -11,7 +11,6 @@ import re
 import secrets
 import smtplib
 import socket
-import sqlite3
 import string
 import subprocess
 import sys
@@ -27,6 +26,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from functools import wraps
 from pathlib import Path
+from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -58,7 +58,6 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("PORTAL_DATA_DIR", BASE_DIR / "data"))
-DB_PATH = Path(os.environ.get("PORTAL_DB_PATH", DATA_DIR / "portal.db"))
 DB_BACKEND = os.environ.get("PORTAL_DB_BACKEND", "postgres").strip().lower()
 if DB_BACKEND != "postgres":
     DB_BACKEND = "postgres"
@@ -66,15 +65,6 @@ POSTGRES_DSN = os.environ.get(
     "PORTAL_POSTGRES_DSN",
     "postgresql://vpnportal:vpnportal@postgres:5432/vpnportal",
 ).strip()
-LEGACY_SQLITE_MIGRATION_SOURCE = Path(
-    os.environ.get("PORTAL_SQLITE_MIGRATION_SOURCE", str(DB_PATH))
-)
-SKIP_SQLITE_IMPORT = os.environ.get("PORTAL_SKIP_SQLITE_IMPORT", "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 CLIENT_CONF_DIR = Path(
     os.environ.get("PORTAL_CLIENT_CONF_DIR", DATA_DIR / "client-configs")
 )
@@ -104,7 +94,7 @@ except ValueError:
 AUTO_RESTART_AFTER_SELF_UPGRADE = (
     os.environ.get(
         "PORTAL_SELF_UPGRADE_AUTO_RESTART",
-        "1" if Path("/.dockerenv").exists() else "0",
+        "0",
     )
     .strip()
     .lower()
@@ -118,15 +108,13 @@ HOST_WEB_UPGRADE_BRANCH = os.environ.get(
     "PORTAL_SELF_UPGRADE_PROJECT_BRANCH",
     "main",
 ).strip() or "main"
-HOST_WEB_UPGRADE_HELPER_IMAGE = os.environ.get(
-    "PORTAL_SELF_UPGRADE_HELPER_IMAGE",
-    "docker:27-cli",
-).strip() or "docker:27-cli"
-HOST_WEB_UPGRADE_DATA_VOLUME = os.environ.get(
-    "PORTAL_SELF_UPGRADE_DATA_VOLUME",
-    "vpn-platform-v1_portal_data",
-).strip() or "vpn-platform-v1_portal_data"
-DOCKER_SOCKET_FILE = Path("/var/run/docker.sock")
+HOST_WEB_UPGRADE_WEB_SERVICE = os.environ.get(
+    "PORTAL_SELF_UPGRADE_WEB_SERVICE",
+    "vpn-platform-v1-web.service",
+).strip() or "vpn-platform-v1-web.service"
+
+DatabaseConnection = Any
+DatabaseRow = dict[str, Any]
 
 WG_INTERFACE = os.environ.get("WG_INTERFACE", "wg0")
 WG_NETWORK = os.environ.get("WG_NETWORK", "10.7.0.0/24")
@@ -714,7 +702,7 @@ def format_plan_display_name(
     return f"{mode_prefix} {value_text}"
 
 
-def format_order_plan(order: sqlite3.Row | dict) -> str:
+def format_order_plan(order: DatabaseRow | dict) -> str:
     plan_name = (row_get(order, "plan_name", "") or "").strip()
     plan_mode_raw = row_get(order, "plan_mode", "")
     plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
@@ -745,7 +733,7 @@ def format_order_plan(order: sqlite3.Row | dict) -> str:
     )
 
 
-def resolve_order_plan_snapshot(order: sqlite3.Row | dict) -> dict:
+def resolve_order_plan_snapshot(order: DatabaseRow | dict) -> dict:
     plan_name = (row_get(order, "plan_name", "") or "").strip()
     plan_mode_raw = row_get(order, "plan_mode", "")
     plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
@@ -788,7 +776,7 @@ def resolve_order_plan_snapshot(order: sqlite3.Row | dict) -> dict:
 
 
 @app.template_filter("fmt_order_plan")
-def fmt_order_plan_filter(order: sqlite3.Row | dict) -> str:
+def fmt_order_plan_filter(order: DatabaseRow | dict) -> str:
     return format_order_plan(order)
 
 
@@ -913,7 +901,7 @@ def detect_openvpn_platform(user_agent: str) -> str:
 
 
 def get_openvpn_endpoint_host(
-    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
 ) -> str:
     use_server = server_row
     if use_server is None and user is not None:
@@ -1009,7 +997,7 @@ def read_first_existing_text(paths: list[Path]) -> str:
 
 
 def get_openvpn_client_materials(
-    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
 ) -> tuple[str, str]:
     api_error: Exception | None = None
     if use_vpn_api(user=user, server_row=server_row):
@@ -1051,8 +1039,8 @@ def build_openvpn_client_config(
     username: str,
     *,
     profile_mode: str | None = None,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     if not is_openvpn_open():
         raise RuntimeError("管理员尚未启用 OpenVPN 支持。")
@@ -1142,7 +1130,7 @@ def build_openvpn_client_config(
 
 
 def get_registration_cooldown_seconds(
-    db: sqlite3.Connection, ip_address: str
+    db: DatabaseConnection, ip_address: str
 ) -> int:
     row = db.execute(
         """
@@ -1165,7 +1153,7 @@ def get_registration_cooldown_seconds(
 
 
 def mark_registration_success(
-    db: sqlite3.Connection, ip_address: str, at_iso: str
+    db: DatabaseConnection, ip_address: str, at_iso: str
 ) -> None:
     db.execute(
         """
@@ -1197,7 +1185,7 @@ def fmt_usdt_filter(value: str | Decimal | None) -> str:
     return format_usdt(value)
 
 
-def upsert_app_setting(db: sqlite3.Connection, key: str, value: str) -> None:
+def upsert_app_setting(db: DatabaseConnection, key: str, value: str) -> None:
     db.execute(
         """
         INSERT INTO app_settings (setting_key, setting_value, updated_at)
@@ -1210,7 +1198,7 @@ def upsert_app_setting(db: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def get_app_setting(db: sqlite3.Connection, key: str, default: str = "") -> str:
+def get_app_setting(db: DatabaseConnection, key: str, default: str = "") -> str:
     row = db.execute(
         """
         SELECT setting_value
@@ -1225,7 +1213,7 @@ def get_app_setting(db: sqlite3.Connection, key: str, default: str = "") -> str:
     return (row["setting_value"] or "").strip() or default
 
 
-def load_named_settings(db: sqlite3.Connection, keys: tuple[str, ...]) -> dict[str, str]:
+def load_named_settings(db: DatabaseConnection, keys: tuple[str, ...]) -> dict[str, str]:
     if not keys:
         return {}
     rows = db.execute(
@@ -1261,7 +1249,7 @@ def parse_int_setting(raw: str | None, default: int, *, min_value: int = 0) -> i
     return value
 
 
-def ensure_default_system_settings(db: sqlite3.Connection) -> None:
+def ensure_default_system_settings(db: DatabaseConnection) -> None:
     defaults = {
         SETTING_REGISTRATION_OPEN: "1",
         SETTING_ORDER_EXPIRE_HOURS: "24",
@@ -1378,7 +1366,7 @@ def get_relay_public_host() -> str:
 
 
 def allocate_user_ingress_port(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     column_name: str,
     start_port: int,
@@ -1403,8 +1391,8 @@ def allocate_user_ingress_port(
 
 
 def ensure_user_ingress_ports(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
 ) -> tuple[int, int]:
     wg_port = row_get(user, "wg_ingress_port")
     openvpn_port = row_get(user, "openvpn_ingress_port")
@@ -1444,7 +1432,7 @@ def ensure_user_ingress_ports(
     return wg_port, openvpn_port
 
 
-def get_wireguard_relay_endpoint(user: sqlite3.Row | None) -> str:
+def get_wireguard_relay_endpoint(user: DatabaseRow | None) -> str:
     if not VPN_RELAY_ENABLED or not user or row_get(user, "role") != "user":
         return ""
     host = get_relay_public_host()
@@ -1456,7 +1444,7 @@ def get_wireguard_relay_endpoint(user: sqlite3.Row | None) -> str:
     return f"{host}:{int(port)}"
 
 
-def get_openvpn_relay_endpoint(user: sqlite3.Row | None) -> tuple[str, int] | None:
+def get_openvpn_relay_endpoint(user: DatabaseRow | None) -> tuple[str, int] | None:
     if not VPN_RELAY_ENABLED or not user or row_get(user, "role") != "user":
         return None
     host = get_relay_public_host()
@@ -1603,7 +1591,7 @@ def ensure_shared_openvpn_materials() -> dict[str, str]:
     return materials
 
 
-def build_openvpn_common_name(user: sqlite3.Row) -> str:
+def build_openvpn_common_name(user: DatabaseRow) -> str:
     user_id = int(row_get(user, "id", 0) or 0)
     if user_id <= 0:
         raise RuntimeError("无法为用户生成 OpenVPN 身份。")
@@ -1748,9 +1736,9 @@ def issue_openvpn_client_identity(common_name: str) -> dict[str, str]:
 
 
 def ensure_user_openvpn_client_identity(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
-) -> sqlite3.Row:
+    db: DatabaseConnection,
+    user: DatabaseRow,
+) -> DatabaseRow:
     common_name = build_openvpn_common_name(user)
     cert_text = (row_get(user, "openvpn_client_cert", "") or "").strip()
     key_text = (row_get(user, "openvpn_client_key", "") or "").strip()
@@ -1802,7 +1790,7 @@ def ensure_shared_vpn_server_materials() -> dict[str, str]:
     }
 
 
-def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
+def load_system_settings(db: DatabaseConnection) -> dict[str, int | bool | str]:
     default_site_title = "新世界发展科技有限公司边缘节点网络管理系统"
     legacy_site_title = "新世界发展科技有限公司边际网络管理系统"
     registration_open_raw = get_app_setting(db, SETTING_REGISTRATION_OPEN, "1")
@@ -1840,7 +1828,7 @@ def get_current_app_version() -> str:
     return "unknown"
 
 
-def load_system_upgrade_state(db: sqlite3.Connection) -> dict[str, str]:
+def load_system_upgrade_state(db: DatabaseConnection) -> dict[str, str]:
     return {
         "status": get_app_setting(db, SETTING_SYSTEM_UPGRADE_STATUS, "idle"),
         "summary": get_app_setting(db, SETTING_SYSTEM_UPGRADE_SUMMARY, ""),
@@ -1851,7 +1839,7 @@ def load_system_upgrade_state(db: sqlite3.Connection) -> dict[str, str]:
 
 
 def load_system_upgrade_state_with_timeout_unlock(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
 ) -> dict[str, str]:
     state = load_system_upgrade_state(db)
     status = (state.get("status") or "").strip().lower()
@@ -1927,17 +1915,6 @@ def detect_origin_default_branch() -> str:
     return "main"
 
 
-def resolve_host_web_upgrade_project_name() -> str:
-    project_dir = (HOST_WEB_UPGRADE_PROJECT_DIR or "").strip().rstrip("/\\")
-    raw_name = Path(project_dir).name if project_dir else ""
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", (raw_name or "").lower()).strip("-_")
-    if not normalized:
-        normalized = "vpn-platform-v1"
-    if not normalized[0].isalnum():
-        normalized = f"vpn{normalized}"
-    return normalized
-
-
 def resolve_host_web_upgrade_project_dir() -> str:
     raw = (HOST_WEB_UPGRADE_PROJECT_DIR or "").strip()
     if not raw:
@@ -1952,32 +1929,35 @@ def resolve_host_web_upgrade_project_dir() -> str:
 
 def build_host_web_upgrade_script(current_version: str) -> str:
     branch = shlex.quote(HOST_WEB_UPGRADE_BRANCH or "main")
-    compose_project_name = shlex.quote(resolve_host_web_upgrade_project_name())
     project_dir = shlex.quote(resolve_host_web_upgrade_project_dir())
+    log_file = shlex.quote(str(SYSTEM_UPGRADE_LOG_FILE))
     quoted_current_version = shlex.quote((current_version or "").strip() or "0")
     quoted_db_backend = shlex.quote(DB_BACKEND)
     quoted_postgres_dsn = shlex.quote(POSTGRES_DSN)
+    web_service = shlex.quote(HOST_WEB_UPGRADE_WEB_SERVICE)
     return textwrap.dedent(
         f"""
+        #!/usr/bin/env bash
         set -eu
-        LOG_FILE=/app/data/system-upgrade.log
+        LOG_FILE={log_file}
         DB_BACKEND={quoted_db_backend}
         POSTGRES_DSN={quoted_postgres_dsn}
-        STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        STARTED_AT=\"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"
         TARGET_BRANCH={branch}
         CURRENT_VERSION={quoted_current_version}
-        COMPOSE_PROJECT_NAME={compose_project_name}
         PROJECT_DIR={project_dir}
+        WEB_SERVICE={web_service}
 
         log() {{
-          printf '[%s] %s\\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" "$1" | tee -a "$LOG_FILE"
+          mkdir -p \"$(dirname \"$LOG_FILE\")\"
+          printf '[%s] %s\\n' \"$(date -u +'%Y-%m-%d %H:%M:%S UTC')\" \"$1\" | tee -a \"$LOG_FILE\"
         }}
 
         write_state() {{
           if ! command -v python3 >/dev/null 2>&1; then
             return 0
           fi
-          python3 - "$1" "$2" "$3" "$4" <<'PY'
+          python3 - \"$1\" \"$2\" \"$3\" \"$4\" <<'PY'
 import os
 import sys
 from datetime import datetime, timezone
@@ -2019,61 +1999,58 @@ PY
         }}
 
         retry_cmd() {{
-          retries="$1"
-          delay="$2"
+          retries=\"$1\"
+          delay=\"$2\"
           shift 2
-
           attempt=1
           while true; do
-            "$@" && return 0
+            \"$@\" && return 0
             code=$?
-            if [ "$attempt" -ge "$retries" ]; then
-              return "$code"
+            if [ \"$attempt\" -ge \"$retries\" ]; then
+              return \"$code\"
             fi
-            log "命令失败 (exit=$code)，${{delay}}s 后重试 $attempt/$retries: $*"
+            log \"命令失败 (exit=$code), ${{delay}}s 后重试 $attempt/$retries: $*\"
             attempt=$((attempt + 1))
-            sleep "$delay"
+            sleep \"$delay\"
           done
         }}
 
         success=0
         cleanup() {{
           code=$?
-          if [ "$success" -ne 1 ]; then
-            log "系统升级失败，退出码: $code"
-            write_state "failed" "系统升级失败，请查看 system-upgrade.log" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+          if [ \"$success\" -ne 1 ]; then
+            log \"系统升级失败，退出码: $code\"
+            write_state \"failed\" \"系统升级失败，请查看 system-upgrade.log\" \"$STARTED_AT\" \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"
           fi
           exit $code
         }}
         trap cleanup EXIT
 
-        : > "$LOG_FILE"
-        log "宿主机升级任务已启动"
-        apk add --no-cache git python3 >/dev/null
-        apk add --no-cache py3-psycopg2 >/dev/null 2>&1 || true
-        write_state "running" "系统升级进行中" "$STARTED_AT" ""
-        if [ "$PROJECT_DIR" = "/workspace" ]; then
-          log "Refusing upgrade: PROJECT_DIR cannot be /workspace."
-          write_state "failed" "系统升级失败：项目目录配置错误(/workspace)." "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        : > \"$LOG_FILE\"
+        log \"宿主机升级任务已启动（本地 systemd 模式）\"
+        write_state \"running\" \"系统升级进行中\" \"$STARTED_AT\" \"\"
+        if [ \"$PROJECT_DIR\" = \"/workspace\" ]; then
+          log \"Refusing upgrade: PROJECT_DIR cannot be /workspace.\"
+          write_state \"failed\" \"系统升级失败：项目目录配置错误(/workspace)。\" \"$STARTED_AT\" \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"
           exit 1
         fi
-        if [ ! -d "$PROJECT_DIR" ]; then
-          log "Refusing upgrade: PROJECT_DIR does not exist: $PROJECT_DIR"
-          write_state "failed" "系统升级失败：项目目录不存在。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        if [ ! -d \"$PROJECT_DIR\" ]; then
+          log \"Refusing upgrade: PROJECT_DIR does not exist: $PROJECT_DIR\"
+          write_state \"failed\" \"系统升级失败：项目目录不存在。\" \"$STARTED_AT\" \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"
           exit 1
         fi
-        if [ ! -f "$PROJECT_DIR/docker-compose.yml" ] && [ ! -f "$PROJECT_DIR/compose.yml" ] && [ ! -f "$PROJECT_DIR/compose.yaml" ]; then
-          log "Refusing upgrade: docker compose file not found under $PROJECT_DIR"
-          write_state "failed" "系统升级失败：项目目录缺少 compose 文件。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        if [ ! -f \"$PROJECT_DIR/v1/scripts/install.sh\" ]; then
+          log \"Refusing upgrade: install.sh not found under $PROJECT_DIR/v1/scripts/install.sh\"
+          write_state \"failed\" \"系统升级失败：缺少安装脚本 v1/scripts/install.sh。\" \"$STARTED_AT\" \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"
           exit 1
         fi
-        cd "$PROJECT_DIR"
-        log "git fetch origin"
+        cd \"$PROJECT_DIR\"
+        log \"git fetch origin\"
         git fetch origin
-        REMOTE_VERSION="$(git show "origin/$TARGET_BRANCH:VERSION" 2>/dev/null | head -n 1 | tr -d '\\r' || true)"
-        if [ -n "$REMOTE_VERSION" ]; then
-          log "版本检查: 当前=$CURRENT_VERSION, 远端=$REMOTE_VERSION"
-          if python3 - "$CURRENT_VERSION" "$REMOTE_VERSION" <<'PY'
+        REMOTE_VERSION=\"$(git show \"origin/$TARGET_BRANCH:VERSION\" 2>/dev/null | head -n 1 | tr -d '\\r' || true)\"
+        if [ -n \"$REMOTE_VERSION\" ]; then
+          log \"版本检查: 当前=$CURRENT_VERSION, 远端=$REMOTE_VERSION\"
+          if python3 - \"$CURRENT_VERSION\" \"$REMOTE_VERSION\" <<'PY'
 import re
 import sys
 
@@ -2098,45 +2075,40 @@ remote_parts = parse_parts(remote_raw)
 sys.exit(0 if compare_parts(remote_parts, current_parts) > 0 else 1)
 PY
           then
-            log "检测到更高版本，继续执行升级"
+            log \"检测到更高版本，继续执行升级\"
           else
-            log "远端版本未高于当前版本，跳过升级"
-            write_state "success" "远端版本($REMOTE_VERSION) 未高于当前版本($CURRENT_VERSION)，已跳过升级。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+            log \"远端版本未高于当前版本，跳过升级\"
+            write_state \"success\" \"远端版本($REMOTE_VERSION) 未高于当前版本($CURRENT_VERSION)，已跳过升级。\" \"$STARTED_AT\" \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"
             success=1
             exit 0
           fi
         else
-          log "未读取到远端 VERSION，继续执行升级"
+          log \"未读取到远端 VERSION，继续执行升级\"
         fi
-        log "git checkout $TARGET_BRANCH"
-        git checkout "$TARGET_BRANCH"
-        log "git pull --ff-only origin $TARGET_BRANCH"
-        git pull --ff-only origin "$TARGET_BRANCH"
-        if [ "$DB_BACKEND" = "postgres" ]; then
-          log "docker compose --project-directory $PROJECT_DIR --project-name $COMPOSE_PROJECT_NAME up -d postgres"
-          retry_cmd 3 8 docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" up -d postgres
+        log \"git checkout $TARGET_BRANCH\"
+        git checkout \"$TARGET_BRANCH\"
+        log \"git pull --ff-only origin $TARGET_BRANCH\"
+        git pull --ff-only origin \"$TARGET_BRANCH\"
+        log \"bash v1/scripts/install.sh (upgrade mode)\"
+        SKIP_APT_ON_UPGRADE=1 \
+        APP_DIR=\"$PROJECT_DIR\" \
+        BRANCH=\"$TARGET_BRANCH\" \
+        INSTALL_LOCAL_VPN_SERVER=1 \
+        UPGRADE_INCLUDE_VPN_SERVER=0 \
+        DISABLE_SYSTEMD_RESOLVED=1 \
+        bash \"$PROJECT_DIR/v1/scripts/install.sh\"
+        if command -v systemctl >/dev/null 2>&1; then
+          log \"systemctl restart $WEB_SERVICE\"
+          systemctl restart \"$WEB_SERVICE\" || true
         fi
-        export COMPOSE_BAKE=0
-        export DOCKER_BUILDKIT=0
-        export COMPOSE_DOCKER_CLI_BUILD=0
-        export COMPOSE_HTTP_TIMEOUT=300
-        export DOCKER_CLIENT_TIMEOUT=300
-        log "docker pull docker.m.daocloud.io/library/python:3.12-slim (best effort)"
-        retry_cmd 3 8 docker pull docker.m.daocloud.io/library/python:3.12-slim || log "预拉取基础镜像失败，继续构建"
-        log "docker compose --project-directory $PROJECT_DIR --project-name $COMPOSE_PROJECT_NAME build --pull web"
-        retry_cmd 3 10 docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" build --pull web
-        log "docker compose --project-directory $PROJECT_DIR --project-name $COMPOSE_PROJECT_NAME up -d --no-deps web"
-        retry_cmd 3 8 docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" up -d --no-deps web
         success=1
-        log "系统升级完成"
-        write_state "success" "系统升级完成，请重新登录。" "$STARTED_AT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        log \"系统升级完成\"
+        write_state \"success\" \"系统升级完成，请重新登录。\" \"$STARTED_AT\" \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"
         """
     ).strip()
 
 
 def dispatch_host_web_upgrade() -> tuple[bool, str]:
-    if not DOCKER_SOCKET_FILE.exists():
-        return False, "未检测到 Docker Socket，无法派发宿主机升级任务。"
     if not HOST_WEB_UPGRADE_PROJECT_DIR:
         return False, "未配置宿主机项目目录，无法升级。"
     project_dir = resolve_host_web_upgrade_project_dir()
@@ -2145,29 +2117,51 @@ def dispatch_host_web_upgrade() -> tuple[bool, str]:
     if project_dir == "/workspace":
         return False, "宿主机项目目录不能为 /workspace，请改为真实部署目录后重试。"
     helper_script = build_host_web_upgrade_script(get_current_app_version())
-    args = [
-        "docker",
-        "run",
-        "-d",
-        "--rm",
-        "-v",
-        f"{DOCKER_SOCKET_FILE}:{DOCKER_SOCKET_FILE}",
-        "-v",
-        f"{project_dir}:{project_dir}",
-        "-v",
-        f"{HOST_WEB_UPGRADE_DATA_VOLUME}:/app/data",
-        "-w",
-        project_dir,
-        HOST_WEB_UPGRADE_HELPER_IMAGE,
-        "sh",
-        "-lc",
-        helper_script,
-    ]
-    code, output = run_local_command_with_output(args, cwd=BASE_DIR)
-    if code != 0:
-        return False, output or "宿主机升级任务派发失败。"
-    return True, output.strip() or "宿主机升级任务已派发。"
+    SYSTEM_UPGRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, script_path_raw = tempfile.mkstemp(
+        prefix="host-upgrade-",
+        suffix=".sh",
+        dir=str(SYSTEM_UPGRADE_LOG_FILE.parent),
+    )
+    script_path = Path(script_path_raw)
+    with os.fdopen(fd, "w", encoding="utf-8") as file_handle:
+        file_handle.write(helper_script + "\n")
+    script_path.chmod(0o700)
 
+    has_systemd_run = (
+        run_local_command_with_output(
+            ["bash", "-lc", "command -v systemd-run >/dev/null 2>&1"],
+            cwd=BASE_DIR,
+        )[0]
+        == 0
+    )
+    if has_systemd_run:
+        unit_name = f"vpn-platform-upgrade-{int(time.time())}"
+        args = [
+            "systemd-run",
+            "--unit",
+            unit_name,
+            "--collect",
+            "--quiet",
+            "/bin/bash",
+            str(script_path),
+        ]
+        code, output = run_local_command_with_output(args, cwd=BASE_DIR)
+        if code != 0:
+            return False, output or "宿主机升级任务派发失败。"
+        return True, f"宿主机升级任务已启动（systemd unit: {unit_name}）。"
+
+    try:
+        process = subprocess.Popen(
+            ["/bin/bash", str(script_path)],
+            cwd=project_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return False, f"宿主机升级任务派发失败：{exc}"
+    return True, f"宿主机升级任务已启动（pid: {process.pid}）。"
 
 def schedule_process_restart(delay_seconds: float = 1.5) -> None:
     if not AUTO_RESTART_AFTER_SELF_UPGRADE:
@@ -2264,17 +2258,17 @@ def launch_system_upgrade_task() -> None:
     thread.start()
 
 
-def is_registration_open(db: sqlite3.Connection | None = None) -> bool:
+def is_registration_open(db: DatabaseConnection | None = None) -> bool:
     use_db = db or get_db()
     return bool(load_system_settings(use_db)["registration_open"])
 
 
-def get_order_expire_hours(db: sqlite3.Connection | None = None) -> int:
+def get_order_expire_hours(db: DatabaseConnection | None = None) -> int:
     use_db = db or get_db()
     return int(load_system_settings(use_db)["order_expire_hours"])
 
 
-def get_gift_settings(db: sqlite3.Connection | None = None) -> tuple[int, int]:
+def get_gift_settings(db: DatabaseConnection | None = None) -> tuple[int, int]:
     use_db = db or get_db()
     settings = load_system_settings(use_db)
     return (
@@ -2283,17 +2277,17 @@ def get_gift_settings(db: sqlite3.Connection | None = None) -> tuple[int, int]:
     )
 
 
-def is_wireguard_open(db: sqlite3.Connection | None = None) -> bool:
+def is_wireguard_open(db: DatabaseConnection | None = None) -> bool:
     use_db = db or get_db()
     return bool(WIREGUARD_ENABLED and bool(load_system_settings(use_db)["wireguard_open"]))
 
 
-def is_openvpn_open(db: sqlite3.Connection | None = None) -> bool:
+def is_openvpn_open(db: DatabaseConnection | None = None) -> bool:
     use_db = db or get_db()
     return bool(OPENVPN_ENABLED and bool(load_system_settings(use_db)["openvpn_open"]))
 
 
-def ensure_default_onboarding_settings(db: sqlite3.Connection) -> None:
+def ensure_default_onboarding_settings(db: DatabaseConnection) -> None:
     existing = load_named_settings(db, tuple(ONBOARDING_SETTINGS_DEFAULTS.keys()))
     for key, default_value in ONBOARDING_SETTINGS_DEFAULTS.items():
         if key not in existing or existing.get(key, "") == "":
@@ -2304,7 +2298,7 @@ def ensure_default_onboarding_settings(db: sqlite3.Connection) -> None:
                 upsert_app_setting(db, key, existing.get(key, default_value) or default_value)
 
 
-def load_onboarding_settings(db: sqlite3.Connection) -> dict[str, str | bool]:
+def load_onboarding_settings(db: DatabaseConnection) -> dict[str, str | bool]:
     values = load_named_settings(db, tuple(ONBOARDING_SETTINGS_DEFAULTS.keys()))
     merged = {**ONBOARDING_SETTINGS_DEFAULTS, **values}
     return {
@@ -2317,7 +2311,7 @@ def load_onboarding_settings(db: sqlite3.Connection) -> dict[str, str | bool]:
     }
 
 
-def load_onboarding_server_draft(db: sqlite3.Connection) -> dict[str, str | int]:
+def load_onboarding_server_draft(db: DatabaseConnection) -> dict[str, str | int]:
     values = load_named_settings(
         db,
         (
@@ -2346,7 +2340,7 @@ def load_onboarding_server_draft(db: sqlite3.Connection) -> dict[str, str | int]
 
 
 def save_onboarding_server_draft(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     server_name: str,
     server_host: str,
@@ -2379,7 +2373,7 @@ def save_onboarding_server_draft(
     )
 
 
-def get_admin_onboarding_step_status(db: sqlite3.Connection) -> tuple[dict[int, bool], int]:
+def get_admin_onboarding_step_status(db: DatabaseConnection) -> tuple[dict[int, bool], int]:
     settings = load_onboarding_settings(db)
     payment_settings = load_payment_settings(db)
     plan_count = db.execute("SELECT COUNT(*) AS cnt FROM subscription_plans").fetchone()["cnt"]
@@ -2406,14 +2400,14 @@ def get_admin_onboarding_step_status(db: sqlite3.Connection) -> tuple[dict[int, 
     return step_status, default_step
 
 
-def next_admin_onboarding_step(db: sqlite3.Connection, fallback: int = 4) -> int:
+def next_admin_onboarding_step(db: DatabaseConnection, fallback: int = 4) -> int:
     _, next_step = get_admin_onboarding_step_status(db)
     if next_step < 1 or next_step > 4:
         return fallback
     return next_step
 
 
-def is_admin_onboarding_completed(db: sqlite3.Connection) -> bool:
+def is_admin_onboarding_completed(db: DatabaseConnection) -> bool:
     raw_value = get_app_setting(db, ONBOARDING_SETTING_SETUP_COMPLETED, "0")
     return parse_bool_setting(raw_value, False)
 
@@ -2482,7 +2476,7 @@ def get_portal_domain_setting() -> str:
 
 
 def get_wireguard_endpoint_for_clients(
-    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
 ) -> str:
     use_server = server_row
     if use_server is None and user is not None:
@@ -2534,7 +2528,7 @@ def get_wireguard_endpoint_for_clients(
     return f"{portal_domain}:{parse_wg_endpoint_port()}"
 
 
-def ensure_default_payment_settings(db: sqlite3.Connection) -> None:
+def ensure_default_payment_settings(db: DatabaseConnection) -> None:
     defaults = default_payment_settings()
     rows = db.execute(
         """
@@ -2550,7 +2544,7 @@ def ensure_default_payment_settings(db: sqlite3.Connection) -> None:
             upsert_app_setting(db, key, defaults.get(key, ""))
 
 
-def load_legacy_payment_settings(db: sqlite3.Connection) -> dict:
+def load_legacy_payment_settings(db: DatabaseConnection) -> dict:
     defaults = default_payment_settings()
     rows = db.execute(
         """
@@ -2588,7 +2582,7 @@ def payment_method_label(method_code: str | None) -> str:
     return normalized.upper()
 
 
-def load_payment_methods(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
+def load_payment_methods(db: DatabaseConnection, *, active_only: bool = False) -> list[dict]:
     sql = """
         SELECT
             id,
@@ -2632,7 +2626,7 @@ def load_payment_methods(db: sqlite3.Connection, *, active_only: bool = False) -
     return methods
 
 
-def resolve_default_payment_method(db: sqlite3.Connection) -> dict | None:
+def resolve_default_payment_method(db: DatabaseConnection) -> dict | None:
     active_methods = load_payment_methods(db, active_only=True)
     if active_methods:
         return active_methods[0]
@@ -2642,7 +2636,7 @@ def resolve_default_payment_method(db: sqlite3.Connection) -> dict | None:
     return None
 
 
-def sync_legacy_payment_settings_with_default_method(db: sqlite3.Connection) -> None:
+def sync_legacy_payment_settings_with_default_method(db: DatabaseConnection) -> None:
     default_method = resolve_default_payment_method(db)
     if not default_method:
         return
@@ -2650,7 +2644,7 @@ def sync_legacy_payment_settings_with_default_method(db: sqlite3.Connection) -> 
     upsert_app_setting(db, "usdt_default_network", default_method["network"])
 
 
-def ensure_default_payment_methods(db: sqlite3.Connection) -> None:
+def ensure_default_payment_methods(db: DatabaseConnection) -> None:
     count = db.execute("SELECT COUNT(*) AS cnt FROM payment_methods").fetchone()["cnt"]
     if count > 0:
         return
@@ -2677,7 +2671,7 @@ def ensure_default_payment_methods(db: sqlite3.Connection) -> None:
     )
 
 
-def load_payment_settings(db: sqlite3.Connection) -> dict:
+def load_payment_settings(db: DatabaseConnection) -> dict:
     legacy = load_legacy_payment_settings(db)
     default_method = resolve_default_payment_method(db)
 
@@ -2701,7 +2695,7 @@ def load_payment_settings(db: sqlite3.Connection) -> dict:
     }
 
 
-def ensure_default_subscription_plans(db: sqlite3.Connection) -> None:
+def ensure_default_subscription_plans(db: DatabaseConnection) -> None:
     count = db.execute("SELECT COUNT(*) AS cnt FROM subscription_plans").fetchone()["cnt"]
     if count > 0:
         return
@@ -2783,7 +2777,7 @@ def ensure_default_subscription_plans(db: sqlite3.Connection) -> None:
         )
 
 
-def load_subscription_plans(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
+def load_subscription_plans(db: DatabaseConnection, *, active_only: bool = False) -> list[dict]:
     sql = """
         SELECT
             id,
@@ -3018,7 +3012,7 @@ def clip_text(raw: str, limit: int = 200000) -> str:
     return text[-limit:]
 
 
-def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
+def load_admin_servers(db: DatabaseConnection) -> list[dict]:
     rows = db.execute(
         """
         SELECT
@@ -3088,7 +3082,7 @@ def load_admin_servers(db: sqlite3.Connection) -> list[dict]:
     return servers
 
 
-def get_server_by_id(db: sqlite3.Connection, server_id: int | None) -> sqlite3.Row | None:
+def get_server_by_id(db: DatabaseConnection, server_id: int | None) -> DatabaseRow | None:
     if not server_id:
         return None
     return db.execute(
@@ -3102,7 +3096,7 @@ def get_server_by_id(db: sqlite3.Connection, server_id: int | None) -> sqlite3.R
     ).fetchone()
 
 
-def is_runtime_server_ready(server_row: sqlite3.Row | None) -> bool:
+def is_runtime_server_ready(server_row: DatabaseRow | None) -> bool:
     if not server_row:
         return False
     status = (row_get(server_row, "status", "") or "").strip().lower()
@@ -3112,9 +3106,9 @@ def is_runtime_server_ready(server_row: sqlite3.Row | None) -> bool:
 
 
 def get_persisted_runtime_server_for_account(
-    db: sqlite3.Connection,
-    user: sqlite3.Row | None,
-) -> sqlite3.Row | None:
+    db: DatabaseConnection,
+    user: DatabaseRow | None,
+) -> DatabaseRow | None:
     if not user:
         return None
     role = (row_get(user, "role", "") or "").strip().lower()
@@ -3132,8 +3126,8 @@ def get_persisted_runtime_server_for_account(
 
 
 def load_user_selectable_servers(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
 ) -> list[dict]:
     preferred_server_id = row_get(user, "preferred_server_id")
     assigned_server_id = row_get(user, "assigned_server_id")
@@ -3192,7 +3186,7 @@ def load_user_selectable_servers(
     return result
 
 
-def serialize_runtime_server(server_row: sqlite3.Row | None) -> dict[str, int | str] | None:
+def serialize_runtime_server(server_row: DatabaseRow | None) -> dict[str, int | str] | None:
     if not server_row:
         return None
     server_name = (row_get(server_row, "server_name", "") or "").strip() or (
@@ -3215,7 +3209,7 @@ def serialize_runtime_server(server_row: sqlite3.Row | None) -> dict[str, int | 
     }
 
 
-def pick_best_online_server(db: sqlite3.Connection) -> sqlite3.Row | None:
+def pick_best_online_server(db: DatabaseConnection) -> DatabaseRow | None:
     return db.execute(
         """
         SELECT
@@ -3238,11 +3232,11 @@ def pick_best_online_server(db: sqlite3.Connection) -> sqlite3.Row | None:
 
 
 def choose_runtime_server_for_user(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
     *,
     allow_reassign: bool = True,
-) -> sqlite3.Row | None:
+) -> DatabaseRow | None:
     if not user or row_get(user, "role") != "user":
         return None
 
@@ -3322,9 +3316,9 @@ def choose_runtime_server_for_user(
 
 
 def choose_runtime_server_for_admin(
-    db: sqlite3.Connection,
-    admin_user: sqlite3.Row | None = None,
-) -> sqlite3.Row | None:
+    db: DatabaseConnection,
+    admin_user: DatabaseRow | None = None,
+) -> DatabaseRow | None:
     candidate_ids: list[int] = []
 
     assigned_server_id = row_get(admin_user, "assigned_server_id")
@@ -3377,11 +3371,11 @@ def choose_runtime_server_for_admin(
 
 
 def select_runtime_server_for_account(
-    db: sqlite3.Connection,
-    user: sqlite3.Row | None,
+    db: DatabaseConnection,
+    user: DatabaseRow | None,
     *,
     allow_reassign: bool = True,
-) -> sqlite3.Row | None:
+) -> DatabaseRow | None:
     if not user:
         return None
     role = (row_get(user, "role", "") or "").strip().lower()
@@ -3392,7 +3386,7 @@ def select_runtime_server_for_account(
     return None
 
 
-def user_prefers_managed_nodes(db: sqlite3.Connection, user: sqlite3.Row | None) -> bool:
+def user_prefers_managed_nodes(db: DatabaseConnection, user: DatabaseRow | None) -> bool:
     if not user or row_get(user, "role") != "user":
         return False
     if VPN_API_URL:
@@ -3403,7 +3397,7 @@ def user_prefers_managed_nodes(db: sqlite3.Connection, user: sqlite3.Row | None)
     return bool(row)
 
 
-def load_cloudflare_accounts(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
+def load_cloudflare_accounts(db: DatabaseConnection, *, active_only: bool = False) -> list[dict]:
     sql = """
         SELECT
             id,
@@ -3440,7 +3434,7 @@ def load_cloudflare_accounts(db: sqlite3.Connection, *, active_only: bool = Fals
     return accounts
 
 
-def get_default_cloudflare_account_id(db: sqlite3.Connection) -> int | None:
+def get_default_cloudflare_account_id(db: DatabaseConnection) -> int | None:
     row = db.execute(
         """
         SELECT id
@@ -3500,7 +3494,7 @@ def build_mail_server_config(
     }
 
 
-def load_mail_servers(db: sqlite3.Connection, *, active_only: bool = False) -> list[dict]:
+def load_mail_servers(db: DatabaseConnection, *, active_only: bool = False) -> list[dict]:
     sql = """
         SELECT
             id,
@@ -3546,9 +3540,9 @@ def load_mail_servers(db: sqlite3.Connection, *, active_only: bool = False) -> l
 
 
 def get_mail_server_by_id(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     mail_server_id: int | None,
-) -> sqlite3.Row | None:
+) -> DatabaseRow | None:
     if not mail_server_id:
         return None
     return db.execute(
@@ -3563,7 +3557,7 @@ def get_mail_server_by_id(
 
 
 def get_active_mail_server_config(
-    db: sqlite3.Connection | None = None,
+    db: DatabaseConnection | None = None,
 ) -> dict[str, int | str] | None:
     use_db = db or get_db()
     row = use_db.execute(
@@ -3626,7 +3620,7 @@ def load_env_mail_server_config() -> dict[str, int | str] | None:
 
 
 def resolve_runtime_mail_server_config(
-    db: sqlite3.Connection | None = None,
+    db: DatabaseConnection | None = None,
 ) -> dict[str, int | str] | None:
     active_config = get_active_mail_server_config(db)
     if active_config:
@@ -3635,13 +3629,13 @@ def resolve_runtime_mail_server_config(
 
 
 def is_email_verification_available(
-    db: sqlite3.Connection | None = None,
+    db: DatabaseConnection | None = None,
 ) -> bool:
     return resolve_runtime_mail_server_config(db) is not None
 
 
 def set_active_mail_server(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     mail_server_id: int | None,
 ) -> None:
     now_iso = utcnow_iso()
@@ -3667,7 +3661,7 @@ def set_active_mail_server(
 
 
 def load_managed_domains(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     active_only: bool = False,
     only_unassigned: bool = False,
@@ -3733,7 +3727,7 @@ def load_managed_domains(
     return domains
 
 
-def load_available_managed_domains(db: sqlite3.Connection) -> list[dict]:
+def load_available_managed_domains(db: DatabaseConnection) -> list[dict]:
     rows = db.execute(
         """
         SELECT
@@ -3759,7 +3753,7 @@ def load_available_managed_domains(db: sqlite3.Connection) -> list[dict]:
 
 
 def ensure_managed_domain_entry(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     domain_name: str,
     *,
     cloudflare_account_id: int | None = None,
@@ -4016,7 +4010,7 @@ def summarize_zone_names(zone_names: list[str], limit: int = 6) -> str:
 
 
 def sync_domains_from_cloudflare_account(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     account_id: int,
 ) -> dict[str, object]:
     account = db.execute(
@@ -4265,7 +4259,7 @@ def resolve_ipv4_for_dns_record(host: str) -> str:
 
 
 def ensure_auto_domain_for_server(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     server_id: int,
 ) -> tuple[str, str]:
     account_row = db.execute(
@@ -4298,7 +4292,7 @@ def ensure_auto_domain_for_server(
 
 
 def assign_managed_domain_to_server(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     server_id: int,
     *,
     preferred_domain: str = "",
@@ -4323,7 +4317,7 @@ def assign_managed_domain_to_server(
         where_domain = " AND lower(d.domain_name) = lower(?)"
         query_params.append(normalized_preferred)
 
-    def pick_domain_row() -> sqlite3.Row | None:
+    def pick_domain_row() -> DatabaseRow | None:
         return db.execute(
             f"""
             SELECT
@@ -4440,7 +4434,7 @@ def assign_managed_domain_to_server(
     return True, success_message
 
 
-def release_server_domain_bindings(db: sqlite3.Connection, server_id: int) -> None:
+def release_server_domain_bindings(db: DatabaseConnection, server_id: int) -> None:
     now_iso = utcnow_iso()
     db.execute(
         """
@@ -4470,7 +4464,7 @@ def release_server_domain_bindings(db: sqlite3.Connection, server_id: int) -> No
 
 
 def upsert_primary_cloudflare_account_from_onboarding(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     account_name: str,
     api_token: str,
@@ -4887,7 +4881,7 @@ def test_server_vpn_api_health(host: str, vpn_api_token: str) -> tuple[bool, str
 
 
 def refresh_server_health_status(
-    db: sqlite3.Connection, *, force: bool = False
+    db: DatabaseConnection, *, force: bool = False
 ) -> dict[str, int]:
     now = utcnow()
     if not force:
@@ -5320,112 +5314,6 @@ def close_db(_exc) -> None:
         db.close()
 
 
-def migrate_sqlite_to_postgres_if_needed(db) -> None:
-    if DB_BACKEND != "postgres":
-        return
-    if SKIP_SQLITE_IMPORT:
-        return
-    if get_app_setting(db, "sqlite_migration_done", ""):
-        return
-    source_path = LEGACY_SQLITE_MIGRATION_SOURCE
-    if not source_path.exists() or source_path.stat().st_size <= 0:
-        return
-
-    try:
-        src = sqlite3.connect(source_path)
-        src.row_factory = sqlite3.Row
-    except Exception:
-        return
-
-    try:
-        source_users_exists = (
-            src.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
-            ).fetchone()
-            is not None
-        )
-        if not source_users_exists:
-            return
-        source_user_count = int(
-            (src.execute("SELECT COUNT(*) AS cnt FROM users").fetchone() or {"cnt": 0})[
-                "cnt"
-            ]
-            or 0
-        )
-        target_user_count = int(
-            (db.execute("SELECT COUNT(*) AS cnt FROM users").fetchone() or {"cnt": 0})[
-                "cnt"
-            ]
-            or 0
-        )
-        if source_user_count <= 0 or target_user_count > 0:
-            upsert_app_setting(db, "sqlite_migration_done", utcnow_iso())
-            db.commit()
-            return
-
-        table_order = (
-            "vpn_servers",
-            "cloudflare_accounts",
-            "users",
-            "managed_domains",
-            "subscription_plans",
-            "payment_methods",
-            "payment_orders",
-            "email_verifications",
-            "mail_servers",
-            "registration_limits",
-            "app_settings",
-        )
-        for table in table_order:
-            src_exists = src.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ).fetchone()
-            if not src_exists:
-                continue
-
-            src_cols = [
-                row["name"] for row in src.execute(f"PRAGMA table_info({table})").fetchall()
-            ]
-            dst_cols = [
-                row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()
-            ]
-            shared_cols = [name for name in dst_cols if name in src_cols]
-            if not shared_cols:
-                continue
-
-            select_sql = f"SELECT {', '.join(shared_cols)} FROM {table}"
-            rows = src.execute(select_sql).fetchall()
-            if not rows:
-                continue
-            insert_sql = (
-                f"INSERT INTO {table} ({', '.join(shared_cols)}) "
-                f"VALUES ({', '.join('?' for _ in shared_cols)}) ON CONFLICT DO NOTHING"
-            )
-            for row in rows:
-                db.execute(insert_sql, tuple(row[col] for col in shared_cols))
-
-            if "id" in shared_cols:
-                db.execute(
-                    f"""
-                    SELECT setval(
-                        pg_get_serial_sequence('{table}', 'id'),
-                        COALESCE((SELECT MAX(id) FROM {table}), 1),
-                        (SELECT COUNT(*) > 0 FROM {table})
-                    )
-                    """
-                )
-
-        upsert_app_setting(db, "sqlite_migration_done", utcnow_iso())
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        with contextlib.suppress(Exception):
-            src.close()
-
-
 def init_db() -> None:
     db = get_db()
     db.execute(
@@ -5641,7 +5529,6 @@ def init_db() -> None:
         """
     )
     migrate_schema(db)
-    migrate_sqlite_to_postgres_if_needed(db)
     ensure_default_payment_settings(db)
     ensure_default_onboarding_settings(db)
     ensure_default_system_settings(db)
@@ -5756,7 +5643,7 @@ def init_db() -> None:
     db.commit()
 
 
-def migrate_schema(db: sqlite3.Connection) -> None:
+def migrate_schema(db: DatabaseConnection) -> None:
     user_columns = {
         row["name"]: row
         for row in db.execute("PRAGMA table_info(users)").fetchall()
@@ -6285,7 +6172,7 @@ def build_download_access_token(user, scope: str) -> str:
 
 
 def resolve_download_access_user(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     access_token: str,
     scope: str,
 ):
@@ -6569,7 +6456,7 @@ def run_command(args, input_text=None, check=True) -> str:
     return completed.stdout.strip()
 
 
-def use_vpn_api(*, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None) -> bool:
+def use_vpn_api(*, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None) -> bool:
     if server_row is not None:
         host = normalize_remote_host(row_get(server_row, "host", ""))
         token = (row_get(server_row, "vpn_api_token", "") or "").strip()
@@ -6589,10 +6476,10 @@ def host_for_http_url(raw_host: str) -> str:
 
 def get_runtime_vpn_api_target(
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
     allow_reassign: bool = True,
-) -> tuple[str, str, sqlite3.Row | None]:
+) -> tuple[str, str, DatabaseRow | None]:
     if server_row is not None:
         host = normalize_remote_host(row_get(server_row, "host", ""))
         token = (row_get(server_row, "vpn_api_token", "") or "").strip()
@@ -6642,8 +6529,8 @@ def vpn_api_request(
     path: str,
     payload: dict | None = None,
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
     allow_reassign: bool = True,
 ) -> dict:
     runtime_api_url, runtime_api_token, _ = get_runtime_vpn_api_target(
@@ -6693,7 +6580,7 @@ def vpn_api_request(
     return obj
 
 
-def iter_runtime_vpn_api_targets(db: sqlite3.Connection) -> list[sqlite3.Row | None]:
+def iter_runtime_vpn_api_targets(db: DatabaseConnection) -> list[DatabaseRow | None]:
     rows = db.execute(
         """
         SELECT *
@@ -6712,7 +6599,7 @@ def iter_runtime_vpn_api_targets(db: sqlite3.Connection) -> list[sqlite3.Row | N
 
 
 def sync_runtime_protocol_state(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     wireguard_open: bool,
     openvpn_open: bool,
@@ -6735,7 +6622,7 @@ def sync_runtime_protocol_state(
 
 
 def get_wireguard_dump_text(
-    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
 ) -> str:
     if use_vpn_api(user=user, server_row=server_row):
         result = vpn_api_request(
@@ -6784,7 +6671,7 @@ def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]
 
 
 def get_wireguard_server_public_key(
-    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
 ) -> str:
     if use_vpn_api(user=user, server_row=server_row):
         result = vpn_api_request(
@@ -6803,7 +6690,7 @@ def get_wireguard_server_public_key(
 
 
 def wireguard_generate_keys(
-    *, user: sqlite3.Row | None = None, server_row: sqlite3.Row | None = None
+    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
 ) -> tuple[str, str, str]:
     if use_vpn_api(user=user, server_row=server_row):
         result = vpn_api_request(
@@ -6840,8 +6727,8 @@ def format_bytes(num_bytes: int) -> str:
 def get_wireguard_peer_state(
     public_key: str | None,
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> dict[str, int | str]:
     if not public_key:
         return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
@@ -6857,14 +6744,14 @@ def get_wireguard_peer_state(
 def get_wireguard_transfer_bytes(
     public_key: str | None,
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> tuple[int, int]:
     state = get_wireguard_peer_state(public_key, user=user, server_row=server_row)
     return int(state["rx"]), int(state["tx"])
 
 
-def get_user_traffic_stats(user: sqlite3.Row) -> dict[str, int | str]:
+def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
     rx_bytes, tx_bytes = get_wireguard_transfer_bytes(
         user["client_public_key"],
         user=user,
@@ -6914,7 +6801,7 @@ def is_dynamic_ip_assignment_mode() -> bool:
 
 
 def next_available_ip(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     exclude_user_id: int | None = None,
     avoid_ip: str | None = None,
@@ -6974,8 +6861,8 @@ def build_client_config(
     *,
     allowed_ips: str | None = None,
     endpoint: str | None = None,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     server_public_key = get_wireguard_server_public_key(user=user, server_row=server_row)
     resolved_allowed_ips = (allowed_ips or get_client_allowed_ips()).strip()
@@ -7016,8 +6903,8 @@ def write_client_artifacts(
     client_ip: str,
     config_path: str | None = None,
     qr_path: str | None = None,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> dict[str, str | None]:
     filename_prefix = f"{safe_name(username)}_{user_id}"
     conf_path = Path(config_path) if config_path else CLIENT_CONF_DIR / f"{filename_prefix}.conf"
@@ -7045,7 +6932,7 @@ def write_client_artifacts(
 
 
 def build_user_wireguard_config(
-    user: sqlite3.Row,
+    user: DatabaseRow,
     *,
     profile_mode: str,
 ) -> tuple[str, str]:
@@ -7079,7 +6966,7 @@ def build_user_wireguard_config(
     return config_text, normalized_mode
 
 
-def get_runtime_server_for_account(user: sqlite3.Row | None) -> sqlite3.Row | None:
+def get_runtime_server_for_account(user: DatabaseRow | None) -> DatabaseRow | None:
     if not user:
         return None
     try:
@@ -7091,8 +6978,8 @@ def get_runtime_server_for_account(user: sqlite3.Row | None) -> sqlite3.Row | No
 
 def resolve_shadowsocks_endpoint_host(
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     def pick_host(candidate: str | None) -> str:
         host = host_without_optional_port(candidate)
@@ -7125,15 +7012,15 @@ def resolve_shadowsocks_endpoint_host(
     return ""
 
 
-def derive_user_shadowsocks_password(user: sqlite3.Row) -> str:
+def derive_user_shadowsocks_password(user: DatabaseRow) -> str:
     _ = user
     return SHADOWSOCKS_PASSWORD
 
 
 def build_user_shadowsocks_config(
-    user: sqlite3.Row,
+    user: DatabaseRow,
     *,
-    server_row: sqlite3.Row | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
@@ -7150,9 +7037,9 @@ def build_user_shadowsocks_config(
 
 
 def build_user_kcptun_config(
-    user: sqlite3.Row,
+    user: DatabaseRow,
     *,
-    server_row: sqlite3.Row | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
@@ -7187,9 +7074,9 @@ def build_user_kcptun_config(
 
 
 def build_user_kcptun_clash_profile(
-    user: sqlite3.Row,
+    user: DatabaseRow,
     *,
-    server_row: sqlite3.Row | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
@@ -7236,9 +7123,9 @@ def build_user_kcptun_clash_profile(
 
 
 def build_user_shadowsocks_clash_profile(
-    user: sqlite3.Row,
+    user: DatabaseRow,
     *,
-    server_row: sqlite3.Row | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
@@ -7325,9 +7212,9 @@ def build_user_shadowsocks_clash_profile(
 
 
 def build_user_shadowsocks_uri(
-    user: sqlite3.Row,
+    user: DatabaseRow,
     *,
-    server_row: sqlite3.Row | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> str:
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
@@ -7346,8 +7233,8 @@ def set_wireguard_peer(
     peer_psk: str,
     client_ip: str,
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> None:
     if use_vpn_api(user=user, server_row=server_row):
         vpn_api_request(
@@ -7391,8 +7278,8 @@ def set_wireguard_peer(
 def remove_wireguard_peer(
     peer_public_key: str,
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ) -> None:
     if use_vpn_api(user=user, server_row=server_row):
         vpn_api_request(
@@ -7416,8 +7303,8 @@ def generate_wireguard_bundle(
     user_id: int,
     client_ip: str,
     *,
-    user: sqlite3.Row | None = None,
-    server_row: sqlite3.Row | None = None,
+    user: DatabaseRow | None = None,
+    server_row: DatabaseRow | None = None,
 ):
     client_private_key, client_public_key, client_psk = wireguard_generate_keys(
         user=user,
@@ -7452,8 +7339,8 @@ def generate_wireguard_bundle(
 
 
 def ensure_user_vpn_ready(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
     *,
     force_new_ip: bool = False,
 ) -> dict[str, str | int]:
@@ -7563,9 +7450,9 @@ def ensure_user_vpn_ready(
 
 
 def ensure_admin_self_vpn_ready(
-    db: sqlite3.Connection,
-    admin_user: sqlite3.Row,
-) -> sqlite3.Row:
+    db: DatabaseConnection,
+    admin_user: DatabaseRow,
+) -> DatabaseRow:
     if row_get(admin_user, "role") != "admin":
         raise ValueError("仅管理员可使用自用 VPN 配置。")
 
@@ -7605,7 +7492,7 @@ def ensure_admin_self_vpn_ready(
     return db.execute("SELECT * FROM users WHERE id = ?", (admin_user["id"],)).fetchone()
 
 
-def admin_self_vpn_needs_prepare(admin_user: sqlite3.Row | None) -> bool:
+def admin_self_vpn_needs_prepare(admin_user: DatabaseRow | None) -> bool:
     if not admin_user or row_get(admin_user, "role") != "admin":
         return True
     return not all(
@@ -7619,7 +7506,7 @@ def admin_self_vpn_needs_prepare(admin_user: sqlite3.Row | None) -> bool:
     )
 
 
-def enforce_admin_unlimited_entitlement(db: sqlite3.Connection, admin_user_id: int) -> None:
+def enforce_admin_unlimited_entitlement(db: DatabaseConnection, admin_user_id: int) -> None:
     db.execute(
         """
         UPDATE users
@@ -7635,11 +7522,11 @@ def enforce_admin_unlimited_entitlement(db: sqlite3.Connection, admin_user_id: i
 
 
 def ensure_admin_self_vpn_profile(
-    db: sqlite3.Connection,
-    admin_user: sqlite3.Row,
+    db: DatabaseConnection,
+    admin_user: DatabaseRow,
     *,
     force_prepare: bool = False,
-) -> tuple[sqlite3.Row, bool]:
+) -> tuple[DatabaseRow, bool]:
     if row_get(admin_user, "role") != "admin":
         raise ValueError("仅管理员可使用自用 VPN 配置。")
 
@@ -7704,23 +7591,23 @@ def calculate_new_expiry_by_duration(
     return period_end.isoformat()
 
 
-def has_active_time_subscription(user: sqlite3.Row) -> bool:
+def has_active_time_subscription(user: DatabaseRow) -> bool:
     expires_at = parse_iso(row_get(user, "subscription_expires_at"))
     return bool(expires_at and expires_at >= utcnow())
 
 
-def has_active_traffic_subscription(user: sqlite3.Row) -> bool:
+def has_active_traffic_subscription(user: DatabaseRow) -> bool:
     quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
     used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
     return quota_bytes > 0 and used_bytes < quota_bytes
 
 
 def sync_user_traffic_usage(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
     *,
     current_total_bytes: int | None = None,
-) -> sqlite3.Row:
+) -> DatabaseRow:
     quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
     if quota_bytes <= 0:
         return user
@@ -7775,13 +7662,13 @@ def sync_user_traffic_usage(
     return user
 
 
-def is_subscription_active(user: sqlite3.Row) -> bool:
+def is_subscription_active(user: DatabaseRow) -> bool:
     if int(row_get(user, "wg_enabled", 0) or 0) != 1:
         return False
     return has_active_time_subscription(user) or has_active_traffic_subscription(user)
 
 
-def reconcile_expired_subscriptions(db: sqlite3.Connection) -> None:
+def reconcile_expired_subscriptions(db: DatabaseConnection) -> None:
     now = utcnow()
     rows = db.execute(
         """
@@ -7857,7 +7744,7 @@ def verify_webhook_signature(raw_body: bytes, signature_header: str) -> bool:
 
 
 def settle_order_paid(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     order_id: int,
     *,
     tx_hash: str | None = None,
@@ -8146,7 +8033,7 @@ def validate_captcha_input(scene: str, value: str) -> bool:
 
 
 def can_send_email_code(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     email: str,
     purpose: str,
 ) -> tuple[bool, str]:
@@ -8186,7 +8073,7 @@ def can_send_email_code(
 
 
 def create_email_verification_code(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     email: str,
     purpose: str,
@@ -8208,7 +8095,7 @@ def create_email_verification_code(
 
 
 def consume_email_verification_code(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     email: str,
     purpose: str,
@@ -8294,7 +8181,7 @@ def send_verification_email(
     purpose_label: str,
     code: str,
     *,
-    db: sqlite3.Connection | None = None,
+    db: DatabaseConnection | None = None,
 ) -> tuple[bool, str]:
     mail_server = resolve_runtime_mail_server_config(db)
     if not mail_server:
@@ -8369,7 +8256,7 @@ def send_verification_email(
     return True, "验证码已发送，请检查邮箱。"
 
 
-def expire_pending_orders(db: sqlite3.Connection) -> int:
+def expire_pending_orders(db: DatabaseConnection) -> int:
     now_iso = utcnow_iso()
     rows = db.execute(
         """
@@ -8394,7 +8281,7 @@ def expire_pending_orders(db: sqlite3.Connection) -> int:
     return len(rows)
 
 
-def cleanup_verification_records(db: sqlite3.Connection) -> None:
+def cleanup_verification_records(db: DatabaseConnection) -> None:
     now_iso = utcnow_iso()
     db.execute(
         """
@@ -8417,11 +8304,11 @@ def cleanup_verification_records(db: sqlite3.Connection) -> None:
 
 
 def rotate_user_wireguard_credentials(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
     *,
     force_new_ip: bool | None = None,
-) -> sqlite3.Row:
+) -> DatabaseRow:
     previous_server = None
     previous_server_id = row_get(user, "assigned_server_id")
     if previous_server_id is not None and str(previous_server_id).strip():
@@ -8501,10 +8388,10 @@ def rotate_user_wireguard_credentials(
 
 
 def persist_user_vpn_state(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
     vpn_data: dict[str, str | int],
-) -> sqlite3.Row:
+) -> DatabaseRow:
     wg_ingress_port, openvpn_ingress_port = ensure_user_ingress_ports(db, user)
     assigned_server_id = vpn_data.get("assigned_server_id")
     if assigned_server_id is None:
@@ -8542,8 +8429,8 @@ def persist_user_vpn_state(
 
 
 def apply_password_change(
-    db: sqlite3.Connection,
-    user: sqlite3.Row,
+    db: DatabaseConnection,
+    user: DatabaseRow,
     *,
     new_password: str,
     clear_force_change: bool = False,
@@ -8566,7 +8453,7 @@ def apply_password_change(
         rotate_user_wireguard_credentials(db, refreshed)
 
 
-def grant_new_user_welcome_entitlement(db: sqlite3.Connection, user_id: int) -> None:
+def grant_new_user_welcome_entitlement(db: DatabaseConnection, user_id: int) -> None:
     duration_months, traffic_gb = get_gift_settings(db)
     if duration_months <= 0 and traffic_gb <= 0:
         return
@@ -9617,7 +9504,7 @@ def admin_panel():
     return redirect(url_for("admin_home"))
 
 
-def load_admin_pending_orders(db: sqlite3.Connection):
+def load_admin_pending_orders(db: DatabaseConnection):
     return db.execute(
         """
         SELECT
@@ -9649,7 +9536,7 @@ def load_admin_pending_orders(db: sqlite3.Connection):
     ).fetchall()
 
 
-def load_admin_paid_orders(db: sqlite3.Connection):
+def load_admin_paid_orders(db: DatabaseConnection):
     return db.execute(
         """
         SELECT
@@ -9678,7 +9565,7 @@ def load_admin_paid_orders(db: sqlite3.Connection):
     ).fetchall()
 
 
-def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
+def load_admin_subscriptions(db: DatabaseConnection, email_query: str = ""):
     base_sql = """
         SELECT
             id,
@@ -9701,7 +9588,7 @@ def load_admin_subscriptions(db: sqlite3.Connection, email_query: str = ""):
 
 
 def load_expiring_subscriptions(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     days: int = 7,
     limit: int = 20,
@@ -9757,7 +9644,7 @@ def handshake_epoch_to_iso(epoch_seconds: int) -> str:
 
 
 def load_admin_online_users(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     online_window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
 ) -> tuple[list[dict], dict]:
@@ -9789,7 +9676,7 @@ def load_admin_online_users(
         ORDER BY id DESC
         """
     ).fetchall()
-    servers_by_id: dict[int, sqlite3.Row] = {}
+    servers_by_id: dict[int, DatabaseRow] = {}
     for server in servers:
         try:
             servers_by_id[int(server["id"])] = server
@@ -9918,7 +9805,7 @@ def load_admin_online_users(
     return online_users, summary
 
 
-def get_user_current_plan_display(db: sqlite3.Connection, user: sqlite3.Row) -> str:
+def get_user_current_plan_display(db: DatabaseConnection, user: DatabaseRow) -> str:
     row = db.execute(
         """
         SELECT
@@ -9950,7 +9837,7 @@ def get_user_current_plan_display(db: sqlite3.Connection, user: sqlite3.Row) -> 
     return "暂无生效套餐"
 
 
-def load_first_plan_for_onboarding(db: sqlite3.Connection) -> dict:
+def load_first_plan_for_onboarding(db: DatabaseConnection) -> dict:
     plan = db.execute(
         """
         SELECT
@@ -9998,7 +9885,7 @@ def load_first_plan_for_onboarding(db: sqlite3.Connection) -> dict:
 
 
 def upsert_first_plan_from_onboarding(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     plan_name: str,
     billing_mode: str,
@@ -10082,7 +9969,7 @@ def upsert_first_plan_from_onboarding(
 
 
 def upsert_primary_payment_method_from_onboarding(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     network: str,
     receive_address: str,
@@ -10127,7 +10014,7 @@ def upsert_primary_payment_method_from_onboarding(
 
 
 def create_server_record(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     *,
     server_name: str,
     server_region: str,
@@ -10175,7 +10062,7 @@ def create_server_record(
 
 
 def update_server_test_result(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     server_id: int,
     *,
     ok: bool,
@@ -10201,7 +10088,7 @@ def update_server_test_result(
 
 
 def update_server_deploy_result(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     server_id: int,
     *,
     ok: bool,
@@ -10241,7 +10128,7 @@ def update_server_deploy_result(
 
 
 def mark_server_deploying(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     server_id: int,
     *,
     message: str = "部署任务已启动，正在后台执行。",
@@ -11559,7 +11446,7 @@ def admin_settings():
 def parse_mail_server_form(
     form,
     *,
-    existing: sqlite3.Row | None = None,
+    existing: DatabaseRow | None = None,
 ) -> tuple[dict[str, int | str] | None, str]:
     server_name = (form.get("server_name", "") or "").strip()
     host = normalize_remote_host(form.get("host", ""))

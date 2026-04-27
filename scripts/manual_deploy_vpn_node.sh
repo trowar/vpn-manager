@@ -459,7 +459,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${APP_DIR}/docker/vpn
+WorkingDirectory=${APP_DIR}/vpn
 Environment=PATH=${PY_VENV_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=VPN_API_TOKEN=${VPN_API_TOKEN}
 ExecStart=${PY_VENV_DIR}/bin/gunicorn --workers 1 --bind 0.0.0.0:${VPN_API_PUBLIC_PORT} vpn_api:app
@@ -565,3 +565,4 @@ main() {
 }
 
 main "$@"
+
