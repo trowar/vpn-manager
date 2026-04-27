@@ -316,6 +316,86 @@ load_existing_settings_if_any() {
   if [ -n "${v}" ]; then WEB_PUBLIC_PORT="${v}"; fi
 }
 
+sync_env_from_local_vpn_runtime_if_present() {
+  local ss_file kcptun_file runtime_lines key value
+  ss_file="/etc/shadowsocks-libev/vpnmanager.json"
+  kcptun_file="/etc/kcptun/server.json"
+
+  if [ ! -f "$(env_path)" ]; then
+    return 0
+  fi
+  if [ ! -f "${ss_file}" ] && [ ! -f "${kcptun_file}" ]; then
+    return 0
+  fi
+
+  runtime_lines="$(
+    python3 - "${ss_file}" "${kcptun_file}" <<'PY'
+import json
+import os
+import re
+import sys
+
+ss_path = sys.argv[1]
+kcptun_path = sys.argv[2]
+
+def emit(key, value):
+    if value is None:
+        return
+    text = str(value).strip()
+    if not text:
+        return
+    print(f"{key}={text}")
+
+if os.path.isfile(ss_path):
+    try:
+        with open(ss_path, "r", encoding="utf-8") as fh:
+            ss = json.load(fh)
+        emit("SHADOWSOCKS_PASSWORD", ss.get("password"))
+        emit("SHADOWSOCKS_METHOD", ss.get("method"))
+        port = ss.get("server_port")
+        if isinstance(port, int) and 0 < port < 65536:
+            emit("SHADOWSOCKS_SERVER_PORT", port)
+    except Exception:
+        pass
+
+if os.path.isfile(kcptun_path):
+    try:
+        with open(kcptun_path, "r", encoding="utf-8") as fh:
+            kcptun = json.load(fh)
+        emit("KCPTUN_KEY", kcptun.get("key"))
+        listen = str(kcptun.get("listen", "")).strip()
+        match = re.search(r":([0-9]{1,5})$", listen)
+        if match:
+            port = int(match.group(1))
+            if 0 < port < 65536:
+                emit("KCPTUN_SERVER_PORT", port)
+        emit("KCPTUN_ENABLED", "1")
+    except Exception:
+        pass
+PY
+  )"
+
+  if [ -z "${runtime_lines}" ]; then
+    return 0
+  fi
+
+  log "Syncing .env with current local vpn runtime config"
+  while IFS='=' read -r key value; do
+    if [ -z "${key}" ]; then
+      continue
+    fi
+    upsert_env "${key}" "${value}"
+    case "${key}" in
+      SHADOWSOCKS_PASSWORD) SHADOWSOCKS_PASSWORD="${value}" ;;
+      SHADOWSOCKS_METHOD) SHADOWSOCKS_METHOD="${value}" ;;
+      SHADOWSOCKS_SERVER_PORT) OPENVPN_PUBLIC_PORT="${value}" ;;
+      KCPTUN_KEY) KCPTUN_KEY="${value}" ;;
+      KCPTUN_SERVER_PORT) WG_PUBLIC_PORT="${value}" ;;
+      KCPTUN_ENABLED) KCPTUN_ENABLED="${value}" ;;
+    esac
+  done <<< "${runtime_lines}"
+}
+
 require_upgrade_env_integrity() {
   local file backend dsn
   file="$(env_path)"
@@ -900,12 +980,15 @@ main() {
   else
     prepare_env_upgrade
   fi
+  sync_env_from_local_vpn_runtime_if_present
 
   install_web_runtime
   run_upgrade_schema_migration
   write_web_systemd_unit
   start_or_restart_web_service
   deploy_local_vpn_server
+  sync_env_from_local_vpn_runtime_if_present
+  start_or_restart_web_service
   register_local_vpn_server_record
   verify_components
   print_summary
