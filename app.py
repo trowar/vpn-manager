@@ -13232,6 +13232,138 @@ def admin_create_payment_method():
     return redirect_admin_payment_method_page()
 
 
+@app.route("/admin/payment-methods/save", methods=["POST"])
+@login_required
+@admin_required
+def admin_save_payment_method():
+    db = get_db()
+    method_id_raw = (request.form.get("method_id", "") or "").strip()
+    method_id: int | None = None
+    if method_id_raw:
+        try:
+            method_id = int(method_id_raw)
+        except Exception:
+            method_id = None
+
+    method_code = normalize_payment_method(request.form.get("method_code", PAYMENT_METHOD_USDT))
+    method_name = request.form.get("method_name", "").strip()
+    network = request.form.get("network", "TRC20").strip().upper()
+    receive_address = request.form.get("receive_address", "").strip()
+    sort_order_raw = request.form.get("sort_order", "").strip()
+
+    if method_code != PAYMENT_METHOD_USDT:
+        flash("当前仅支持 USDT 付款方式。", "error")
+        return redirect_admin_payment_method_page()
+    if network not in USDT_NETWORK_OPTIONS:
+        flash("付款网络无效。", "error")
+        return redirect_admin_payment_method_page()
+    if not receive_address:
+        flash("收款地址不能为空。", "error")
+        return redirect_admin_payment_method_page()
+
+    if not method_name:
+        method_name = f"{payment_method_label(method_code)} {network}"
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw else 100
+    except Exception:
+        sort_order = 100
+    if sort_order < 0:
+        sort_order = 0
+    now_iso = utcnow_iso()
+
+    if method_id is not None:
+        existing = db.execute(
+            """
+            SELECT id
+            FROM payment_methods
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (method_id,),
+        ).fetchone()
+        if existing:
+            db.execute(
+                """
+                UPDATE payment_methods
+                SET method_code = ?,
+                    method_name = ?,
+                    network = ?,
+                    receive_address = ?,
+                    sort_order = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    method_code,
+                    method_name,
+                    network,
+                    receive_address,
+                    sort_order,
+                    now_iso,
+                    method_id,
+                ),
+            )
+            sync_legacy_payment_settings_with_default_method(db)
+            db.commit()
+            flash("付款方式已更新。", "success")
+            return redirect_admin_payment_method_page()
+
+    placeholder = db.execute(
+        """
+        SELECT id
+        FROM payment_methods
+        WHERE method_code = ?
+          AND network = ?
+          AND trim(COALESCE(receive_address, '')) = ''
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """,
+        (method_code, network),
+    ).fetchone()
+    if placeholder:
+        db.execute(
+            """
+            UPDATE payment_methods
+            SET method_name = ?,
+                receive_address = ?,
+                is_active = 1,
+                sort_order = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                method_name,
+                receive_address,
+                sort_order,
+                now_iso,
+                int(placeholder["id"]),
+            ),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO payment_methods (
+                method_code, method_name, network, receive_address,
+                is_active, sort_order, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+            """,
+            (
+                method_code,
+                method_name,
+                network,
+                receive_address,
+                sort_order,
+                now_iso,
+                now_iso,
+            ),
+        )
+    sync_legacy_payment_settings_with_default_method(db)
+    db.commit()
+    flash("付款方式已保存。", "success")
+    return redirect_admin_payment_method_page()
+
+
 @app.route("/admin/payment-methods/<int:method_id>/toggle", methods=["POST"])
 @login_required
 @admin_required

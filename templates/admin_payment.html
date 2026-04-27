@@ -41,7 +41,7 @@
                   <button
                     type="button"
                     class="btn secondary open-payment-method-inline-edit"
-                    data-update-url="{{ url_for('admin_update_payment_method', method_id=method['id']) }}"
+                    data-method-id="{{ method['id'] }}"
                     data-method-code="{{ method['method_code'] }}"
                     data-method-name="{{ method['method_name'] }}"
                     data-network="{{ method['network'] }}"
@@ -216,8 +216,9 @@
       <h4>添加支付方式</h4>
       <button type="button" class="btn secondary" id="close-payment-method-create-modal">关闭</button>
     </div>
-    <form method="post" action="{{ url_for('admin_create_payment_method') }}" class="form">
+    <form method="post" action="{{ url_for('admin_save_payment_method') }}" class="form">
       <input type="hidden" name="redirect_to" value="payment">
+      <input type="hidden" name="method_id" value="">
       <label>支付方式
         <select name="method_code" required>
           <option value="usdt">USDT</option>
@@ -250,8 +251,9 @@
       <h4>编辑支付方式</h4>
       <button type="button" class="btn secondary" id="close-payment-method-inline-edit-modal">关闭</button>
     </div>
-    <form method="post" id="payment-method-inline-edit-form" class="form">
+    <form method="post" id="payment-method-inline-edit-form" class="form" action="{{ url_for('admin_save_payment_method') }}">
       <input type="hidden" name="redirect_to" value="payment">
+      <input type="hidden" name="method_id" id="payment-method-inline-edit-id" value="">
       <input type="hidden" name="method_code" id="payment-method-inline-edit-code" value="usdt">
       <label>显示名称
         <input type="text" name="method_name" id="payment-method-inline-edit-name" required>
@@ -387,6 +389,7 @@
     var paymentInlineEditModal = document.getElementById("payment-method-inline-edit-modal");
     var paymentInlineEditCloseBtn = document.getElementById("close-payment-method-inline-edit-modal");
     var paymentInlineEditForm = document.getElementById("payment-method-inline-edit-form");
+    var paymentInlineEditId = document.getElementById("payment-method-inline-edit-id");
     var paymentInlineEditCode = document.getElementById("payment-method-inline-edit-code");
     var paymentInlineEditName = document.getElementById("payment-method-inline-edit-name");
     var paymentInlineEditNetwork = document.getElementById("payment-method-inline-edit-network");
@@ -511,7 +514,9 @@
         if (!paymentInlineEditForm) {
           return;
         }
-        paymentInlineEditForm.action = btn.dataset.updateUrl || "";
+        if (paymentInlineEditId) {
+          paymentInlineEditId.value = btn.dataset.methodId || "";
+        }
         if (paymentInlineEditCode) {
           paymentInlineEditCode.value = btn.dataset.methodCode || "usdt";
         }
