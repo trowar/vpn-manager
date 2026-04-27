@@ -2190,13 +2190,26 @@ PY
         log \"git pull --ff-only origin $TARGET_BRANCH\"
         git pull --ff-only origin \"$TARGET_BRANCH\"
         log \"bash v1/scripts/install.sh (upgrade mode)\"
-        SKIP_APT_ON_UPGRADE=1 \
-        APP_DIR=\"$PROJECT_DIR\" \
-        BRANCH=\"$TARGET_BRANCH\" \
-        INSTALL_LOCAL_VPN_SERVER=1 \
-        UPGRADE_INCLUDE_VPN_SERVER=0 \
-        DISABLE_SYSTEMD_RESOLVED=1 \
-        bash \"$PROJECT_DIR/v1/scripts/install.sh\"
+        INSTALL_TMP_LOG=\"$(mktemp)\"
+        if ! (
+          SKIP_APT_ON_UPGRADE=1 \
+          APP_DIR=\"$PROJECT_DIR\" \
+          BRANCH=\"$TARGET_BRANCH\" \
+          INSTALL_LOCAL_VPN_SERVER=1 \
+          UPGRADE_INCLUDE_VPN_SERVER=0 \
+          DISABLE_SYSTEMD_RESOLVED=1 \
+          bash \"$PROJECT_DIR/v1/scripts/install.sh\"
+        ) >\"$INSTALL_TMP_LOG\" 2>&1; then
+          while IFS= read -r _line; do
+            log \"[install] $_line\"
+          done < \"$INSTALL_TMP_LOG\"
+          rm -f \"$INSTALL_TMP_LOG\"
+          exit 1
+        fi
+        while IFS= read -r _line; do
+          log \"[install] $_line\"
+        done < \"$INSTALL_TMP_LOG\"
+        rm -f \"$INSTALL_TMP_LOG\"
         if command -v systemctl >/dev/null 2>&1; then
           log \"systemctl restart $WEB_SERVICE\"
           systemctl restart \"$WEB_SERVICE\" || true
