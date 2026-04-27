@@ -15,9 +15,8 @@ wget -O - https://raw.githubusercontent.com/trowar/vpn-manager/main/v1/scripts/i
 - 用户注册、登录、找回密码、邮箱验证码、图片验证码
 - 套餐管理、订单管理、订阅有效期管理
 - 服务器管理：新增服务器、SSH 测试、一键部署、部署日志查看
-- OpenVPN 与 WireGuard 协议支持（可在系统中控制开关）
-- OpenVPN 客户端免账号密码导入（证书身份认证）
-- 服务端按订阅有效期控制 OpenVPN 在线会话：到期自动踢下线并拒绝重连，续期后恢复
-- 配置文件下载与公网入口下发
+- Shadowsocks + kcptun 协议支持（默认启用，提供加速与抗抖动链路）
+- 用户与管理员可下载 Shadowsocks JSON 配置、kcptun JSON 配置及二维码导入链接
+- 配置文件下载与公网入口下发（按默认节点动态生成）
 - Web 与 VPN 服务分离部署，支持节点化扩展
 - 系统升级能力：版本对比后仅对更高版本执行升级

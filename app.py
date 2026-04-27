@@ -152,17 +152,62 @@ WIREGUARD_DOWNLOAD_LINKS = {
     "android_apk": "https://download.wireguard.com/android-client/",
     "official": "https://www.wireguard.com/install/",
 }
-OPENVPN_ENABLED = os.environ.get("OPENVPN_ENABLED", "1").strip().lower() in (
+OPENVPN_ENABLED = os.environ.get("OPENVPN_ENABLED", "0").strip().lower() in (
     "1",
     "true",
     "yes",
     "on",
 )
-WIREGUARD_ENABLED = os.environ.get("VPN_ENABLE_WIREGUARD", "1").strip().lower() in (
+WIREGUARD_ENABLED = os.environ.get("VPN_ENABLE_WIREGUARD", "0").strip().lower() in (
     "1",
     "true",
     "yes",
     "on",
+)
+SHADOWSOCKS_ENABLED = os.environ.get("SHADOWSOCKS_ENABLED", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+KCPTUN_ENABLED = os.environ.get("KCPTUN_ENABLED", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+SHADOWSOCKS_METHOD = (
+    os.environ.get("SHADOWSOCKS_METHOD", "chacha20-ietf-poly1305").strip()
+    or "chacha20-ietf-poly1305"
+)
+SHADOWSOCKS_PASSWORD = (
+    os.environ.get("SHADOWSOCKS_PASSWORD", "").strip()
+    or hashlib.sha256(
+        (os.environ.get("PORTAL_SECRET_KEY", "change-this-secret") + ":shadowsocks").encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+)
+SHADOWSOCKS_ENDPOINT_HOST = os.environ.get("SHADOWSOCKS_ENDPOINT_HOST", "").strip()
+SHADOWSOCKS_SERVER_PORT_RAW = os.environ.get("SHADOWSOCKS_SERVER_PORT", "8388").strip()
+KCPTUN_SERVER_PORT_RAW = os.environ.get("KCPTUN_SERVER_PORT", "29900").strip()
+try:
+    SHADOWSOCKS_SERVER_PORT = int(SHADOWSOCKS_SERVER_PORT_RAW)
+except ValueError:
+    SHADOWSOCKS_SERVER_PORT = 8388
+if SHADOWSOCKS_SERVER_PORT <= 0 or SHADOWSOCKS_SERVER_PORT > 65535:
+    SHADOWSOCKS_SERVER_PORT = 8388
+try:
+    KCPTUN_SERVER_PORT = int(KCPTUN_SERVER_PORT_RAW)
+except ValueError:
+    KCPTUN_SERVER_PORT = 29900
+if KCPTUN_SERVER_PORT <= 0 or KCPTUN_SERVER_PORT > 65535:
+    KCPTUN_SERVER_PORT = 29900
+KCPTUN_KEY = (
+    os.environ.get("KCPTUN_KEY", "").strip()
+    or hashlib.sha256(
+        (os.environ.get("PORTAL_SECRET_KEY", "change-this-secret") + ":kcptun").encode("utf-8")
+    ).hexdigest()[:24]
 )
 OPENVPN_ENDPOINT_HOST = os.environ.get("OPENVPN_ENDPOINT_HOST", "").strip()
 OPENVPN_ENDPOINT_PORT_RAW = os.environ.get("OPENVPN_ENDPOINT_PORT", "1194").strip()
@@ -393,8 +438,8 @@ ONBOARDING_SETTINGS_DEFAULTS = {
     ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD: "",
     ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY: "",
 }
-SERVER_DEPLOY_DEFAULT_WG_PORT = 51820
-SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 1194
+SERVER_DEPLOY_DEFAULT_WG_PORT = 29900
+SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = 8388
 SERVER_DEPLOY_DEFAULT_DNS_PORT = 53
 SERVER_DEPLOY_DEFAULT_VPN_API_PORT = 8081
 PRD_BLOCKED_ADMIN_ENDPOINT_MARKERS = ("onboarding", "cloudflare", "payment_method")
@@ -1214,7 +1259,7 @@ def ensure_default_system_settings(db: sqlite3.Connection) -> None:
         SETTING_TELEGRAM_CONTACT: "",
         SETTING_SITE_TITLE: "新世界发展科技有限公司边缘节点网络管理系统",
         SETTING_WIREGUARD_OPEN: "0",
-        SETTING_OPENVPN_OPEN: "1",
+        SETTING_OPENVPN_OPEN: "0",
         SETTING_SYSTEM_UPGRADE_STATUS: "idle",
         SETTING_SYSTEM_UPGRADE_SUMMARY: "",
         SETTING_SYSTEM_UPGRADE_STARTED_AT: "",
@@ -1748,7 +1793,7 @@ def load_system_settings(db: sqlite3.Connection) -> dict[str, int | bool | str]:
         site_title = default_site_title
         upsert_app_setting(db, SETTING_SITE_TITLE, default_site_title)
     wireguard_open_raw = get_app_setting(db, SETTING_WIREGUARD_OPEN, "0")
-    openvpn_open_raw = get_app_setting(db, SETTING_OPENVPN_OPEN, "1")
+    openvpn_open_raw = get_app_setting(db, SETTING_OPENVPN_OPEN, "0")
     order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
     return {
         "registration_open": parse_bool_setting(registration_open_raw, True),
@@ -4941,17 +4986,13 @@ def build_vpn_node_deploy_script(
         export REPO_URL="https://github.com/trowar/vpn-manager.git"
         export BRANCH="main"
         export DEPLOY_SKIP_OS_UPGRADE={"1" if skip_os_upgrade else "0"}
-        export WG_PUBLIC_PORT="{wg_port}"
-        export OPENVPN_PUBLIC_PORT="{openvpn_port}"
-        export DNS_PUBLIC_PORT="{dns_port}"
+        export KCPTUN_SERVER_PORT="{wg_port}"
+        export SHADOWSOCKS_SERVER_PORT="{openvpn_port}"
+        export SHADOWSOCKS_METHOD="{SHADOWSOCKS_METHOD}"
+        export SHADOWSOCKS_PASSWORD="{SHADOWSOCKS_PASSWORD}"
+        export KCPTUN_KEY="{KCPTUN_KEY}"
         export VPN_API_PUBLIC_PORT="{SERVER_DEPLOY_DEFAULT_VPN_API_PORT}"
         export VPN_API_TOKEN="{vpn_api_token}"
-        export WG_PRIVATE_KEY_B64='{wg_private_key_b64}'
-        export WG_PUBLIC_KEY_B64='{wg_public_key_b64}'
-        export OPENVPN_CA_CERT_B64='{openvpn_ca_cert_b64}'
-        export OPENVPN_SERVER_CERT_B64='{openvpn_server_cert_b64}'
-        export OPENVPN_SERVER_KEY_B64='{openvpn_server_key_b64}'
-        export OPENVPN_TLS_CRYPT_KEY_B64='{openvpn_tls_crypt_key_b64}'
         """
     ).strip()
     return f"{bootstrap}\n\n{manual_script.strip()}\n"
@@ -6282,6 +6323,8 @@ def inject_user():
         "usdt_network_options": USDT_NETWORK_OPTIONS,
         "wireguard_enabled": bool(WIREGUARD_ENABLED and system_settings["wireguard_open"]),
         "openvpn_enabled": bool(OPENVPN_ENABLED and system_settings["openvpn_open"]),
+        "shadowsocks_enabled": bool(SHADOWSOCKS_ENABLED),
+        "kcptun_enabled": bool(KCPTUN_ENABLED),
         "registration_open": bool(system_settings["registration_open"]),
         "telegram_contact": str(system_settings["telegram_contact"]),
         "site_title": str(system_settings["site_title"]),
@@ -6940,6 +6983,130 @@ def build_user_wireguard_config(
         server_row=target_server,
     )
     return config_text, normalized_mode
+
+
+def get_runtime_server_for_account(user: sqlite3.Row | None) -> sqlite3.Row | None:
+    if not user:
+        return None
+    try:
+        db = get_db()
+        return get_persisted_runtime_server_for_account(db, user)
+    except Exception:
+        return None
+
+
+def resolve_shadowsocks_endpoint_host(
+    *,
+    user: sqlite3.Row | None = None,
+    server_row: sqlite3.Row | None = None,
+) -> str:
+    def pick_host(candidate: str | None) -> str:
+        host = host_without_optional_port(candidate)
+        return host.strip() if host else ""
+
+    runtime_server = server_row or get_runtime_server_for_account(user)
+    if runtime_server is not None:
+        host = pick_host(row_get(runtime_server, "domain", ""))
+        if host:
+            return host
+        host = pick_host(row_get(runtime_server, "host", ""))
+        if host:
+            return host
+
+    for candidate in (
+        SHADOWSOCKS_ENDPOINT_HOST,
+        OPENVPN_ENDPOINT_HOST,
+        WG_ENDPOINT,
+    ):
+        host = pick_host(candidate)
+        if host:
+            return host
+
+    try:
+        host = pick_host(request.host)
+        if host:
+            return host
+    except Exception:
+        pass
+    return ""
+
+
+def derive_user_shadowsocks_password(user: sqlite3.Row) -> str:
+    _ = user
+    return SHADOWSOCKS_PASSWORD
+
+
+def build_user_shadowsocks_config(
+    user: sqlite3.Row,
+    *,
+    server_row: sqlite3.Row | None = None,
+) -> str:
+    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
+    if not host:
+        raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
+    config_obj = {
+        "server": host,
+        "server_port": SHADOWSOCKS_SERVER_PORT,
+        "password": derive_user_shadowsocks_password(user),
+        "method": SHADOWSOCKS_METHOD,
+        "mode": "tcp_and_udp",
+        "timeout": 300,
+    }
+    return json.dumps(config_obj, ensure_ascii=False, indent=2) + "\n"
+
+
+def build_user_kcptun_config(
+    user: sqlite3.Row,
+    *,
+    server_row: sqlite3.Row | None = None,
+) -> str:
+    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
+    if not host:
+        raise RuntimeError("未找到可用的 kcptun 节点地址。")
+    config_obj = {
+        "remoteaddr": f"{host}:{KCPTUN_SERVER_PORT}",
+        "localaddr": "127.0.0.1:12948",
+        "key": KCPTUN_KEY,
+        "crypt": "aes",
+        "mode": "fast3",
+        "conn": 1,
+        "autoexpire": 0,
+        "mtu": 1350,
+        "sndwnd": 256,
+        "rcvwnd": 512,
+        "datashard": 10,
+        "parityshard": 3,
+        "dscp": 0,
+        "nocomp": False,
+        "acknodelay": True,
+        "nodelay": 1,
+        "interval": 20,
+        "resend": 2,
+        "nc": 1,
+        "sockbuf": 4194304,
+        "smuxver": 1,
+        "smuxbuf": 4194304,
+        "streambuf": 2097152,
+        "keepalive": 10,
+    }
+    return json.dumps(config_obj, ensure_ascii=False, indent=2) + "\n"
+
+
+def build_user_shadowsocks_uri(
+    user: sqlite3.Row,
+    *,
+    server_row: sqlite3.Row | None = None,
+) -> str:
+    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
+    if not host:
+        raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
+    user_label = (row_get(user, "email", "") or row_get(user, "username", "") or "vpn-user").strip()
+    raw_auth = f"{SHADOWSOCKS_METHOD}:{derive_user_shadowsocks_password(user)}"
+    auth = base64.urlsafe_b64encode(raw_auth.encode("utf-8")).decode("ascii").rstrip("=")
+    return (
+        f"ss://{auth}@{host}:{SHADOWSOCKS_SERVER_PORT}"
+        f"#{urllib_parse.quote(user_label, safe='')}"
+    )
 
 
 def set_wireguard_peer(
@@ -8811,33 +8978,7 @@ def dashboard_regenerate_config():
     if user["role"] == "admin":
         flash("管理员请在管理员配置页操作。", "error")
         return redirect(url_for("admin_configs"))
-    if not is_wireguard_open():
-        flash("WireGuard 当前已关闭。", "error")
-        return redirect(url_for("dashboard_config"))
-
-    db = get_db()
-    reconcile_expired_subscriptions(db)
-    latest_user = db.execute(
-        "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
-        (user["id"],),
-    ).fetchone()
-    if not latest_user:
-        flash("用户不存在。", "error")
-        return redirect(url_for("dashboard_config"))
-
-    if not is_subscription_active(latest_user):
-        flash("当前订阅未生效或已过期，暂无法重新生成配置。", "error")
-        return redirect(url_for("dashboard_config"))
-
-    try:
-        rotate_user_wireguard_credentials(db, latest_user)
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        flash(f"重新生成配置失败：{exc}", "error")
-        return redirect(url_for("dashboard_config"))
-
-    flash("WireGuard 配置已重新生成。请删除旧隧道并导入新配置后再连接。", "success")
+    flash("当前使用 Shadowsocks + kcptun，配置为按用户动态生成，无需手动重建。", "success")
     return redirect(url_for("dashboard_config"))
 
 
@@ -11039,20 +11180,10 @@ def admin_configs():
         flash("管理员账户不存在。", "error")
         return redirect(url_for("admin_home"))
 
-    admin_vpn_ready = False
-    admin_vpn_status_text = "未生成"
+    admin_vpn_ready = bool(SHADOWSOCKS_ENABLED)
+    admin_vpn_status_text = "已就绪（Shadowsocks + kcptun）" if SHADOWSOCKS_ENABLED else "未启用"
     admin_vpn_error = ""
     endpoint_display = "-"
-    try:
-        admin, prepared_now = ensure_admin_self_vpn_profile(db, admin)
-        # Validate default global conf can be rendered.
-        build_user_wireguard_config(admin, profile_mode=WG_PROFILE_GLOBAL)
-        admin_vpn_ready = True
-        admin_vpn_status_text = "已自动生成（无限期）" if prepared_now else "已就绪（无限期）"
-    except Exception as exc:
-        admin_vpn_ready = False
-        admin_vpn_status_text = "未生成"
-        admin_vpn_error = str(exc)
 
     target_server = choose_runtime_server_for_admin(db, admin)
     target_server_name = "-"
@@ -11066,7 +11197,7 @@ def admin_configs():
         target_server_host = (row_get(target_server, "host", "") or "").strip() or "-"
         if admin_vpn_ready:
             endpoint_display = (
-                get_wireguard_endpoint_for_clients(user=admin, server_row=target_server) or "-"
+                resolve_shadowsocks_endpoint_host(user=admin, server_row=target_server) or "-"
             ).strip() or "-"
 
     available_servers = load_user_selectable_servers(db, admin)
@@ -11133,26 +11264,12 @@ def admin_set_default_server():
     upsert_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, str(server_id))
     db.commit()
 
-    admin = db.execute(
-        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
-        (int(admin["id"]),),
-    ).fetchone()
-
-    try:
-        admin, _ = ensure_admin_self_vpn_profile(db, admin, force_prepare=True)
-        build_user_wireguard_config(admin, profile_mode=WG_PROFILE_GLOBAL)
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        flash(f"默认节点已切换，但配置预生成失败：{exc}", "error")
-        return redirect(url_for("admin_configs"))
-
     region = normalize_server_region(row_get(target_server, "server_region", ""))
     name = (row_get(target_server, "server_name", "") or "").strip() or (
         row_get(target_server, "host", "") or ""
     ).strip()
     label = f"{region} / {name}" if region else name
-    flash(f"管理员默认节点已更新为：{label}", "success")
+    flash(f"管理员默认节点已更新为：{label}（Shadowsocks/kcptun 配置已按新节点生效）", "success")
     return redirect(url_for("admin_configs"))
 
 
@@ -12041,9 +12158,6 @@ def admin_update_system_settings():
     except Exception:
         flash("系统设置参数无效。", "error")
         return redirect(url_for("admin_settings"))
-    if not wireguard_open and not openvpn_open:
-        flash("WireGuard 和 OpenVPN 至少需要保留一个开启。", "error")
-        return redirect(url_for("admin_settings"))
     if wireguard_open and not WIREGUARD_ENABLED:
         flash("当前环境未启用 WireGuard 服务，无法开启。", "error")
         return redirect(url_for("admin_settings"))
@@ -12066,16 +12180,17 @@ def admin_update_system_settings():
     upsert_app_setting(db, SETTING_SITE_TITLE, site_title[:120])
     upsert_app_setting(db, SETTING_WIREGUARD_OPEN, "1" if wireguard_open else "0")
     upsert_app_setting(db, SETTING_OPENVPN_OPEN, "1" if openvpn_open else "0")
-    try:
-        sync_runtime_protocol_state(
-            db,
-            wireguard_open=wireguard_open,
-            openvpn_open=openvpn_open,
-        )
-    except Exception as exc:
-        db.rollback()
-        flash(f"协议状态同步到 VPN 节点失败：{exc}", "error")
-        return redirect(url_for("admin_settings"))
+    if wireguard_open or openvpn_open:
+        try:
+            sync_runtime_protocol_state(
+                db,
+                wireguard_open=wireguard_open,
+                openvpn_open=openvpn_open,
+            )
+        except Exception as exc:
+            db.rollback()
+            flash(f"协议状态同步到 VPN 节点失败：{exc}", "error")
+            return redirect(url_for("admin_settings"))
     db.commit()
     flash("系统设置已更新。", "success")
     return redirect(url_for("admin_settings"))
@@ -12998,8 +13113,8 @@ def download_config():
     if user["role"] != "user":
         flash("管理员无需下载客户端配置。", "error")
         return redirect(url_for("dashboard"))
-    if not is_wireguard_open():
-        flash("WireGuard 当前已关闭。", "error")
+    if not SHADOWSOCKS_ENABLED:
+        flash("Shadowsocks 当前未启用。", "error")
         return redirect(url_for("dashboard"))
 
     db = get_db()
@@ -13010,30 +13125,23 @@ def download_config():
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
-    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
     try:
-        vpn_data = ensure_user_vpn_ready(db, user)
-        user = persist_user_vpn_state(db, user, vpn_data)
-        db.commit()
-        config_text, normalized_mode = build_user_wireguard_config(
-            user,
-            profile_mode=requested_mode,
-        )
+        config_text = build_user_shadowsocks_config(user)
     except Exception as exc:
-        flash(f"WireGuard 配置生成失败：{exc}", "error")
+        flash(f"Shadowsocks 配置生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"wg-{safe_name(user['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.conf"
+    filename = f"ss-{safe_name(user['username'])}.json"
     headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="text/plain")
+    return Response(config_text, headers=headers, mimetype="application/json")
 
 
 @app.route("/admin/download/config")
 @login_required
 @admin_required
 def admin_download_config():
-    if not is_wireguard_open():
-        flash("WireGuard 当前已关闭。", "error")
+    if not SHADOWSOCKS_ENABLED:
+        flash("Shadowsocks 当前未启用。", "error")
         return redirect(url_for("admin_home"))
     db = get_db()
     admin = db.execute(
@@ -13044,97 +13152,87 @@ def admin_download_config():
         flash("管理员账号不存在。", "error")
         return redirect(url_for("admin_home"))
 
-    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
     try:
-        admin, _ = ensure_admin_self_vpn_profile(db, admin, force_prepare=True)
-        config_text, normalized_mode = build_user_wireguard_config(
-            admin,
-            profile_mode=requested_mode,
-        )
+        config_text = build_user_shadowsocks_config(admin)
     except Exception as exc:
-        flash(f"管理员 WireGuard 配置生成失败：{exc}", "error")
+        flash(f"管理员 Shadowsocks 配置生成失败：{exc}", "error")
         return redirect(url_for("admin_home"))
 
-    filename = f"wg-admin-{safe_name(admin['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.conf"
+    filename = f"ss-admin-{safe_name(admin['username'])}.json"
     headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="text/plain")
+    return Response(config_text, headers=headers, mimetype="application/json")
 
 
-@app.route("/download/openvpn")
+@app.route("/download/kcptun")
 @login_required
-def download_openvpn_config():
+def download_kcptun_config():
     user = current_user()
     if user["role"] != "user":
         flash("管理员无需下载客户端配置。", "error")
         return redirect(url_for("dashboard"))
-    if not is_openvpn_open():
-        flash("OpenVPN 当前已关闭。", "error")
+    if not KCPTUN_ENABLED:
+        flash("kcptun 当前未启用。", "error")
         return redirect(url_for("dashboard"))
 
     db = get_db()
     reconcile_expired_subscriptions(db)
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
-
     if not is_subscription_active(user):
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
-    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
-    normalized_mode = normalize_wg_profile_mode(requested_mode)
     try:
-        vpn_data = ensure_user_vpn_ready(db, user)
-        user = persist_user_vpn_state(db, user, vpn_data)
-        user = ensure_user_openvpn_client_identity(db, user)
-        db.commit()
-        config_text = build_openvpn_client_config(
-            user["username"],
-            profile_mode=normalized_mode,
-            user=user,
-        )
+        config_text = build_user_kcptun_config(user)
     except Exception as exc:
-        flash(f"OpenVPN 配置生成失败：{exc}", "error")
+        flash(f"kcptun 配置生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"ovpn-{safe_name(user['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.ovpn"
+    filename = f"kcptun-{safe_name(user['username'])}.json"
     headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="text/plain")
+    return Response(config_text, headers=headers, mimetype="application/json")
+
+
+@app.route("/admin/download/kcptun")
+@login_required
+@admin_required
+def admin_download_kcptun_config():
+    if not KCPTUN_ENABLED:
+        flash("kcptun 当前未启用。", "error")
+        return redirect(url_for("admin_home"))
+
+    db = get_db()
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    if not admin:
+        flash("管理员账号不存在。", "error")
+        return redirect(url_for("admin_home"))
+
+    try:
+        config_text = build_user_kcptun_config(admin)
+    except Exception as exc:
+        flash(f"管理员 kcptun 配置生成失败：{exc}", "error")
+        return redirect(url_for("admin_home"))
+
+    filename = f"kcptun-admin-{safe_name(admin['username'])}.json"
+    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    return Response(config_text, headers=headers, mimetype="application/json")
+
+
+@app.route("/download/openvpn")
+@login_required
+def download_openvpn_config():
+    flash("系统已切换为 Shadowsocks + kcptun，OpenVPN 下载入口已停用。", "error")
+    return redirect(url_for("dashboard_config"))
 
 
 @app.route("/admin/download/openvpn")
 @login_required
 @admin_required
 def admin_download_openvpn_config():
-    if not is_openvpn_open():
-        flash("管理员尚未启用 OpenVPN 支持。", "error")
-        return redirect(url_for("admin_home"))
-
-    db = get_db()
-    admin = db.execute(
-        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
-        (current_user()["id"],),
-    ).fetchone()
-    if not admin:
-        flash("管理员账号不存在。", "error")
-        return redirect(url_for("admin_home"))
-
-    requested_mode = request.args.get("mode", WG_PROFILE_GLOBAL)
-    normalized_mode = normalize_wg_profile_mode(requested_mode)
-    try:
-        admin, _ = ensure_admin_self_vpn_profile(db, admin, force_prepare=True)
-        admin = ensure_user_openvpn_client_identity(db, admin)
-        db.commit()
-        config_text = build_openvpn_client_config(
-            admin["username"],
-            profile_mode=normalized_mode,
-            user=admin,
-        )
-    except Exception as exc:
-        flash(f"管理员 OpenVPN 配置生成失败：{exc}", "error")
-        return redirect(url_for("admin_home"))
-
-    filename = f"ovpn-admin-{safe_name(admin['username'])}-{wireguard_profile_filename_suffix(normalized_mode)}.ovpn"
-    headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
-    return Response(config_text, headers=headers, mimetype="text/plain")
+    flash("系统已切换为 Shadowsocks + kcptun，OpenVPN 下载入口已停用。", "error")
+    return redirect(url_for("admin_configs"))
 
 
 def render_qr_png(payload: str) -> bytes:
@@ -13192,9 +13290,8 @@ def render_qr_png(payload: str) -> bytes:
 @login_required
 @admin_required
 def admin_download_qr():
-    requested_mode = normalize_wg_profile_mode(request.args.get("mode", WG_PROFILE_GLOBAL))
-    if not is_wireguard_open():
-        flash("WireGuard 当前已关闭。", "error")
+    if not SHADOWSOCKS_ENABLED:
+        flash("Shadowsocks 当前未启用。", "error")
         return redirect(url_for("admin_home"))
 
     db = get_db()
@@ -13207,11 +13304,7 @@ def admin_download_qr():
         return redirect(url_for("admin_home"))
 
     try:
-        admin, _ = ensure_admin_self_vpn_profile(db, admin)
-        config_text, _ = build_user_wireguard_config(
-            admin,
-            profile_mode=requested_mode,
-        )
+        config_text = build_user_shadowsocks_uri(admin)
     except Exception as exc:
         flash(f"管理员二维码生成失败：{exc}", "error")
         return redirect(url_for("admin_home"))
@@ -13223,7 +13316,7 @@ def admin_download_qr():
         flash(f"管理员二维码生成失败：{msg}", "error")
         return redirect(url_for("admin_home"))
 
-    filename = f"wg-admin-{safe_name(admin['username'])}-{wireguard_profile_filename_suffix(requested_mode)}.png"
+    filename = f"ss-admin-{safe_name(admin['username'])}.png"
     headers = {"Content-Disposition": f'inline; filename=\"{filename}\"'}
     return Response(qr_png, headers=headers, mimetype="image/png")
 
@@ -13236,11 +13329,9 @@ def download_qr():
     if user["role"] != "user":
         flash("管理员无需下载客户端配置。", "error")
         return redirect(url_for("dashboard"))
-    if not is_wireguard_open():
-        flash("WireGuard 当前已关闭。", "error")
+    if not SHADOWSOCKS_ENABLED:
+        flash("Shadowsocks 当前未启用。", "error")
         return redirect(url_for("dashboard"))
-
-    requested_mode = normalize_wg_profile_mode(request.args.get("mode", WG_PROFILE_GLOBAL))
 
     db = get_db()
     reconcile_expired_subscriptions(db)
@@ -13250,10 +13341,7 @@ def download_qr():
         return redirect(url_for("dashboard"))
 
     try:
-        config_text, _ = build_user_wireguard_config(
-            user,
-            profile_mode=requested_mode,
-        )
+        config_text = build_user_shadowsocks_uri(user)
     except Exception as exc:
         flash(f"二维码生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
@@ -13265,7 +13353,7 @@ def download_qr():
         flash(f"二维码生成失败：{msg}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"wg-{safe_name(user['username'])}-global.png"
+    filename = f"ss-{safe_name(user['username'])}.png"
     headers = {"Content-Disposition": f'inline; filename=\"{filename}\"'}
     return Response(qr_png, headers=headers, mimetype="image/png")
 

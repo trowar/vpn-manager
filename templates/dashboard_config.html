@@ -44,7 +44,7 @@
 
     <section class="feature-item" style="margin-bottom:12px;">
       <h4>切换默认服务器</h4>
-      <p>可以按地区选择默认服务器节点，用于连接不同地区的线路达到加速目的。切换后请重新下载配置并重新连接。</p>
+      <p>切换后请重新下载 Shadowsocks / kcptun 配置并重新连接。</p>
       {% if available_servers %}
         <form method="post" action="{{ url_for('dashboard_select_server') }}" class="form">
           <label>默认服务器
@@ -56,7 +56,6 @@
               {% endfor %}
             </select>
           </label>
-          <p class="helper">仅展示当前在线节点。切换节点时，动态 IP 模式下会重新分配新的内网地址。</p>
           <div class="actions">
             <button type="submit">保存并切换节点</button>
           </div>
@@ -68,57 +67,27 @@
 
     <div class="feature-grid guide-grid">
       <div class="feature-item">
-        <h4>WireGuard</h4>
-        <p>速度快，适合大多数设备。切换节点或重建配置后，请重新导入最新配置。</p>
+        <h4>Shadowsocks + kcptun</h4>
+        <p>当前系统默认协议。建议先下载 kcptun 配置，再在 Shadowsocks 客户端中将服务器地址指向 kcptun 本地端口。</p>
         <div class="actions">
-          {% if active and wireguard_enabled %}
-            <a class="btn" href="{{ url_for('download_config', mode='global') }}">下载 WireGuard 配置</a>
-            <form
-              method="post"
-              action="{{ url_for('dashboard_regenerate_config') }}"
-              class="inline-form"
-              onsubmit="return confirm('确定重新生成 WireGuard 配置吗？旧配置将失效。');"
-            >
-              <button type="submit" class="btn secondary">重新生成配置</button>
-            </form>
-          {% elif not wireguard_enabled %}
-            <button type="button" disabled>WireGuard 已关闭</button>
-            <button type="button" class="secondary" disabled>重建配置已关闭</button>
+          {% if active and shadowsocks_enabled %}
+            <a class="btn" href="{{ url_for('download_config') }}">下载 Shadowsocks 配置</a>
+            {% if kcptun_enabled %}
+              <a class="btn secondary" href="{{ url_for('download_kcptun_config') }}">下载 kcptun 配置</a>
+            {% endif %}
+          {% elif not shadowsocks_enabled %}
+            <button type="button" disabled>Shadowsocks 已关闭</button>
+            <button type="button" class="secondary" disabled>kcptun 已关闭</button>
           {% else %}
-            <button type="button" disabled>下载 WireGuard 配置（未生效）</button>
-            <button type="button" class="secondary" disabled>重新生成配置（未生效）</button>
-          {% endif %}
-          {% if wireguard_enabled %}
-            <a class="btn secondary" href="{{ url_for('wireguard_download_auto') }}">一键下载客户端</a>
-            <a class="btn secondary" href="{{ url_for('wireguard_download_page') }}">全部下载入口</a>
+            <button type="button" disabled>下载 Shadowsocks 配置（未生效）</button>
+            <button type="button" class="secondary" disabled>下载 kcptun 配置（未生效）</button>
           {% endif %}
         </div>
-        {% if active and wireguard_enabled %}
+        {% if active and shadowsocks_enabled %}
           <div class="payment-qr-wrap payment-qr-wrap-inline">
-            <img src="{{ url_for('download_qr', mode='global') }}" alt="WireGuard 二维码" loading="eager">
+            <img src="{{ url_for('download_qr') }}" alt="Shadowsocks 二维码" loading="eager">
           </div>
-          <p class="helper">二维码会使用当前默认节点生成，请在切换服务器后重新扫码或重新导入配置。</p>
-        {% endif %}
-      </div>
-
-      <div class="feature-item">
-        <h4>OpenVPN</h4>
-        {% if openvpn_enabled %}
-          <p>兼容性更广，适合旧设备或特殊网络环境，同样会跟随当前默认服务器生成。</p>
-          <div class="actions">
-            {% if active %}
-              <a class="btn" href="{{ url_for('download_openvpn_config', mode='global') }}">下载 OpenVPN 配置</a>
-            {% else %}
-              <button type="button" disabled>下载 OpenVPN 配置（未生效）</button>
-            {% endif %}
-            <a class="btn secondary" href="{{ url_for('openvpn_download_auto') }}">一键下载客户端</a>
-            <a class="btn secondary" href="{{ url_for('openvpn_download_page') }}">全部下载入口</a>
-          </div>
-        {% else %}
-          <p>当前系统未启用 OpenVPN 支持。</p>
-          <div class="actions">
-            <button type="button" disabled>OpenVPN 未启用</button>
-          </div>
+          <p class="helper">二维码内容为 `ss://` 导入链接，切换节点后请重新扫码。</p>
         {% endif %}
       </div>
     </div>
@@ -127,24 +96,13 @@
 
     <h4>使用说明</h4>
     <ol class="guide-steps">
-      <li>先选择默认服务器节点，再下载对应配置。</li>
-      <li>确认账号订阅状态为“已生效”。</li>
-      <li>下载对应配置文件：WireGuard `.conf` 或 OpenVPN `.ovpn`。</li>
-      <li>在客户端导入配置文件并连接。</li>
-      <li>如果切换了节点或重建了配置，请删除旧隧道后重新导入。</li>
+      <li>先选择默认服务器节点，再下载配置。</li>
+      <li>下载 `Shadowsocks` 配置（`ss-*.json`）并导入客户端。</li>
+      <li>下载 `kcptun` 配置（`kcptun-*.json`）并先启动 kcptun 客户端。</li>
+      <li>在 Shadowsocks 客户端内将服务器地址改为 `127.0.0.1`，端口改为 `12948`（kcptun 本地端口）。</li>
+      <li>切换节点后请重新下载并导入配置。</li>
     </ol>
-
-    <div class="guide-image-grid">
-      <figure class="guide-image-card">
-        <img src="{{ url_for('static', filename='openvpn_import_step1.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤1">
-        <figcaption>OpenVPN 导入步骤 1：点击 “Have a configuration file instead (.ovpn)?”，再点击 “Upload File”。</figcaption>
-      </figure>
-      <figure class="guide-image-card">
-        <img src="{{ url_for('static', filename='openvpn_import_step2.svg', v='20260409-10') }}" alt="OpenVPN 导入步骤2">
-        <figcaption>OpenVPN 导入步骤 2：选择下载好的 `.ovpn` 文件，点击“打开”完成导入。</figcaption>
-      </figure>
-    </div>
-    <p class="helper">常见问题：如果切换节点后无法连接，请先删除旧配置、重新下载，并确认本地客户端里导入的是最新配置。</p>
+    <p class="helper">如果你临时不使用 kcptun，也可以直接使用 Shadowsocks 配置直连服务器。</p>
   </section>
 </div>
 {% endblock %}

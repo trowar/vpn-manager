@@ -14,8 +14,13 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-vpnportal}"
 
 LOCAL_VPN_APP_DIR="${LOCAL_VPN_APP_DIR:-/srv/vpn-node}"
 INSTALL_LOCAL_VPN_SERVER="${INSTALL_LOCAL_VPN_SERVER:-1}"
-WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-51820}"
-OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-1194}"
+SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
+KCPTUN_SERVER_PORT="${KCPTUN_SERVER_PORT:-29900}"
+SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
+SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
+KCPTUN_KEY="${KCPTUN_KEY:-}"
+WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-${KCPTUN_SERVER_PORT}}"
+OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-${SHADOWSOCKS_SERVER_PORT}}"
 OPENVPN_PROTO="${OPENVPN_PROTO:-tcp}"
 DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-53}"
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
@@ -434,10 +439,12 @@ backup_postgres_before_upgrade() {
 }
 
 prepare_env_install() {
-  local ip portal_secret api_token
+  local ip portal_secret api_token ss_password kcptun_key
   ip="$(resolve_preferred_ip)"
   portal_secret="$(generate_secret)"
   api_token="$(generate_secret)"
+  ss_password="$(generate_secret)"
+  kcptun_key="$(generate_secret)"
   INSTALL_API_TOKEN="${api_token}"
 
   mkdir -p "${APP_DIR}"
@@ -459,21 +466,20 @@ prepare_env_install() {
 
   upsert_env "VPN_API_TOKEN" "${api_token}"
   upsert_env "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
-  upsert_env "WG_ENDPOINT" "${ip}:${WG_PUBLIC_PORT}"
-  upsert_env "OPENVPN_ENDPOINT_HOST" "${ip}"
-  upsert_env "OPENVPN_ENDPOINT_PORT" "${OPENVPN_PUBLIC_PORT}"
-  upsert_env "OPENVPN_PROTO" "${OPENVPN_PROTO}"
-
-  upsert_env "PORTAL_ENABLE_UDP_RELAY" "1"
-  upsert_env "VPN_RELAY_PUBLIC_HOST" "${ip}"
-  upsert_env "WG_RELAY_PORT_START" "24000"
-  upsert_env "WG_RELAY_PORT_END" "24031"
-  upsert_env "OPENVPN_RELAY_PORT_START" "29000"
-  upsert_env "OPENVPN_RELAY_PORT_END" "29031"
+  upsert_env "VPN_ENABLE_WIREGUARD" "0"
+  upsert_env "OPENVPN_ENABLED" "0"
+  upsert_env "SHADOWSOCKS_ENABLED" "1"
+  upsert_env "KCPTUN_ENABLED" "1"
+  upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
+  upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
+  upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
+  upsert_env "SHADOWSOCKS_PASSWORD" "${ss_password}"
+  upsert_env "KCPTUN_SERVER_PORT" "${WG_PUBLIC_PORT}"
+  upsert_env "KCPTUN_KEY" "${kcptun_key}"
 }
 
 prepare_env_upgrade() {
-  local ip portal_secret api_token
+  local ip portal_secret api_token ss_password kcptun_key
   ip="$(resolve_preferred_ip)"
   mkdir -p "${APP_DIR}"
   touch "$(env_path)"
@@ -485,6 +491,14 @@ prepare_env_upgrade() {
   api_token="$(read_env_value VPN_API_TOKEN || true)"
   if [ -z "${api_token}" ]; then
     api_token="$(generate_secret)"
+  fi
+  ss_password="$(read_env_value SHADOWSOCKS_PASSWORD || true)"
+  if [ -z "${ss_password}" ]; then
+    ss_password="$(generate_secret)"
+  fi
+  kcptun_key="$(read_env_value KCPTUN_KEY || true)"
+  if [ -z "${kcptun_key}" ]; then
+    kcptun_key="$(generate_secret)"
   fi
   INSTALL_API_TOKEN="${api_token}"
 
@@ -504,17 +518,16 @@ prepare_env_upgrade() {
 
   upsert_env_if_missing "VPN_API_TOKEN" "${api_token}"
   upsert_env_if_missing "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
-  upsert_env_if_missing "WG_ENDPOINT" "${ip}:${WG_PUBLIC_PORT}"
-  upsert_env_if_missing "OPENVPN_ENDPOINT_HOST" "${ip}"
-  upsert_env_if_missing "OPENVPN_ENDPOINT_PORT" "${OPENVPN_PUBLIC_PORT}"
-  upsert_env "OPENVPN_PROTO" "${OPENVPN_PROTO}"
-
-  upsert_env_if_missing "PORTAL_ENABLE_UDP_RELAY" "1"
-  upsert_env_if_missing "VPN_RELAY_PUBLIC_HOST" "${ip}"
-  upsert_env_if_missing "WG_RELAY_PORT_START" "24000"
-  upsert_env_if_missing "WG_RELAY_PORT_END" "24031"
-  upsert_env_if_missing "OPENVPN_RELAY_PORT_START" "29000"
-  upsert_env_if_missing "OPENVPN_RELAY_PORT_END" "29031"
+  upsert_env "VPN_ENABLE_WIREGUARD" "0"
+  upsert_env "OPENVPN_ENABLED" "0"
+  upsert_env "SHADOWSOCKS_ENABLED" "1"
+  upsert_env "KCPTUN_ENABLED" "1"
+  upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
+  upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
+  upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
+  upsert_env "SHADOWSOCKS_PASSWORD" "${ss_password}"
+  upsert_env "KCPTUN_SERVER_PORT" "${WG_PUBLIC_PORT}"
+  upsert_env "KCPTUN_KEY" "${kcptun_key}"
 }
 
 install_web_runtime() {
@@ -610,15 +623,15 @@ deploy_local_vpn_server() {
   APP_DIR="${LOCAL_VPN_APP_DIR}" \
   REPO_URL="${REPO_URL}" \
   BRANCH="${BRANCH}" \
-  WG_PUBLIC_PORT="${WG_PUBLIC_PORT}" \
-  OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT}" \
-  OPENVPN_PROTO="${OPENVPN_PROTO}" \
-  DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT}" \
+  KCPTUN_SERVER_PORT="${WG_PUBLIC_PORT}" \
+  SHADOWSOCKS_SERVER_PORT="${OPENVPN_PUBLIC_PORT}" \
+  SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD}" \
+  SHADOWSOCKS_PASSWORD="$(read_env_value SHADOWSOCKS_PASSWORD || true)" \
+  KCPTUN_KEY="$(read_env_value KCPTUN_KEY || true)" \
   VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT}" \
   VPN_API_TOKEN="${INSTALL_API_TOKEN}" \
   DISABLE_SYSTEMD_RESOLVED="${DISABLE_SYSTEMD_RESOLVED}" \
   DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE}" \
-  OPENVPN_ENFORCE_DB_AUTH=0 \
   bash "${script_path}"
 }
 
@@ -826,14 +839,14 @@ verify_components() {
   fi
 
   if [ "${INSTALL_LOCAL_VPN_SERVER}" = "1" ] && { [ "${SCRIPT_MODE}" = "install" ] || [ "${UPGRADE_INCLUDE_VPN_SERVER}" = "1" ]; }; then
-    if ! systemctl is-active --quiet "wg-quick@wg0.service"; then
-      err "wg-quick@wg0.service is not active"
-      systemctl --no-pager --full status "wg-quick@wg0.service" || true
+    if ! systemctl is-active --quiet "vpnmanager-shadowsocks.service"; then
+      err "vpnmanager-shadowsocks.service is not active"
+      systemctl --no-pager --full status "vpnmanager-shadowsocks.service" || true
       exit 1
     fi
-    if ! systemctl is-active --quiet "vpnmanager-openvpn.service"; then
-      err "vpnmanager-openvpn.service is not active"
-      systemctl --no-pager --full status "vpnmanager-openvpn.service" || true
+    if ! systemctl is-active --quiet "vpnmanager-kcptun.service"; then
+      err "vpnmanager-kcptun.service is not active"
+      systemctl --no-pager --full status "vpnmanager-kcptun.service" || true
       exit 1
     fi
     if ! systemctl is-active --quiet "vpnmanager-server.service"; then
@@ -872,8 +885,8 @@ EOF
 
   echo "[status] postgresql: $(systemctl is-active postgresql 2>/dev/null || true)"
   echo "[status] web: $(systemctl is-active "${WEB_SERVICE_NAME}" 2>/dev/null || true)"
-  echo "[status] wg: $(systemctl is-active wg-quick@wg0.service 2>/dev/null || true)"
-  echo "[status] openvpn: $(systemctl is-active vpnmanager-openvpn.service 2>/dev/null || true)"
+  echo "[status] shadowsocks: $(systemctl is-active vpnmanager-shadowsocks.service 2>/dev/null || true)"
+  echo "[status] kcptun: $(systemctl is-active vpnmanager-kcptun.service 2>/dev/null || true)"
   echo "[status] vpn-api: $(systemctl is-active vpnmanager-server.service 2>/dev/null || true)"
 }
 
@@ -917,7 +930,6 @@ main() {
   write_web_systemd_unit
   start_or_restart_web_service
   deploy_local_vpn_server
-  ensure_openvpn_updown_wrapper_compat
   register_local_vpn_server_record
   verify_components
   print_summary

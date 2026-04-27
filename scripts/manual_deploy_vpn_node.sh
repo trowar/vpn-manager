@@ -10,39 +10,31 @@ APP_DIR="${APP_DIR:-/srv/vpn-node}"
 REPO_URL="${REPO_URL:-https://github.com/trowar/vpn-manager.git}"
 BRANCH="${BRANCH:-main}"
 
-WG_INTERFACE="${WG_INTERFACE:-wg0}"
-WG_PUBLIC_PORT="${WG_PUBLIC_PORT:-51820}"
-OPENVPN_PUBLIC_PORT="${OPENVPN_PUBLIC_PORT:-1194}"
-OPENVPN_PROTO="${OPENVPN_PROTO:-tcp}"
-DNS_PUBLIC_PORT="${DNS_PUBLIC_PORT:-53}"
+SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
+SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
+SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
+KCPTUN_SERVER_PORT="${KCPTUN_SERVER_PORT:-29900}"
+KCPTUN_KEY="${KCPTUN_KEY:-}"
+KCPTUN_CRYPT="${KCPTUN_CRYPT:-aes}"
+KCPTUN_MODE="${KCPTUN_MODE:-fast3}"
+KCPTUN_VERSION="${KCPTUN_VERSION:-latest}"
+
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 VPN_API_TOKEN="${VPN_API_TOKEN:-}"
-OPENVPN_ENFORCE_DB_AUTH="${OPENVPN_ENFORCE_DB_AUTH:-}"
 DEPLOY_SKIP_OS_UPGRADE="${DEPLOY_SKIP_OS_UPGRADE:-0}"
 DISABLE_SYSTEMD_RESOLVED="${DISABLE_SYSTEMD_RESOLVED:-1}"
-
-WG_PRIVATE_KEY_B64="${WG_PRIVATE_KEY_B64:-}"
-WG_PUBLIC_KEY_B64="${WG_PUBLIC_KEY_B64:-}"
-OPENVPN_CA_CERT_B64="${OPENVPN_CA_CERT_B64:-}"
-OPENVPN_SERVER_CERT_B64="${OPENVPN_SERVER_CERT_B64:-}"
-OPENVPN_SERVER_KEY_B64="${OPENVPN_SERVER_KEY_B64:-}"
-OPENVPN_TLS_CRYPT_KEY_B64="${OPENVPN_TLS_CRYPT_KEY_B64:-}"
 
 PY_VENV_DIR="${PY_VENV_DIR:-${APP_DIR}/.venv-vpn}"
 PORTAL_DB_PATH="${PORTAL_DB_PATH:-}"
 
-WG_CONF_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
-OPENVPN_DIR="/etc/openvpn/server"
-OPENVPN_SERVER_CONF="${OPENVPN_DIR}/server.conf"
-OPENVPN_PID_FILE="/run/openvpn-server.pid"
-OPENVPN_STATUS_FILE="/run/openvpn-status.log"
-OPENVPN_UP_SCRIPT="${OPENVPN_DIR}/vpnmanager-up.sh"
-OPENVPN_DOWN_SCRIPT="${OPENVPN_DIR}/vpnmanager-down.sh"
-DNSMASQ_CONF="/etc/dnsmasq.d/vpn.conf"
-WG_SERVER_PUBLIC_KEY_FILE="/srv/vpn-shared/server_public.key"
+SHADOWSOCKS_CONF_DIR="/etc/shadowsocks-libev"
+SHADOWSOCKS_CONF_FILE="${SHADOWSOCKS_CONF_DIR}/vpnmanager.json"
+KCPTUN_CONF_DIR="/etc/kcptun"
+KCPTUN_CONF_FILE="${KCPTUN_CONF_DIR}/server.json"
+KCPTUN_BIN="/usr/local/bin/kcptun-server"
 
-OPENVPN_SERVICE_NAME="vpnmanager-openvpn.service"
-OPENVPN_GUARD_SERVICE_NAME="vpnmanager-openvpn-guard.service"
+SHADOWSOCKS_SERVICE_NAME="vpnmanager-shadowsocks.service"
+KCPTUN_SERVICE_NAME="vpnmanager-kcptun.service"
 VPN_API_SERVICE_NAME="vpnmanager-server.service"
 
 PM=""
@@ -171,26 +163,18 @@ install_base_deps() {
     pkg_install \
       ca-certificates curl git openssl \
       iproute2 iptables net-tools \
-      wireguard-tools openvpn dnsmasq \
+      shadowsocks-libev tar unzip \
       python3 python3-venv python3-pip
   else
     pkg_install \
       ca-certificates curl git openssl \
       iproute iptables net-tools \
-      wireguard-tools openvpn dnsmasq \
+      shadowsocks-libev tar unzip \
       python3 python3-pip
   fi
 
-  if ! has_cmd wg; then
-    err "wireguard-tools install failed"
-    exit 1
-  fi
-  if ! has_cmd openvpn; then
-    err "openvpn install failed"
-    exit 1
-  fi
-  if ! has_cmd dnsmasq; then
-    err "dnsmasq install failed"
+  if ! has_cmd ss-server; then
+    err "shadowsocks-libev install failed (ss-server missing)"
     exit 1
   fi
   if ! has_cmd python3; then
@@ -242,15 +226,6 @@ resolve_portal_db_path() {
   echo "${APP_DIR}/data/portal.db"
 }
 
-detect_uplink_interface() {
-  local iface
-  iface="$(ip -o route show default 2>/dev/null | awk 'NR==1 {print $5}')"
-  if [ -z "${iface}" ]; then
-    iface="eth0"
-  fi
-  printf '%s' "${iface}"
-}
-
 disable_systemd_resolved_if_needed() {
   if [ "${DISABLE_SYSTEMD_RESOLVED}" != "1" ]; then
     log "skip disabling systemd-resolved (DISABLE_SYSTEMD_RESOLVED=${DISABLE_SYSTEMD_RESOLVED})"
@@ -264,7 +239,7 @@ disable_systemd_resolved_if_needed() {
     return 0
   fi
 
-  log "disabling systemd-resolved by default to free DNS port 53"
+  log "disabling systemd-resolved by default to free DNS conflicts"
   systemctl stop systemd-resolved >/dev/null 2>&1 || true
   systemctl disable systemd-resolved >/dev/null 2>&1 || true
 
@@ -285,181 +260,152 @@ EOF
   fi
 }
 
-ensure_wireguard_files() {
-  local work_dir priv_file pub_file wg_priv uplink_if
-  work_dir="${APP_DIR}/docker/vpn/wireguard"
-  priv_file="${work_dir}/server_private.key"
-  pub_file="${work_dir}/server_public.key"
-
-  mkdir -p "${work_dir}" /etc/wireguard "$(dirname "${WG_SERVER_PUBLIC_KEY_FILE}")"
-
-  if [ -n "${WG_PRIVATE_KEY_B64}" ]; then
-    echo "${WG_PRIVATE_KEY_B64}" | base64 -d > "${priv_file}"
-  elif [ ! -f "${priv_file}" ]; then
-    wg genkey > "${priv_file}"
-  fi
-  chmod 600 "${priv_file}"
-
-  if [ -n "${WG_PUBLIC_KEY_B64}" ]; then
-    echo "${WG_PUBLIC_KEY_B64}" | base64 -d > "${pub_file}"
+resolve_kcptun_download_url() {
+  local arch="$1"
+  local api_url
+  if [ "${KCPTUN_VERSION}" = "latest" ]; then
+    api_url="https://api.github.com/repos/xtaci/kcptun/releases/latest"
   else
-    wg pubkey < "${priv_file}" > "${pub_file}"
+    api_url="https://api.github.com/repos/xtaci/kcptun/releases/tags/${KCPTUN_VERSION}"
   fi
-  chmod 600 "${pub_file}"
 
-  wg_priv="$(cat "${priv_file}")"
-  uplink_if="$(detect_uplink_interface)"
+  API_URL="${api_url}" ARCH_VALUE="${arch}" python3 - <<'PY'
+import json
+import os
+import re
+import sys
+from urllib.request import urlopen
 
-  cat > "${WG_CONF_PATH}" <<EOF
-[Interface]
-Address = 10.7.0.1/24
-ListenPort = ${WG_PUBLIC_PORT}
-PrivateKey = ${wg_priv}
-SaveConfig = true
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${uplink_if} -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${uplink_if} -j MASQUERADE
-EOF
-  chmod 600 "${WG_CONF_PATH}"
-  cp -f "${pub_file}" "${WG_SERVER_PUBLIC_KEY_FILE}"
-  chmod 600 "${WG_SERVER_PUBLIC_KEY_FILE}"
+api_url = os.environ.get("API_URL", "")
+arch = os.environ.get("ARCH_VALUE", "")
+try:
+    data = json.loads(urlopen(api_url, timeout=15).read().decode("utf-8", "ignore"))
+except Exception:
+    sys.exit(1)
+assets = data.get("assets") or []
+pattern = re.compile(rf"kcptun-linux-{re.escape(arch)}.*\\.tar\\.gz$")
+for item in assets:
+    url = str(item.get("browser_download_url") or "")
+    if pattern.search(url):
+        print(url)
+        sys.exit(0)
+sys.exit(1)
+PY
 }
 
-ensure_openvpn_materials() {
-  local ca_crt server_crt server_key tls_key
-  ca_crt="${OPENVPN_DIR}/ca.crt"
-  server_crt="${OPENVPN_DIR}/server.crt"
-  server_key="${OPENVPN_DIR}/server.key"
-  tls_key="${OPENVPN_DIR}/tls-crypt.key"
+download_with_mirrors() {
+  local url="$1"
+  local target="$2"
+  local base
+  base="${url#https://}"
 
-  mkdir -p "${OPENVPN_DIR}"
+  local candidates=(
+    "$url"
+    "https://ghproxy.com/https://${base}"
+    "https://mirror.ghproxy.com/https://${base}"
+  )
 
-  if [ -n "${OPENVPN_CA_CERT_B64}" ]; then
-    echo "${OPENVPN_CA_CERT_B64}" | base64 -d > "${ca_crt}"
-  fi
-  if [ -n "${OPENVPN_SERVER_CERT_B64}" ]; then
-    echo "${OPENVPN_SERVER_CERT_B64}" | base64 -d > "${server_crt}"
-  fi
-  if [ -n "${OPENVPN_SERVER_KEY_B64}" ]; then
-    echo "${OPENVPN_SERVER_KEY_B64}" | base64 -d > "${server_key}"
-  fi
-  if [ -n "${OPENVPN_TLS_CRYPT_KEY_B64}" ]; then
-    echo "${OPENVPN_TLS_CRYPT_KEY_B64}" | base64 -d > "${tls_key}"
-  fi
-
-  if [ ! -f "${ca_crt}" ] || [ ! -f "${server_crt}" ] || [ ! -f "${server_key}" ]; then
-    log "generating OpenVPN CA/server certificates"
-    openssl genrsa -out "${OPENVPN_DIR}/ca.key" 4096 >/dev/null 2>&1
-    openssl req -x509 -new -nodes -key "${OPENVPN_DIR}/ca.key" -sha256 -days 3650 -subj "/CN=vpnmanager-ca" -out "${ca_crt}" >/dev/null 2>&1
-    openssl genrsa -out "${server_key}" 4096 >/dev/null 2>&1
-    openssl req -new -key "${server_key}" -subj "/CN=vpnmanager-server" -out "${OPENVPN_DIR}/server.csr" >/dev/null 2>&1
-    cat > "${OPENVPN_DIR}/server_ext.cnf" <<EOF
-basicConstraints=CA:FALSE
-keyUsage=digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-EOF
-    openssl x509 -req -in "${OPENVPN_DIR}/server.csr" -CA "${ca_crt}" -CAkey "${OPENVPN_DIR}/ca.key" -CAcreateserial -out "${server_crt}" -days 1825 -sha256 -extfile "${OPENVPN_DIR}/server_ext.cnf" >/dev/null 2>&1
-  fi
-
-  if [ ! -f "${tls_key}" ]; then
-    openvpn --genkey secret "${tls_key}" >/dev/null 2>&1 || openvpn --genkey --secret "${tls_key}" >/dev/null 2>&1
-  fi
-
-  chmod 600 "${server_key}" "${tls_key}" "${OPENVPN_DIR}/ca.key" 2>/dev/null || true
+  local u
+  for u in "${candidates[@]}"; do
+    if curl -fL --connect-timeout 10 --max-time 180 "$u" -o "$target" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
 }
 
-write_openvpn_config() {
-  local uplink_if auth_lines iptables_bin explicit_exit_line
-  uplink_if="$(detect_uplink_interface)"
-  iptables_bin="$(command -v iptables || true)"
-  if [ -z "${iptables_bin}" ]; then
-    iptables_bin="/sbin/iptables"
-  fi
-  explicit_exit_line=""
-  if [ "${OPENVPN_PROTO}" = "udp" ]; then
-    explicit_exit_line="explicit-exit-notify 1"
-  fi
+ensure_kcptun_binary() {
+  local arch url tmp_tar tmp_dir
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    armv7l|armv7|armhf) arch="arm7" ;;
+    *)
+      err "unsupported architecture for kcptun: ${arch}"
+      exit 1
+      ;;
+  esac
 
-  auth_lines="script-security 2"
-  if [ "${OPENVPN_ENFORCE_DB_AUTH}" = "1" ]; then
-    auth_lines="$(cat <<EOF
-script-security 3
-verify-client-cert require
-tls-verify "/usr/bin/python3 ${APP_DIR}/scripts/openvpn_auth.py"
-management 127.0.0.1 7505
-EOF
-)"
+  url="$(resolve_kcptun_download_url "$arch" || true)"
+  if [ -z "$url" ]; then
+    err "failed to resolve kcptun release URL"
+    exit 1
   fi
 
-  cat > "${OPENVPN_UP_SCRIPT}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-if ! ${iptables_bin} -t nat -C POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1; then
-  ${iptables_bin} -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE
-fi
-exit 0
-EOF
-  chmod 755 "${OPENVPN_UP_SCRIPT}"
+  tmp_tar="$(mktemp /tmp/kcptun.XXXXXX.tar.gz)"
+  tmp_dir="$(mktemp -d /tmp/kcptun.XXXXXX)"
 
-  cat > "${OPENVPN_DOWN_SCRIPT}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-${iptables_bin} -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${uplink_if} -j MASQUERADE >/dev/null 2>&1 || true
-exit 0
-EOF
-  chmod 755 "${OPENVPN_DOWN_SCRIPT}"
+  if ! download_with_mirrors "$url" "$tmp_tar"; then
+    rm -f "$tmp_tar"
+    rm -rf "$tmp_dir"
+    err "failed to download kcptun archive"
+    exit 1
+  fi
 
-  cat > "${OPENVPN_SERVER_CONF}" <<EOF
-port ${OPENVPN_PUBLIC_PORT}
-proto ${OPENVPN_PROTO}
-dev tun
-topology subnet
-server 10.8.0.0 255.255.255.0
-ifconfig-pool-persist ${OPENVPN_DIR}/ipp.txt
+  if ! tar -xzf "$tmp_tar" -C "$tmp_dir"; then
+    rm -f "$tmp_tar"
+    rm -rf "$tmp_dir"
+    err "failed to extract kcptun archive"
+    exit 1
+  fi
 
-ca ${OPENVPN_DIR}/ca.crt
-cert ${OPENVPN_DIR}/server.crt
-key ${OPENVPN_DIR}/server.key
-dh none
-ecdh-curve prime256v1
-tls-crypt ${OPENVPN_DIR}/tls-crypt.key
+  if [ ! -f "$tmp_dir/server_linux_${arch}" ]; then
+    rm -f "$tmp_tar"
+    rm -rf "$tmp_dir"
+    err "kcptun server binary not found in archive"
+    exit 1
+  fi
 
-cipher AES-256-GCM
-ncp-ciphers AES-256-GCM:AES-128-GCM
-auth SHA256
-keepalive 10 120
-persist-key
-persist-tun
-${explicit_exit_line}
-
-user nobody
-group nogroup
-
-${auth_lines}
-
-push "redirect-gateway def1"
-push "dhcp-option DNS 10.7.0.1"
-
-up "${OPENVPN_UP_SCRIPT}"
-down "${OPENVPN_DOWN_SCRIPT}"
-
-status ${OPENVPN_STATUS_FILE}
-verb 3
-EOF
+  install -m 0755 "$tmp_dir/server_linux_${arch}" "$KCPTUN_BIN"
+  rm -f "$tmp_tar"
+  rm -rf "$tmp_dir"
 }
 
-write_dnsmasq_conf() {
-  mkdir -p "$(dirname "${DNSMASQ_CONF}")"
-  cat > "${DNSMASQ_CONF}" <<EOF
-port=${DNS_PUBLIC_PORT}
-listen-address=10.7.0.1
-bind-interfaces
-no-resolv
-server=1.1.1.1
-server=8.8.8.8
-cache-size=1000
+write_shadowsocks_config() {
+  mkdir -p "$SHADOWSOCKS_CONF_DIR"
+  cat > "$SHADOWSOCKS_CONF_FILE" <<EOF
+{
+  "server": "0.0.0.0",
+  "server_port": ${SHADOWSOCKS_SERVER_PORT},
+  "password": "${SHADOWSOCKS_PASSWORD}",
+  "method": "${SHADOWSOCKS_METHOD}",
+  "mode": "tcp_and_udp",
+  "timeout": 300,
+  "fast_open": false,
+  "reuse_port": true,
+  "no_delay": true
+}
 EOF
+  chmod 600 "$SHADOWSOCKS_CONF_FILE"
+}
+
+write_kcptun_config() {
+  mkdir -p "$KCPTUN_CONF_DIR"
+  cat > "$KCPTUN_CONF_FILE" <<EOF
+{
+  "listen": ":${KCPTUN_SERVER_PORT}",
+  "target": "127.0.0.1:${SHADOWSOCKS_SERVER_PORT}",
+  "key": "${KCPTUN_KEY}",
+  "crypt": "${KCPTUN_CRYPT}",
+  "mode": "${KCPTUN_MODE}",
+  "mtu": 1350,
+  "sndwnd": 256,
+  "rcvwnd": 512,
+  "datashard": 10,
+  "parityshard": 3,
+  "dscp": 0,
+  "nocomp": false,
+  "acknodelay": true,
+  "nodelay": 1,
+  "interval": 20,
+  "resend": 2,
+  "nc": 1,
+  "sockbuf": 4194304,
+  "keepalive": 10
+}
+EOF
+  chmod 600 "$KCPTUN_CONF_FILE"
 }
 
 ensure_python_runtime() {
@@ -472,17 +418,32 @@ ensure_python_runtime() {
 }
 
 write_systemd_units() {
-  cat > "/etc/systemd/system/${OPENVPN_SERVICE_NAME}" <<EOF
+  cat > "/etc/systemd/system/${SHADOWSOCKS_SERVICE_NAME}" <<EOF
 [Unit]
-Description=VPN Manager OpenVPN Server
+Description=VPN Manager Shadowsocks Server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=PORTAL_DB_PATH=${PORTAL_DB_PATH}
-Environment=OPENVPN_COMMON_NAME_PREFIX=vpn-user-
-ExecStart=/usr/sbin/openvpn --config ${OPENVPN_SERVER_CONF} --writepid ${OPENVPN_PID_FILE} --status ${OPENVPN_STATUS_FILE}
+ExecStart=/usr/bin/ss-server -c ${SHADOWSOCKS_CONF_FILE} -u
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "/etc/systemd/system/${KCPTUN_SERVICE_NAME}" <<EOF
+[Unit]
+Description=VPN Manager kcptun Server
+After=network-online.target ${SHADOWSOCKS_SERVICE_NAME}
+Wants=network-online.target
+Requires=${SHADOWSOCKS_SERVICE_NAME}
+
+[Service]
+Type=simple
+ExecStart=${KCPTUN_BIN} -c ${KCPTUN_CONF_FILE}
 Restart=always
 RestartSec=3
 
@@ -493,22 +454,15 @@ EOF
   cat > "/etc/systemd/system/${VPN_API_SERVICE_NAME}" <<EOF
 [Unit]
 Description=VPN Manager API Service
-After=network-online.target ${OPENVPN_SERVICE_NAME} wg-quick@${WG_INTERFACE}.service
+After=network-online.target ${SHADOWSOCKS_SERVICE_NAME} ${KCPTUN_SERVICE_NAME}
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=${APP_DIR}/docker/vpn
 Environment=PATH=${PY_VENV_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=WG_INTERFACE=${WG_INTERFACE}
-Environment=WG_CONF_PATH=${WG_CONF_PATH}
-Environment=WG_SERVER_PUBLIC_KEY_FILE=${WG_SERVER_PUBLIC_KEY_FILE}
 Environment=VPN_API_TOKEN=${VPN_API_TOKEN}
-Environment=OPENVPN_SERVER_CONF=${OPENVPN_SERVER_CONF}
-Environment=OPENVPN_CA_CERT_FILE=${OPENVPN_DIR}/ca.crt
-Environment=OPENVPN_TLS_CRYPT_KEY_FILE=${OPENVPN_DIR}/tls-crypt.key
-Environment=OPENVPN_STATUS_FILE=${OPENVPN_STATUS_FILE}
-Environment=OPENVPN_PID_FILE=${OPENVPN_PID_FILE}
+Environment=PORTAL_DB_PATH=${PORTAL_DB_PATH}
 ExecStart=${PY_VENV_DIR}/bin/gunicorn --workers 1 --bind 0.0.0.0:${VPN_API_PUBLIC_PORT} vpn_api:app
 Restart=always
 RestartSec=3
@@ -516,37 +470,6 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-
-  cat > "/etc/systemd/system/${OPENVPN_GUARD_SERVICE_NAME}" <<EOF
-[Unit]
-Description=VPN Manager OpenVPN Session Guard
-After=${OPENVPN_SERVICE_NAME}
-Requires=${OPENVPN_SERVICE_NAME}
-
-[Service]
-Type=simple
-Environment=PORTAL_DB_PATH=${PORTAL_DB_PATH}
-Environment=OPENVPN_STATUS_FILE=${OPENVPN_STATUS_FILE}
-Environment=OPENVPN_MANAGEMENT_HOST=127.0.0.1
-Environment=OPENVPN_MANAGEMENT_PORT=7505
-Environment=OPENVPN_COMMON_NAME_PREFIX=vpn-user-
-ExecStart=/usr/bin/python3 ${APP_DIR}/scripts/openvpn_session_guard.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-enable_ip_forward() {
-  cat > /etc/sysctl.d/99-vpnmanager.conf <<EOF
-net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
-EOF
-  sysctl --system >/dev/null 2>&1 || true
-  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-  sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
 }
 
 start_services() {
@@ -556,17 +479,8 @@ start_services() {
   fi
 
   systemctl daemon-reload
-
-  systemctl enable --now "wg-quick@${WG_INTERFACE}.service"
-  systemctl enable --now dnsmasq
-  systemctl enable --now "${OPENVPN_SERVICE_NAME}"
-
-  if [ "${OPENVPN_ENFORCE_DB_AUTH}" = "1" ]; then
-    systemctl enable --now "${OPENVPN_GUARD_SERVICE_NAME}"
-  else
-    systemctl disable --now "${OPENVPN_GUARD_SERVICE_NAME}" >/dev/null 2>&1 || true
-  fi
-
+  systemctl enable --now "${SHADOWSOCKS_SERVICE_NAME}"
+  systemctl enable --now "${KCPTUN_SERVICE_NAME}"
   systemctl enable --now "${VPN_API_SERVICE_NAME}"
 }
 
@@ -587,17 +501,17 @@ print_summary() {
   echo
   echo "================ Local Deploy Completed ================"
   echo "APP_DIR: ${APP_DIR}"
-  echo "WG: ${WG_PUBLIC_PORT}/udp"
-  echo "OpenVPN: ${OPENVPN_PUBLIC_PORT}/${OPENVPN_PROTO}"
-  echo "DNS: 10.7.0.1:${DNS_PUBLIC_PORT}"
+  echo "Shadowsocks: ${SHADOWSOCKS_SERVER_PORT}/tcp+udp (${SHADOWSOCKS_METHOD})"
+  echo "kcptun: ${KCPTUN_SERVER_PORT}/udp"
   echo "VPN API: ${VPN_API_PUBLIC_PORT}/tcp"
   echo "VPN_API_TOKEN: ${VPN_API_TOKEN}"
+  echo "SHADOWSOCKS_PASSWORD: ${SHADOWSOCKS_PASSWORD}"
+  echo "KCPTUN_KEY: ${KCPTUN_KEY}"
   echo "PORTAL_DB_PATH: ${PORTAL_DB_PATH}"
-  echo "Auth enforcement: ${OPENVPN_ENFORCE_DB_AUTH}"
   echo
   echo "Service status checks:"
-  systemctl --no-pager --full status "wg-quick@${WG_INTERFACE}.service" | sed -n '1,6p' || true
-  systemctl --no-pager --full status "${OPENVPN_SERVICE_NAME}" | sed -n '1,6p' || true
+  systemctl --no-pager --full status "${SHADOWSOCKS_SERVICE_NAME}" | sed -n '1,6p' || true
+  systemctl --no-pager --full status "${KCPTUN_SERVICE_NAME}" | sed -n '1,6p' || true
   systemctl --no-pager --full status "${VPN_API_SERVICE_NAME}" | sed -n '1,6p' || true
   echo "======================================================="
 }
@@ -614,22 +528,19 @@ main() {
   if [ -z "${VPN_API_TOKEN}" ]; then
     VPN_API_TOKEN="$(generate_token)"
   fi
-
-  PORTAL_DB_PATH="$(resolve_portal_db_path)"
-  if [ -z "${OPENVPN_ENFORCE_DB_AUTH}" ]; then
-    if [ -f "${PORTAL_DB_PATH}" ]; then
-      OPENVPN_ENFORCE_DB_AUTH="1"
-    else
-      OPENVPN_ENFORCE_DB_AUTH="0"
-    fi
+  if [ -z "${SHADOWSOCKS_PASSWORD}" ]; then
+    SHADOWSOCKS_PASSWORD="$(generate_token)"
+  fi
+  if [ -z "${KCPTUN_KEY}" ]; then
+    KCPTUN_KEY="$(generate_token)"
   fi
 
+  PORTAL_DB_PATH="$(resolve_portal_db_path)"
+
+  ensure_kcptun_binary
+  write_shadowsocks_config
+  write_kcptun_config
   ensure_python_runtime
-  ensure_wireguard_files
-  ensure_openvpn_materials
-  write_openvpn_config
-  write_dnsmasq_conf
-  enable_ip_forward
   write_systemd_units
   start_services
 
