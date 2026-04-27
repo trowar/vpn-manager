@@ -1308,6 +1308,21 @@ def host_without_optional_port(raw_host: str | None) -> str:
     return host
 
 
+def absolute_url_for(endpoint: str, **values) -> str:
+    try:
+        return url_for(endpoint, _external=True, **values)
+    except Exception:
+        path = url_for(endpoint, **values)
+        host = ""
+        try:
+            host = (request.host_url or "").strip().rstrip("/")
+        except Exception:
+            host = ""
+        if host:
+            return f"{host}{path}"
+        return path
+
+
 def is_non_public_host(raw_host: str | None) -> bool:
     host = host_without_optional_port(raw_host).strip().lower().rstrip(".")
     if not host:
@@ -8959,6 +8974,10 @@ def dashboard_config():
     elif health_overview["abnormal"] > 0:
         node_alert_text = "当前节点异常，系统正在切换。"
 
+    ss_download_link = absolute_url_for("download_config") if SHADOWSOCKS_ENABLED else ""
+    kcptun_download_link = absolute_url_for("download_kcptun_config") if KCPTUN_ENABLED else ""
+    ss_qr_link = absolute_url_for("download_qr") if SHADOWSOCKS_ENABLED else ""
+
     return render_template(
         "dashboard_config.html",
         user=user,
@@ -8967,6 +8986,9 @@ def dashboard_config():
         current_server=current_server,
         preferred_server=preferred_server,
         node_alert_text=node_alert_text,
+        ss_download_link=ss_download_link,
+        kcptun_download_link=kcptun_download_link,
+        ss_qr_link=ss_qr_link,
         dashboard_page="config",
     )
 
@@ -11211,6 +11233,12 @@ def admin_configs():
     if selected_default_server_id <= 0 and target_server is not None:
         selected_default_server_id = int(row_get(target_server, "id", 0) or 0)
 
+    admin_ss_download_link = absolute_url_for("admin_download_config") if SHADOWSOCKS_ENABLED else ""
+    admin_kcptun_download_link = (
+        absolute_url_for("admin_download_kcptun_config") if KCPTUN_ENABLED else ""
+    )
+    admin_ss_qr_link = absolute_url_for("admin_download_qr") if SHADOWSOCKS_ENABLED else ""
+
     db.commit()
 
     return render_template(
@@ -11224,6 +11252,9 @@ def admin_configs():
         endpoint_display=endpoint_display,
         available_servers=available_servers,
         selected_default_server_id=selected_default_server_id,
+        admin_ss_download_link=admin_ss_download_link,
+        admin_kcptun_download_link=admin_kcptun_download_link,
+        admin_ss_qr_link=admin_ss_qr_link,
         admin_page="configs",
     )
 

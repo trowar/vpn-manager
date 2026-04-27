@@ -84,9 +84,22 @@
           {% endif %}
         </div>
         {% if active and shadowsocks_enabled %}
+          <div class="form" style="margin-top:10px;">
+            <label>Shadowsocks 下载链接
+              <input type="text" readonly value="{{ ss_download_link }}">
+            </label>
+            {% if kcptun_enabled %}
+              <label>kcptun 下载链接
+                <input type="text" readonly value="{{ kcptun_download_link }}">
+              </label>
+            {% endif %}
+          </div>
+        {% endif %}
+        {% if active and shadowsocks_enabled %}
           <div class="payment-qr-wrap payment-qr-wrap-inline">
             <img src="{{ url_for('download_qr') }}" alt="Shadowsocks 二维码" loading="eager">
           </div>
+          <p class="helper">二维码链接：{{ ss_qr_link }}</p>
           <p class="helper">二维码内容为 `ss://` 导入链接，切换节点后请重新扫码。</p>
         {% endif %}
       </div>

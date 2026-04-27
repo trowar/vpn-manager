@@ -74,11 +74,24 @@
       <button type="button" class="secondary" disabled>管理员配置未就绪</button>
     {% endif %}
   </div>
+  {% if admin_vpn_ready and shadowsocks_enabled %}
+    <div class="form" style="margin-top:10px;">
+      <label>管理员 Shadowsocks 下载链接
+        <input type="text" readonly value="{{ admin_ss_download_link }}">
+      </label>
+      {% if kcptun_enabled %}
+        <label>管理员 kcptun 下载链接
+          <input type="text" readonly value="{{ admin_kcptun_download_link }}">
+        </label>
+      {% endif %}
+    </div>
+  {% endif %}
 
   {% if admin_vpn_ready and shadowsocks_enabled %}
     <div class="payment-qr-wrap" id="admin-inline-qr">
       <img src="{{ url_for('admin_download_qr') }}" alt="管理员 Shadowsocks 二维码">
     </div>
+    <p class="helper">二维码链接：{{ admin_ss_qr_link }}</p>
     <p class="helper">二维码内容为 `ss://` 导入链接，用于移动端快速导入 Shadowsocks。</p>
   {% endif %}
 </section>
