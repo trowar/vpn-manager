@@ -11,6 +11,8 @@ REPO_URL="${REPO_URL:-https://github.com/trowar/vpn-manager.git}"
 BRANCH="${BRANCH:-main}"
 
 SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
+SHADOWSOCKS_PORT_RANGE_START="${SHADOWSOCKS_PORT_RANGE_START:-29000}"
+SHADOWSOCKS_PORT_RANGE_END="${SHADOWSOCKS_PORT_RANGE_END:-33999}"
 SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
 SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
 KCPTUN_ENABLED="${KCPTUN_ENABLED:-1}"
@@ -203,6 +205,16 @@ print(secrets.token_hex(24))
 PY
 }
 
+normalize_port() {
+  local raw="$1"
+  local fallback="$2"
+  if [[ "$raw" =~ ^[0-9]+$ ]] && [ "$raw" -ge 1 ] && [ "$raw" -le 65535 ]; then
+    echo "$raw"
+    return 0
+  fi
+  echo "$fallback"
+}
+
 setup_repo() {
   mkdir -p "$(dirname "${APP_DIR}")"
 
@@ -389,19 +401,44 @@ ensure_kcptun_binary() {
 
 write_shadowsocks_config() {
   mkdir -p "$SHADOWSOCKS_CONF_DIR"
-  cat > "$SHADOWSOCKS_CONF_FILE" <<EOF
-{
-  "server": "0.0.0.0",
-  "server_port": ${SHADOWSOCKS_SERVER_PORT},
-  "password": "${SHADOWSOCKS_PASSWORD}",
-  "method": "${SHADOWSOCKS_METHOD}",
-  "mode": "tcp_and_udp",
-  "timeout": 300,
-  "fast_open": false,
-  "reuse_port": true,
-  "no_delay": true
+  SHADOWSOCKS_SERVER_PORT="$(normalize_port "$SHADOWSOCKS_SERVER_PORT" 8388)"
+  SHADOWSOCKS_PORT_RANGE_START="$(normalize_port "$SHADOWSOCKS_PORT_RANGE_START" 29000)"
+  SHADOWSOCKS_PORT_RANGE_END="$(normalize_port "$SHADOWSOCKS_PORT_RANGE_END" 33999)"
+  if [ "$SHADOWSOCKS_PORT_RANGE_END" -lt "$SHADOWSOCKS_PORT_RANGE_START" ]; then
+    SHADOWSOCKS_PORT_RANGE_END="$SHADOWSOCKS_PORT_RANGE_START"
+  fi
+  python3 - "$SHADOWSOCKS_CONF_FILE" "$SHADOWSOCKS_SERVER_PORT" "$SHADOWSOCKS_PORT_RANGE_START" "$SHADOWSOCKS_PORT_RANGE_END" "$SHADOWSOCKS_PASSWORD" "$SHADOWSOCKS_METHOD" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+server_port = int(sys.argv[2])
+range_start = int(sys.argv[3])
+range_end = int(sys.argv[4])
+base_password = sys.argv[5]
+method = sys.argv[6]
+
+port_password = {str(server_port): base_password}
+for port in range(range_start, range_end + 1):
+    if port == server_port:
+        continue
+    token = hashlib.sha256(f"{base_password}:{port}".encode("utf-8")).hexdigest()[:32]
+    port_password[str(port)] = token
+
+payload = {
+    "server": "0.0.0.0",
+    "port_password": port_password,
+    "method": method,
+    "mode": "tcp_and_udp",
+    "timeout": 300,
+    "fast_open": False,
+    "reuse_port": True,
+    "no_delay": True,
 }
-EOF
+out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
   chmod 600 "$SHADOWSOCKS_CONF_FILE"
 }
 
@@ -538,7 +575,8 @@ print_summary() {
   echo
   echo "================ Local Deploy Completed ================"
   echo "APP_DIR: ${APP_DIR}"
-  echo "Shadowsocks: ${SHADOWSOCKS_SERVER_PORT}/tcp+udp (${SHADOWSOCKS_METHOD})"
+  echo "Shadowsocks control port: ${SHADOWSOCKS_SERVER_PORT}/tcp+udp (${SHADOWSOCKS_METHOD})"
+  echo "Shadowsocks user port range: ${SHADOWSOCKS_PORT_RANGE_START}-${SHADOWSOCKS_PORT_RANGE_END}/tcp+udp"
   if is_enabled "${KCPTUN_ENABLED}"; then
     echo "kcptun: ${KCPTUN_SERVER_PORT}/udp"
   else

@@ -1479,6 +1479,64 @@ def ensure_user_ingress_ports(
     return wg_port, openvpn_port
 
 
+def ensure_user_transport_ports(db: DatabaseConnection, user: DatabaseRow) -> DatabaseRow:
+    role = (row_get(user, "role", "") or "").strip().lower()
+    if role not in {"user", "admin"}:
+        return user
+    wg_port_before = row_get(user, "wg_ingress_port")
+    ss_port_before = row_get(user, "openvpn_ingress_port")
+    wg_port_after, ss_port_after = ensure_user_ingress_ports(db, user)
+    try:
+        wg_before = int(wg_port_before) if wg_port_before is not None else -1
+    except Exception:
+        wg_before = -1
+    try:
+        ss_before = int(ss_port_before) if ss_port_before is not None else -1
+    except Exception:
+        ss_before = -1
+    changed = (wg_before != int(wg_port_after)) or (ss_before != int(ss_port_after))
+    if changed:
+        db.commit()
+        refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+        if refreshed is not None:
+            return refreshed
+    return user
+
+
+def get_user_shadowsocks_server_port(user: DatabaseRow) -> int:
+    raw = row_get(user, "openvpn_ingress_port")
+    if raw is None or not str(raw).strip():
+        return SHADOWSOCKS_SERVER_PORT
+    try:
+        port = int(raw)
+    except Exception:
+        return SHADOWSOCKS_SERVER_PORT
+    if port <= 0 or port > 65535:
+        return SHADOWSOCKS_SERVER_PORT
+    return port
+
+
+def get_user_kcptun_server_port(user: DatabaseRow) -> int:
+    raw = row_get(user, "wg_ingress_port")
+    if raw is None or not str(raw).strip():
+        return KCPTUN_SERVER_PORT
+    try:
+        port = int(raw)
+    except Exception:
+        return KCPTUN_SERVER_PORT
+    if port <= 0 or port > 65535:
+        return KCPTUN_SERVER_PORT
+    return port
+
+
+def derive_shadowsocks_password_for_port(port: int) -> str:
+    normalized_port = normalize_server_port(port, SHADOWSOCKS_SERVER_PORT)
+    if normalized_port == SHADOWSOCKS_SERVER_PORT:
+        return SHADOWSOCKS_PASSWORD
+    seed = f"{SHADOWSOCKS_PASSWORD}:{normalized_port}".encode("utf-8")
+    return hashlib.sha256(seed).hexdigest()[:32]
+
+
 def get_wireguard_relay_endpoint(user: DatabaseRow | None) -> str:
     if not VPN_RELAY_ENABLED or not user or row_get(user, "role") != "user":
         return ""
@@ -5042,6 +5100,8 @@ def build_vpn_node_deploy_script(
         export DEPLOY_SKIP_OS_UPGRADE={"1" if skip_os_upgrade else "0"}
         export KCPTUN_SERVER_PORT="{wg_port}"
         export SHADOWSOCKS_SERVER_PORT="{openvpn_port}"
+        export SHADOWSOCKS_PORT_RANGE_START="{OPENVPN_RELAY_PORT_START}"
+        export SHADOWSOCKS_PORT_RANGE_END="{OPENVPN_RELAY_PORT_END}"
         export SHADOWSOCKS_METHOD="{SHADOWSOCKS_METHOD}"
         export SHADOWSOCKS_PASSWORD="{SHADOWSOCKS_PASSWORD}"
         export KCPTUN_KEY="{KCPTUN_KEY}"
@@ -6757,33 +6817,75 @@ def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]
     return peers
 
 
-def _extract_ss_connection_host(raw_line: str, server_port: int) -> str:
+def _parse_endpoint_port(token: str) -> int | None:
+    raw = (token or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("[") and "]" in raw:
+        right = raw.find("]")
+        if right > 0 and len(raw) > right + 2 and raw[right + 1] == ":":
+            tail = raw[right + 2 :]
+            return int(tail) if tail.isdigit() else None
+        return None
+    if raw.count(":") == 1:
+        _host, tail = raw.rsplit(":", 1)
+        return int(tail) if tail.isdigit() else None
+    if raw.rfind(":") > 0:
+        # IPv6 without brackets, not expected in ss output but keep defensive.
+        tail = raw.rsplit(":", 1)[-1]
+        return int(tail) if tail.isdigit() else None
+    return None
+
+
+def _extract_ss_connection_meta(
+    raw_line: str,
+    allowed_ports: set[int] | None = None,
+) -> tuple[str, int | None]:
     tokens = [token.strip() for token in (raw_line or "").split() if token.strip()]
     if len(tokens) < 2:
-        return ""
-    suffix = f":{int(server_port)}"
+        return "", None
     for idx, token in enumerate(tokens):
-        if not token.endswith(suffix):
+        local_port = _parse_endpoint_port(token)
+        if local_port is None:
+            continue
+        if allowed_ports and local_port not in allowed_ports:
             continue
         if idx + 1 >= len(tokens):
             continue
-        return normalize_public_client_ip(tokens[idx + 1])
-    return ""
+        return normalize_public_client_ip(tokens[idx + 1]), int(local_port)
+    return "", None
 
 
 def parse_shadowsocks_active_peer_snapshot(
-    raw_text: str, server_port: int
-) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int]]:
+    raw_text: str,
+    server_ports: list[int] | set[int] | tuple[int, ...] | None = None,
+) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int], dict[int, dict[str, int]]]:
+    allowed_ports: set[int] | None = None
+    if server_ports is not None:
+        cleaned_ports = {
+            normalize_server_port(port, SHADOWSOCKS_SERVER_PORT)
+            for port in server_ports
+            if normalize_server_port(port, SHADOWSOCKS_SERVER_PORT) > 0
+        }
+        if cleaned_ports:
+            allowed_ports = cleaned_ports
     peers: set[str] = set()
     peer_stats: dict[str, dict[str, int]] = {}
+    port_stats: dict[int, dict[str, int]] = {}
     aggregate_rx = 0
     aggregate_tx = 0
     current_host = ""
+    current_port: int | None = None
     for raw_line in (raw_text or "").splitlines():
         line = (raw_line or "").strip()
         if not line:
             continue
-        host = _extract_ss_connection_host(line, server_port)
+        host, local_port = _extract_ss_connection_meta(line, allowed_ports)
+        if local_port is not None:
+            current_port = int(local_port)
+            port_stats.setdefault(
+                current_port, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
+            )
         if host:
             current_host = host
             peers.add(host)
@@ -6805,6 +6907,13 @@ def parse_shadowsocks_active_peer_snapshot(
         tx_bytes = max(0, tx_bytes)
         aggregate_rx += rx_bytes
         aggregate_tx += tx_bytes
+        if current_port is not None:
+            stats_by_port = port_stats.setdefault(
+                int(current_port), {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
+            )
+            stats_by_port["rx_bytes"] += rx_bytes
+            stats_by_port["tx_bytes"] += tx_bytes
+            stats_by_port["total_bytes"] += rx_bytes + tx_bytes
         if current_host:
             stats = peer_stats.setdefault(
                 current_host, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
@@ -6817,7 +6926,7 @@ def parse_shadowsocks_active_peer_snapshot(
         "tx_bytes": max(0, aggregate_tx),
         "total_bytes": max(0, aggregate_rx + aggregate_tx),
     }
-    return sorted(peers), peer_stats, aggregate
+    return sorted(peers), peer_stats, aggregate, port_stats
 
 
 def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
@@ -6838,23 +6947,51 @@ def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
     return sorted(peers)
 
 
+def build_shadowsocks_sport_filter_expr(ports: list[int] | set[int] | tuple[int, ...]) -> str:
+    normalized = sorted(
+        {
+            normalize_server_port(port, SHADOWSOCKS_SERVER_PORT)
+            for port in ports
+            if normalize_server_port(port, SHADOWSOCKS_SERVER_PORT) > 0
+        }
+    )
+    if not normalized:
+        return f"( sport = :{SHADOWSOCKS_SERVER_PORT} )"
+    if len(normalized) == 1:
+        return f"( sport = :{normalized[0]} )"
+    joined = " or ".join(f"sport = :{port}" for port in normalized)
+    return f"( {joined} )"
+
+
 def get_local_shadowsocks_active_peer_snapshot(
-) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int]]:
+    ports: list[int] | set[int] | tuple[int, ...] | None = None,
+) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int], dict[int, dict[str, int]]]:
+    use_ports = (
+        sorted(
+            {
+                normalize_server_port(port, SHADOWSOCKS_SERVER_PORT)
+                for port in (ports or [])
+                if normalize_server_port(port, SHADOWSOCKS_SERVER_PORT) > 0
+            }
+        )
+        if ports
+        else [SHADOWSOCKS_SERVER_PORT]
+    )
     raw = run_command(
         [
             "ss",
             "-Htni",
             "state",
             "established",
-            f"( sport = :{SHADOWSOCKS_SERVER_PORT} )",
+            build_shadowsocks_sport_filter_expr(use_ports),
         ],
         check=False,
     )
-    return parse_shadowsocks_active_peer_snapshot(raw, SHADOWSOCKS_SERVER_PORT)
+    return parse_shadowsocks_active_peer_snapshot(raw, use_ports)
 
 
 def get_local_shadowsocks_active_peer_hosts() -> list[str]:
-    peers, _peer_stats, _aggregate = get_local_shadowsocks_active_peer_snapshot()
+    peers, _peer_stats, _aggregate, _port_stats = get_local_shadowsocks_active_peer_snapshot()
     return peers
 
 
@@ -6881,7 +7018,24 @@ def get_runtime_active_peer_hosts(
     user: DatabaseRow | None = None,
     server_row: DatabaseRow | None = None,
     window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
-) -> tuple[list[str], str, dict[str, dict[str, int]], dict[str, int]]:
+    requested_ports: list[int] | set[int] | tuple[int, ...] | None = None,
+) -> tuple[
+    list[str],
+    str,
+    dict[str, dict[str, int]],
+    dict[str, int],
+    dict[int, dict[str, int]],
+]:
+    ports = sorted(
+        {
+            normalize_server_port(port, SHADOWSOCKS_SERVER_PORT)
+            for port in (requested_ports or [])
+            if normalize_server_port(port, SHADOWSOCKS_SERVER_PORT) > 0
+        }
+    )
+    if not ports:
+        ports = [SHADOWSOCKS_SERVER_PORT]
+    ports_query = ",".join(str(port) for port in ports)
     if KCPTUN_ENABLED:
         detect_mode = "kcptun"
     else:
@@ -6889,10 +7043,10 @@ def get_runtime_active_peer_hosts(
     if use_vpn_api(user=user, server_row=server_row):
         if KCPTUN_ENABLED:
             path = (
-                f"/kcptun/active-peers?window={int(max(30, window_seconds))}&limit=800"
+                f"/kcptun/active-peers?window={int(max(30, window_seconds))}&limit=800&ports={ports_query}"
             )
         else:
-            path = "/shadowsocks/active-peers"
+            path = f"/shadowsocks/active-peers?ports={ports_query}"
         result = vpn_api_request(
             "GET",
             path,
@@ -6903,6 +7057,11 @@ def get_runtime_active_peer_hosts(
         peers = result.get("peers") if isinstance(result, dict) else []
         peer_stats_raw = result.get("peer_stats") if isinstance(result, dict) else {}
         aggregate_raw = result.get("aggregate") if isinstance(result, dict) else {}
+        port_stats_raw = (
+            result.get("aggregate_by_port")
+            if isinstance(result, dict)
+            else {}
+        )
         cleaned: list[str] = []
         for item in peers or []:
             host = normalize_public_client_ip(str(item or ""))
@@ -6922,6 +7081,21 @@ def get_runtime_active_peer_hosts(
                     "tx_bytes": tx,
                     "total_bytes": to_non_negative_int(stat_obj.get("total_bytes", rx + tx)),
                 }
+        port_stats: dict[int, dict[str, int]] = {}
+        if isinstance(port_stats_raw, dict):
+            for port_raw, stat_raw in port_stats_raw.items():
+                port = normalize_server_port(port_raw, 0)
+                if port <= 0:
+                    continue
+                stat_obj = stat_raw if isinstance(stat_raw, dict) else {}
+                rx = to_non_negative_int(stat_obj.get("rx_bytes", 0))
+                tx = to_non_negative_int(stat_obj.get("tx_bytes", 0))
+                total = to_non_negative_int(stat_obj.get("total_bytes", rx + tx))
+                port_stats[int(port)] = {
+                    "rx_bytes": rx,
+                    "tx_bytes": tx,
+                    "total_bytes": total if total > 0 else (rx + tx),
+                }
         aggregate = {
             "rx_bytes": to_non_negative_int(
                 (aggregate_raw.get("rx_bytes", 0) if isinstance(aggregate_raw, dict) else 0)
@@ -6935,13 +7109,13 @@ def get_runtime_active_peer_hosts(
         }
         if aggregate["total_bytes"] <= 0:
             aggregate["total_bytes"] = aggregate["rx_bytes"] + aggregate["tx_bytes"]
-        return sorted(set(cleaned)), detect_mode, peer_stats, aggregate
+        return sorted(set(cleaned)), detect_mode, peer_stats, aggregate, port_stats
     if KCPTUN_ENABLED:
         peers = get_local_kcptun_active_peer_hosts(window_seconds)
-        _ss_peers, _ss_stats, ss_aggregate = get_local_shadowsocks_active_peer_snapshot()
-        return peers, detect_mode, {}, ss_aggregate
-    peers, peer_stats, aggregate = get_local_shadowsocks_active_peer_snapshot()
-    return peers, detect_mode, peer_stats, aggregate
+        _ss_peers, _ss_stats, ss_aggregate, ss_port_stats = get_local_shadowsocks_active_peer_snapshot(ports)
+        return peers, detect_mode, {}, ss_aggregate, ss_port_stats
+    peers, peer_stats, aggregate, port_stats = get_local_shadowsocks_active_peer_snapshot(ports)
+    return peers, detect_mode, peer_stats, aggregate, port_stats
 
 
 def get_wireguard_server_public_key(
@@ -7303,9 +7477,25 @@ def resolve_shadowsocks_endpoint_host(
     return ""
 
 
+def prepare_user_for_transport(user: DatabaseRow) -> DatabaseRow:
+    role = (row_get(user, "role", "") or "").strip().lower()
+    if role not in {"user", "admin"}:
+        return user
+    user_id = row_get(user, "id")
+    if user_id is None or not str(user_id).strip():
+        return user
+    try:
+        db = get_db()
+    except Exception:
+        return user
+    refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+    if refreshed is None:
+        return user
+    return ensure_user_transport_ports(db, refreshed)
+
+
 def derive_user_shadowsocks_password(user: DatabaseRow) -> str:
-    _ = user
-    return SHADOWSOCKS_PASSWORD
+    return derive_shadowsocks_password_for_port(get_user_shadowsocks_server_port(user))
 
 
 def build_user_shadowsocks_config(
@@ -7313,12 +7503,14 @@ def build_user_shadowsocks_config(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
+    user = prepare_user_for_transport(user)
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
         raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
+    server_port = get_user_shadowsocks_server_port(user)
     config_obj = {
         "server": host,
-        "server_port": SHADOWSOCKS_SERVER_PORT,
+        "server_port": server_port,
         "password": derive_user_shadowsocks_password(user),
         "method": SHADOWSOCKS_METHOD,
         "mode": "tcp_and_udp",
@@ -7332,6 +7524,7 @@ def build_user_kcptun_config(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
+    user = prepare_user_for_transport(user)
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
         raise RuntimeError("未找到可用的 kcptun 节点地址。")
@@ -7369,11 +7562,13 @@ def build_user_kcptun_clash_profile(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
+    user = prepare_user_for_transport(user)
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
         raise RuntimeError("未找到可用的 kcptun 节点地址。")
     username = (row_get(user, "username", "") or "").strip() or "vpn-user"
     proxy_name = f"kcptun-{safe_name(username)}"
+    kcptun_ss_password = derive_shadowsocks_password_for_port(SHADOWSOCKS_SERVER_PORT)
 
     def yaml_str(value: str) -> str:
         return json.dumps(value, ensure_ascii=False)
@@ -7388,7 +7583,7 @@ def build_user_kcptun_clash_profile(
             server: {yaml_str(host)}
             port: {KCPTUN_SERVER_PORT}
             cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-            password: {yaml_str(derive_user_shadowsocks_password(user))}
+            password: {yaml_str(kcptun_ss_password)}
             udp: true
             plugin: "kcptun"
             plugin-opts:
@@ -7418,13 +7613,16 @@ def build_user_shadowsocks_clash_profile(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
+    user = prepare_user_for_transport(user)
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
         raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
     username = (row_get(user, "username", "") or "").strip() or "vpn-user"
     ss_proxy_name = f"ss-{safe_name(username)}"
     kcptun_proxy_name = f"kcptun-{safe_name(username)}"
+    ss_port = get_user_shadowsocks_server_port(user)
     ss_password = derive_user_shadowsocks_password(user)
+    kcptun_ss_password = derive_shadowsocks_password_for_port(SHADOWSOCKS_SERVER_PORT)
 
     def yaml_str(value: str) -> str:
         return json.dumps(value, ensure_ascii=False)
@@ -7435,12 +7633,19 @@ def build_user_shadowsocks_clash_profile(
             mixed-port: 7890
             mode: rule
             proxies:
+              - name: {yaml_str(ss_proxy_name)}
+                type: ss
+                server: {yaml_str(host)}
+                port: {ss_port}
+                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
+                password: {yaml_str(ss_password)}
+                udp: true
               - name: {yaml_str(kcptun_proxy_name)}
                 type: ss
                 server: {yaml_str(host)}
                 port: {KCPTUN_SERVER_PORT}
                 cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-                password: {yaml_str(ss_password)}
+                password: {yaml_str(kcptun_ss_password)}
                 udp: true
                 plugin: "kcptun"
                 plugin-opts:
@@ -7448,25 +7653,18 @@ def build_user_shadowsocks_clash_profile(
                   crypt: {yaml_str(KCPTUN_CRYPT)}
                   mode: {yaml_str(KCPTUN_MODE)}
                   mtu: {KCPTUN_MTU}
-              - name: {yaml_str(ss_proxy_name)}
-                type: ss
-                server: {yaml_str(host)}
-                port: {SHADOWSOCKS_SERVER_PORT}
-                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-                password: {yaml_str(ss_password)}
-                udp: true
             proxy-groups:
               - name: "PROXY"
                 type: select
                 proxies:
-                  - {yaml_str(kcptun_proxy_name)}
                   - {yaml_str(ss_proxy_name)}
+                  - {yaml_str(kcptun_proxy_name)}
                   - "DIRECT"
               - name: "GLOBAL"
                 type: select
                 proxies:
-                  - {yaml_str(kcptun_proxy_name)}
                   - {yaml_str(ss_proxy_name)}
+                  - {yaml_str(kcptun_proxy_name)}
                   - "DIRECT"
             rules:
               - MATCH,PROXY
@@ -7481,7 +7679,7 @@ def build_user_shadowsocks_clash_profile(
           - name: {yaml_str(ss_proxy_name)}
             type: ss
             server: {yaml_str(host)}
-            port: {SHADOWSOCKS_SERVER_PORT}
+            port: {ss_port}
             cipher: {yaml_str(SHADOWSOCKS_METHOD)}
             password: {yaml_str(ss_password)}
             udp: true
@@ -7507,14 +7705,16 @@ def build_user_shadowsocks_uri(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
+    user = prepare_user_for_transport(user)
     host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
     if not host:
         raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
     user_label = (row_get(user, "email", "") or row_get(user, "username", "") or "vpn-user").strip()
+    ss_port = get_user_shadowsocks_server_port(user)
     raw_auth = f"{SHADOWSOCKS_METHOD}:{derive_user_shadowsocks_password(user)}"
     auth = base64.urlsafe_b64encode(raw_auth.encode("utf-8")).decode("ascii").rstrip("=")
     return (
-        f"ss://{auth}@{host}:{SHADOWSOCKS_SERVER_PORT}"
+        f"ss://{auth}@{host}:{ss_port}"
         f"#{urllib_parse.quote(user_label, safe='')}"
     )
 
@@ -9971,6 +10171,8 @@ def load_admin_online_users(
                 email,
                 assigned_ip,
                 assigned_server_id,
+                wg_ingress_port,
+                openvpn_ingress_port,
                 client_public_key,
                 subscription_expires_at,
                 traffic_used_bytes,
@@ -9994,6 +10196,8 @@ def load_admin_online_users(
                 email,
                 assigned_ip,
                 assigned_server_id,
+                wg_ingress_port,
+                openvpn_ingress_port,
                 client_public_key,
                 subscription_expires_at,
                 traffic_used_bytes,
@@ -10005,6 +10209,13 @@ def load_admin_online_users(
             ORDER BY id DESC
             """
         ).fetchall()
+    hydrated_users: list[DatabaseRow] = []
+    for user in users:
+        try:
+            hydrated_users.append(ensure_user_transport_ports(db, user))
+        except Exception:
+            hydrated_users.append(user)
+    users = hydrated_users
     servers = db.execute(
         """
         SELECT *
@@ -10025,6 +10236,8 @@ def load_admin_online_users(
     active_peer_hosts_by_source: dict[str, set[str]] = {}
     active_peer_stats_by_source: dict[str, dict[str, dict[str, int]]] = {}
     aggregate_stats_by_source: dict[str, dict[str, int]] = {}
+    active_port_stats_by_source: dict[str, dict[int, dict[str, int]]] = {}
+    requested_ports_by_source: dict[str, set[int]] = {}
     cache_errors: dict[str, str] = {}
     online_users: list[dict] = []
     source_labels: dict[str, str] = {}
@@ -10108,6 +10321,9 @@ def load_admin_online_users(
         source_key, server_row, server_name = resolve_user_source(user)
         user_source_meta[int(user["id"])] = (source_key, server_row, server_name)
         source_labels[source_key] = server_name
+        requested_ports_by_source.setdefault(source_key, set()).add(
+            get_user_shadowsocks_server_port(user)
+        )
 
     if use_wireguard_source:
         for user in users:
@@ -10163,10 +10379,11 @@ def load_admin_online_users(
             if source_key in active_peer_hosts_by_source:
                 continue
             try:
-                peers, source_mode, peer_stats, aggregate_stats = get_runtime_active_peer_hosts(
+                peers, source_mode, peer_stats, aggregate_stats, port_stats = get_runtime_active_peer_hosts(
                     user=user,
                     server_row=server_row,
                     window_seconds=online_window_seconds,
+                    requested_ports=sorted(requested_ports_by_source.get(source_key, set())),
                 )
                 active_peer_hosts_by_source[source_key] = set(peers)
                 active_peer_stats_by_source[source_key] = peer_stats or {}
@@ -10175,6 +10392,7 @@ def load_admin_online_users(
                     "tx_bytes": 0,
                     "total_bytes": 0,
                 }
+                active_port_stats_by_source[source_key] = port_stats or {}
                 detect_mode = source_mode or detect_mode
             except Exception as exc:
                 active_peer_hosts_by_source[source_key] = set()
@@ -10184,6 +10402,7 @@ def load_admin_online_users(
                     "tx_bytes": 0,
                     "total_bytes": 0,
                 }
+                active_port_stats_by_source[source_key] = {}
                 cache_errors[source_key] = str(exc)
 
         matched_user_ids: set[int] = set()
@@ -10203,6 +10422,13 @@ def load_admin_online_users(
             matched_user_ids.add(user_id)
             matched_peer_by_source.setdefault(source_key, set()).add(login_ip)
             peer_state = active_peer_stats_by_source.get(source_key, {}).get(login_ip, {})
+            user_ss_port = get_user_shadowsocks_server_port(user)
+            port_state = active_port_stats_by_source.get(source_key, {}).get(user_ss_port, {})
+            rx_bytes = to_non_negative_int(peer_state.get("rx_bytes", 0))
+            tx_bytes = to_non_negative_int(peer_state.get("tx_bytes", 0))
+            if rx_bytes <= 0 and tx_bytes <= 0:
+                rx_bytes = to_non_negative_int(port_state.get("rx_bytes", 0))
+                tx_bytes = to_non_negative_int(port_state.get("tx_bytes", 0))
             online_users.append(
                 build_online_row(
                     user,
@@ -10210,8 +10436,34 @@ def load_admin_online_users(
                     source_key=source_key,
                     endpoint=login_ip,
                     latest_handshake=now_ts,
-                    rx_bytes=to_non_negative_int(peer_state.get("rx_bytes", 0)),
-                    tx_bytes=to_non_negative_int(peer_state.get("tx_bytes", 0)),
+                    rx_bytes=rx_bytes,
+                    tx_bytes=tx_bytes,
+                )
+            )
+
+        for user in users:
+            user_id = int(user["id"])
+            if user_id in matched_user_ids:
+                continue
+            source_key, _, server_name = user_source_meta[user_id]
+            user_ss_port = get_user_shadowsocks_server_port(user)
+            port_state = active_port_stats_by_source.get(source_key, {}).get(user_ss_port, {})
+            rx_bytes = to_non_negative_int(port_state.get("rx_bytes", 0))
+            tx_bytes = to_non_negative_int(port_state.get("tx_bytes", 0))
+            if rx_bytes <= 0 and tx_bytes <= 0:
+                continue
+            matched_user_ids.add(user_id)
+            login_ip = normalize_public_client_ip(row_get(user, "last_login_ip", ""))
+            endpoint = login_ip or f"port:{user_ss_port}"
+            online_users.append(
+                build_online_row(
+                    user,
+                    server_name=server_name,
+                    source_key=source_key,
+                    endpoint=endpoint,
+                    latest_handshake=now_ts,
+                    rx_bytes=rx_bytes,
+                    tx_bytes=tx_bytes,
                 )
             )
 
@@ -10231,6 +10483,19 @@ def load_admin_online_users(
             if len(candidate_users) == 1 and len(unmatched_peers) == 1:
                 user = candidate_users[0]
                 matched_user_ids.add(int(user["id"]))
+                guessed_peer_state = (
+                    active_peer_stats_by_source.get(source_key, {})
+                    .get(unmatched_peers[0], {})
+                )
+                guessed_rx = to_non_negative_int(guessed_peer_state.get("rx_bytes", 0))
+                guessed_tx = to_non_negative_int(guessed_peer_state.get("tx_bytes", 0))
+                if guessed_rx <= 0 and guessed_tx <= 0:
+                    guessed_port_state = active_port_stats_by_source.get(source_key, {}).get(
+                        get_user_shadowsocks_server_port(user),
+                        {},
+                    )
+                    guessed_rx = to_non_negative_int(guessed_port_state.get("rx_bytes", 0))
+                    guessed_tx = to_non_negative_int(guessed_port_state.get("tx_bytes", 0))
                 online_users.append(
                     build_online_row(
                         user,
@@ -10238,16 +10503,8 @@ def load_admin_online_users(
                         source_key=source_key,
                         endpoint=unmatched_peers[0],
                         latest_handshake=now_ts,
-                        rx_bytes=to_non_negative_int(
-                            active_peer_stats_by_source.get(source_key, {})
-                            .get(unmatched_peers[0], {})
-                            .get("rx_bytes", 0)
-                        ),
-                        tx_bytes=to_non_negative_int(
-                            active_peer_stats_by_source.get(source_key, {})
-                            .get(unmatched_peers[0], {})
-                            .get("tx_bytes", 0)
-                        ),
+                        rx_bytes=guessed_rx,
+                        tx_bytes=guessed_tx,
                     )
                 )
                 continue
