@@ -13,6 +13,7 @@ BRANCH="${BRANCH:-main}"
 SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
 SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
 SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
+KCPTUN_ENABLED="${KCPTUN_ENABLED:-1}"
 KCPTUN_SERVER_PORT="${KCPTUN_SERVER_PORT:-29900}"
 KCPTUN_KEY="${KCPTUN_KEY:-}"
 KCPTUN_CRYPT="${KCPTUN_CRYPT:-aes}"
@@ -38,6 +39,13 @@ KCPTUN_SERVICE_NAME="vpnmanager-kcptun.service"
 VPN_API_SERVICE_NAME="vpnmanager-server.service"
 
 PM=""
+
+is_enabled() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 log() {
   echo "[manual-deploy] $*"
@@ -434,7 +442,8 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-  cat > "/etc/systemd/system/${KCPTUN_SERVICE_NAME}" <<EOF
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    cat > "/etc/systemd/system/${KCPTUN_SERVICE_NAME}" <<EOF
 [Unit]
 Description=VPN Manager kcptun Server
 After=network-online.target ${SHADOWSOCKS_SERVICE_NAME}
@@ -450,11 +459,19 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+  else
+    rm -f "/etc/systemd/system/${KCPTUN_SERVICE_NAME}"
+  fi
 
+  local api_after
+  api_after="network-online.target ${SHADOWSOCKS_SERVICE_NAME}"
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    api_after="${api_after} ${KCPTUN_SERVICE_NAME}"
+  fi
   cat > "/etc/systemd/system/${VPN_API_SERVICE_NAME}" <<EOF
 [Unit]
 Description=VPN Manager API Service
-After=network-online.target ${SHADOWSOCKS_SERVICE_NAME} ${KCPTUN_SERVICE_NAME}
+After=${api_after}
 Wants=network-online.target
 
 [Service]
@@ -480,7 +497,11 @@ start_services() {
 
   systemctl daemon-reload
   systemctl enable --now "${SHADOWSOCKS_SERVICE_NAME}"
-  systemctl enable --now "${KCPTUN_SERVICE_NAME}"
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    systemctl enable --now "${KCPTUN_SERVICE_NAME}"
+  else
+    systemctl disable --now "${KCPTUN_SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
   systemctl enable --now "${VPN_API_SERVICE_NAME}"
 }
 
@@ -502,16 +523,24 @@ print_summary() {
   echo "================ Local Deploy Completed ================"
   echo "APP_DIR: ${APP_DIR}"
   echo "Shadowsocks: ${SHADOWSOCKS_SERVER_PORT}/tcp+udp (${SHADOWSOCKS_METHOD})"
-  echo "kcptun: ${KCPTUN_SERVER_PORT}/udp"
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    echo "kcptun: ${KCPTUN_SERVER_PORT}/udp"
+  else
+    echo "kcptun: disabled"
+  fi
   echo "VPN API: ${VPN_API_PUBLIC_PORT}/tcp"
   echo "VPN_API_TOKEN: ${VPN_API_TOKEN}"
   echo "SHADOWSOCKS_PASSWORD: ${SHADOWSOCKS_PASSWORD}"
-  echo "KCPTUN_KEY: ${KCPTUN_KEY}"
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    echo "KCPTUN_KEY: ${KCPTUN_KEY}"
+  fi
   echo "PORTAL_DB_PATH: ${PORTAL_DB_PATH}"
   echo
   echo "Service status checks:"
   systemctl --no-pager --full status "${SHADOWSOCKS_SERVICE_NAME}" | sed -n '1,6p' || true
-  systemctl --no-pager --full status "${KCPTUN_SERVICE_NAME}" | sed -n '1,6p' || true
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    systemctl --no-pager --full status "${KCPTUN_SERVICE_NAME}" | sed -n '1,6p' || true
+  fi
   systemctl --no-pager --full status "${VPN_API_SERVICE_NAME}" | sed -n '1,6p' || true
   echo "======================================================="
 }
@@ -531,15 +560,19 @@ main() {
   if [ -z "${SHADOWSOCKS_PASSWORD}" ]; then
     SHADOWSOCKS_PASSWORD="$(generate_token)"
   fi
-  if [ -z "${KCPTUN_KEY}" ]; then
+  if is_enabled "${KCPTUN_ENABLED}" && [ -z "${KCPTUN_KEY}" ]; then
     KCPTUN_KEY="$(generate_token)"
   fi
 
   PORTAL_DB_PATH="$(resolve_portal_db_path)"
 
-  ensure_kcptun_binary
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    ensure_kcptun_binary
+  fi
   write_shadowsocks_config
-  write_kcptun_config
+  if is_enabled "${KCPTUN_ENABLED}"; then
+    write_kcptun_config
+  fi
   ensure_python_runtime
   write_systemd_units
   start_services

@@ -16,6 +16,7 @@ LOCAL_VPN_APP_DIR="${LOCAL_VPN_APP_DIR:-/srv/vpn-node}"
 INSTALL_LOCAL_VPN_SERVER="${INSTALL_LOCAL_VPN_SERVER:-1}"
 SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
 KCPTUN_SERVER_PORT="${KCPTUN_SERVER_PORT:-29900}"
+KCPTUN_ENABLED="${KCPTUN_ENABLED:-1}"
 SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
 SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
 KCPTUN_KEY="${KCPTUN_KEY:-}"
@@ -469,7 +470,7 @@ prepare_env_install() {
   upsert_env "VPN_ENABLE_WIREGUARD" "0"
   upsert_env "OPENVPN_ENABLED" "0"
   upsert_env "SHADOWSOCKS_ENABLED" "1"
-  upsert_env "KCPTUN_ENABLED" "1"
+  upsert_env "KCPTUN_ENABLED" "${KCPTUN_ENABLED}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
   upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
   upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
@@ -521,7 +522,7 @@ prepare_env_upgrade() {
   upsert_env "VPN_ENABLE_WIREGUARD" "0"
   upsert_env "OPENVPN_ENABLED" "0"
   upsert_env "SHADOWSOCKS_ENABLED" "1"
-  upsert_env "KCPTUN_ENABLED" "1"
+  upsert_env "KCPTUN_ENABLED" "${KCPTUN_ENABLED}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
   upsert_env "SHADOWSOCKS_SERVER_PORT" "${OPENVPN_PUBLIC_PORT}"
   upsert_env "SHADOWSOCKS_METHOD" "${SHADOWSOCKS_METHOD}"
@@ -624,6 +625,7 @@ deploy_local_vpn_server() {
   REPO_URL="${REPO_URL}" \
   BRANCH="${BRANCH}" \
   KCPTUN_SERVER_PORT="${WG_PUBLIC_PORT}" \
+  KCPTUN_ENABLED="${KCPTUN_ENABLED}" \
   SHADOWSOCKS_SERVER_PORT="${OPENVPN_PUBLIC_PORT}" \
   SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD}" \
   SHADOWSOCKS_PASSWORD="$(read_env_value SHADOWSOCKS_PASSWORD || true)" \
@@ -844,10 +846,12 @@ verify_components() {
       systemctl --no-pager --full status "vpnmanager-shadowsocks.service" || true
       exit 1
     fi
-    if ! systemctl is-active --quiet "vpnmanager-kcptun.service"; then
-      err "vpnmanager-kcptun.service is not active"
-      systemctl --no-pager --full status "vpnmanager-kcptun.service" || true
-      exit 1
+    if [ "${KCPTUN_ENABLED}" = "1" ]; then
+      if ! systemctl is-active --quiet "vpnmanager-kcptun.service"; then
+        err "vpnmanager-kcptun.service is not active"
+        systemctl --no-pager --full status "vpnmanager-kcptun.service" || true
+        exit 1
+      fi
     fi
     if ! systemctl is-active --quiet "vpnmanager-server.service"; then
       err "vpnmanager-server.service is not active"
