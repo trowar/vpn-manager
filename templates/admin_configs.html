@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>配置下载</h2>
-  <p class="helper">管理员自用代理配置。当前协议为 Shadowsocks + kcptun。</p>
+  <p class="helper">管理员自用代理配置（Shadowsocks）。</p>
 </section>
 
 <section class="card">
@@ -23,7 +23,7 @@
     </div>
     <div class="stat-item">
       <span class="stat-label">协议</span>
-      <strong class="stat-value">Shadowsocks + kcptun</strong>
+      <strong class="stat-value">Shadowsocks</strong>
     </div>
     <div class="stat-item">
       <span class="stat-label">当前节点</span>
@@ -41,7 +41,7 @@
 
   <section class="feature-item" style="margin-bottom:12px;">
     <h4>默认节点</h4>
-    <p>管理员下载 Shadowsocks / kcptun 配置时，将使用此默认节点生成出口地址。</p>
+    <p>管理员下载 Shadowsocks 配置时，将使用此默认节点生成出口地址。</p>
     {% if available_servers %}
       <form method="post" action="{{ url_for('admin_set_default_server') }}" class="form">
         <label>选择默认节点
@@ -65,29 +65,19 @@
   <div class="actions">
     {% if admin_vpn_ready and shadowsocks_enabled %}
       <a class="btn" href="{{ admin_ss_download_link }}">下载管理员 Shadowsocks 配置</a>
-      <a class="btn secondary" href="{{ admin_kcptun_download_link }}">下载管理员 kcptun 配置</a>
     {% elif not shadowsocks_enabled %}
       <button type="button" disabled>Shadowsocks 已关闭</button>
-      <button type="button" class="secondary" disabled>kcptun 已关闭</button>
     {% else %}
       <button type="button" disabled>管理员配置未就绪</button>
-      <button type="button" class="secondary" disabled>管理员配置未就绪</button>
     {% endif %}
   </div>
+
   {% if admin_vpn_ready and shadowsocks_enabled %}
     <div class="form" style="margin-top:10px;">
       <label>管理员 Shadowsocks 下载链接
         <input type="text" readonly value="{{ admin_ss_download_link }}">
       </label>
-      {% if kcptun_enabled %}
-        <label>管理员 kcptun 下载链接
-          <input type="text" readonly value="{{ admin_kcptun_download_link }}">
-        </label>
-      {% endif %}
     </div>
-  {% endif %}
-
-  {% if admin_vpn_ready and shadowsocks_enabled %}
     <div class="payment-qr-wrap" id="admin-inline-qr">
       <img src="{{ url_for('admin_download_qr') }}" alt="管理员 Shadowsocks 二维码">
     </div>

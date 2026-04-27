@@ -44,7 +44,7 @@
 
     <section class="feature-item" style="margin-bottom:12px;">
       <h4>切换默认服务器</h4>
-      <p>切换后请重新下载 Shadowsocks / kcptun 配置并重新连接。</p>
+      <p>切换后请重新下载 Shadowsocks 配置并重新连接。</p>
       {% if available_servers %}
         <form method="post" action="{{ url_for('dashboard_select_server') }}" class="form">
           <label>默认服务器
@@ -67,20 +67,15 @@
 
     <div class="feature-grid guide-grid">
       <div class="feature-item">
-        <h4>Shadowsocks + kcptun</h4>
-        <p>当前系统默认协议。建议先下载 kcptun 配置，再在 Shadowsocks 客户端中将服务器地址指向 kcptun 本地端口。</p>
+        <h4>Shadowsocks</h4>
+        <p>当前系统仅需下载 Shadowsocks 配置文件即可使用。</p>
         <div class="actions">
           {% if active and shadowsocks_enabled %}
             <a class="btn" href="{{ ss_download_link }}">下载 Shadowsocks 配置</a>
-            {% if kcptun_enabled %}
-              <a class="btn secondary" href="{{ kcptun_download_link }}">下载 kcptun 配置</a>
-            {% endif %}
           {% elif not shadowsocks_enabled %}
             <button type="button" disabled>Shadowsocks 已关闭</button>
-            <button type="button" class="secondary" disabled>kcptun 已关闭</button>
           {% else %}
             <button type="button" disabled>下载 Shadowsocks 配置（未生效）</button>
-            <button type="button" class="secondary" disabled>下载 kcptun 配置（未生效）</button>
           {% endif %}
         </div>
         {% if active and shadowsocks_enabled %}
@@ -88,14 +83,7 @@
             <label>Shadowsocks 下载链接
               <input type="text" readonly value="{{ ss_download_link }}">
             </label>
-            {% if kcptun_enabled %}
-              <label>kcptun 下载链接
-                <input type="text" readonly value="{{ kcptun_download_link }}">
-              </label>
-            {% endif %}
           </div>
-        {% endif %}
-        {% if active and shadowsocks_enabled %}
           <div class="payment-qr-wrap payment-qr-wrap-inline">
             <img src="{{ url_for('download_qr') }}" alt="Shadowsocks 二维码" loading="eager">
           </div>
@@ -103,8 +91,9 @@
           <p class="helper">二维码内容为 `ss://` 导入链接，切换节点后请重新扫码。</p>
         {% endif %}
       </div>
+
       <div class="feature-item">
-        <h4>多平台客户端</h4>
+        <h4>客户端下载</h4>
         <p>推荐使用 KaringX / ClashMi 统一客户端，支持多平台安装。</p>
         <div class="actions">
           <a class="btn secondary" href="https://github.com/KaringX/clashmi/releases" target="_blank" rel="noopener">打开客户端发布页</a>
@@ -122,12 +111,10 @@
     <h4>使用说明</h4>
     <ol class="guide-steps">
       <li>先选择默认服务器节点，再下载配置。</li>
-      <li>下载 `Shadowsocks` 配置（`ss-*.json`）并导入客户端。</li>
-      <li>下载 `kcptun` 配置（`kcptun-*.json`）并先启动 kcptun 客户端。</li>
-      <li>在 Shadowsocks 客户端内将服务器地址改为 `127.0.0.1`，端口改为 `12948`（kcptun 本地端口）。</li>
+      <li>下载 `Shadowsocks` 配置（`*.yaml`）并导入客户端。</li>
+      <li>连接成功后访问 `https://ip.sb` 核对出口 IP。</li>
       <li>切换节点后请重新下载并导入配置。</li>
     </ol>
-    <p class="helper">如果你临时不使用 kcptun，也可以直接使用 Shadowsocks 配置直连服务器。</p>
   </section>
 </div>
 {% endblock %}

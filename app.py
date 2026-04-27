@@ -1346,6 +1346,13 @@ def build_masked_download_link(
     return absolute_url_for("download_via_token", **values)
 
 
+def build_download_filename_for_user(user: DatabaseRow, *, build_raw: bool) -> str:
+    username = safe_name((row_get(user, "username", "") or "").strip() or "user")
+    stamp = datetime.now(ADMIN_UI_TZ).strftime("%Y%m%d%H%M%S")
+    ext = "json" if build_raw else "yaml"
+    return f"{username}-{stamp}.{ext}"
+
+
 def is_non_public_host(raw_host: str | None) -> bool:
     host = host_without_optional_port(raw_host).strip().lower().rstrip(".")
     if not host:
@@ -6332,7 +6339,7 @@ def inject_user():
         "wireguard_enabled": bool(WIREGUARD_ENABLED and system_settings["wireguard_open"]),
         "openvpn_enabled": bool(OPENVPN_ENABLED and system_settings["openvpn_open"]),
         "shadowsocks_enabled": bool(SHADOWSOCKS_ENABLED),
-        "kcptun_enabled": bool(KCPTUN_ENABLED),
+        "kcptun_enabled": False,
         "registration_open": bool(system_settings["registration_open"]),
         "telegram_contact": str(system_settings["telegram_contact"]),
         "site_title": str(system_settings["site_title"]),
@@ -9122,17 +9129,12 @@ def dashboard_config():
         node_alert_text = "当前节点异常，系统正在切换。"
 
     ss_access_token = build_download_access_token(user, "download-config-user")
-    kcptun_access_token = build_download_access_token(user, "download-kcptun-user")
     ss_download_link = (
         build_masked_download_link(ss_access_token, output_format="yaml")
         if SHADOWSOCKS_ENABLED
         else ""
     )
-    kcptun_download_link = (
-        build_masked_download_link(kcptun_access_token, output_format="yaml")
-        if KCPTUN_ENABLED
-        else ""
-    )
+    kcptun_download_link = ""
     ss_qr_link = absolute_url_for("download_qr") if SHADOWSOCKS_ENABLED else ""
 
     return render_template(
@@ -9157,7 +9159,7 @@ def dashboard_regenerate_config():
     if user["role"] == "admin":
         flash("管理员请在管理员配置页操作。", "error")
         return redirect(url_for("admin_configs"))
-    flash("当前使用 Shadowsocks + kcptun，配置为按用户动态生成，无需手动重建。", "success")
+    flash("当前使用 Shadowsocks，配置为按用户动态生成，无需手动重建。", "success")
     return redirect(url_for("dashboard_config"))
 
 
@@ -11360,7 +11362,7 @@ def admin_configs():
         return redirect(url_for("admin_home"))
 
     admin_vpn_ready = bool(SHADOWSOCKS_ENABLED)
-    admin_vpn_status_text = "已就绪（Shadowsocks + kcptun）" if SHADOWSOCKS_ENABLED else "未启用"
+    admin_vpn_status_text = "已就绪（Shadowsocks）" if SHADOWSOCKS_ENABLED else "未启用"
     admin_vpn_error = ""
     endpoint_display = "-"
 
@@ -11391,17 +11393,12 @@ def admin_configs():
         selected_default_server_id = int(row_get(target_server, "id", 0) or 0)
 
     admin_ss_access_token = build_download_access_token(admin, "download-config-admin")
-    admin_kcptun_access_token = build_download_access_token(admin, "download-kcptun-admin")
     admin_ss_download_link = (
         build_masked_download_link(admin_ss_access_token, output_format="yaml")
         if SHADOWSOCKS_ENABLED
         else ""
     )
-    admin_kcptun_download_link = (
-        build_masked_download_link(admin_kcptun_access_token, output_format="yaml")
-        if KCPTUN_ENABLED
-        else ""
-    )
+    admin_kcptun_download_link = ""
     admin_ss_qr_link = absolute_url_for("admin_download_qr") if SHADOWSOCKS_ENABLED else ""
 
     db.commit()
@@ -13342,7 +13339,7 @@ def download_via_token(access_token: str):
             if build_raw
             else build_user_shadowsocks_clash_profile(admin)
         )
-        filename = f"ss-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
+        filename = build_download_filename_for_user(admin, build_raw=build_raw)
         return response_with_content(config_text, filename)
 
     user_ss = resolve_download_access_user(db, token, "download-config-user")
@@ -13362,7 +13359,7 @@ def download_via_token(access_token: str):
             if build_raw
             else build_user_shadowsocks_clash_profile(user)
         )
-        filename = f"ss-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
+        filename = build_download_filename_for_user(user, build_raw=build_raw)
         return response_with_content(config_text, filename)
 
     admin_kcptun = resolve_download_access_user(db, token, "download-kcptun-admin")
@@ -13382,9 +13379,7 @@ def download_via_token(access_token: str):
             if build_raw
             else build_user_kcptun_clash_profile(admin)
         )
-        filename = (
-            f"kcptun-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
-        )
+        filename = build_download_filename_for_user(admin, build_raw=build_raw)
         return response_with_content(config_text, filename)
 
     user_kcptun = resolve_download_access_user(db, token, "download-kcptun-user")
@@ -13404,7 +13399,7 @@ def download_via_token(access_token: str):
             if build_raw
             else build_user_kcptun_clash_profile(user)
         )
-        filename = f"kcptun-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
+        filename = build_download_filename_for_user(user, build_raw=build_raw)
         return response_with_content(config_text, filename)
 
     return config_download_error("invalid or missing access token", status=401)
@@ -13455,7 +13450,7 @@ def download_config():
         flash(f"Shadowsocks 配置生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"ss-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
+    filename = build_download_filename_for_user(user, build_raw=build_raw)
     headers = {
         "Content-Disposition": f'attachment; filename=\"{filename}\"',
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -13507,7 +13502,7 @@ def admin_download_config():
         flash(f"管理员 Shadowsocks 配置生成失败：{exc}", "error")
         return redirect(url_for("admin_home"))
 
-    filename = f"ss-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
+    filename = build_download_filename_for_user(admin, build_raw=build_raw)
     headers = {
         "Content-Disposition": f'attachment; filename=\"{filename}\"',
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -13562,7 +13557,7 @@ def download_kcptun_config():
         flash(f"kcptun 配置生成失败：{exc}", "error")
         return redirect(url_for("dashboard_home"))
 
-    filename = f"kcptun-{safe_name(user['username'])}.{'json' if build_raw else 'yaml'}"
+    filename = build_download_filename_for_user(user, build_raw=build_raw)
     headers = {
         "Content-Disposition": f'attachment; filename=\"{filename}\"',
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -13614,7 +13609,7 @@ def admin_download_kcptun_config():
         flash(f"管理员 kcptun 配置生成失败：{exc}", "error")
         return redirect(url_for("admin_home"))
 
-    filename = f"kcptun-admin-{safe_name(admin['username'])}.{'json' if build_raw else 'yaml'}"
+    filename = build_download_filename_for_user(admin, build_raw=build_raw)
     headers = {
         "Content-Disposition": f'attachment; filename=\"{filename}\"',
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -13627,7 +13622,7 @@ def admin_download_kcptun_config():
 @app.route("/download/openvpn")
 @login_required
 def download_openvpn_config():
-    flash("系统已切换为 Shadowsocks + kcptun，OpenVPN 下载入口已停用。", "error")
+    flash("系统已切换为 Shadowsocks，OpenVPN 下载入口已停用。", "error")
     return redirect(url_for("dashboard_config"))
 
 
@@ -13635,7 +13630,7 @@ def download_openvpn_config():
 @login_required
 @admin_required
 def admin_download_openvpn_config():
-    flash("系统已切换为 Shadowsocks + kcptun，OpenVPN 下载入口已停用。", "error")
+    flash("系统已切换为 Shadowsocks，OpenVPN 下载入口已停用。", "error")
     return redirect(url_for("admin_configs"))
 
 
