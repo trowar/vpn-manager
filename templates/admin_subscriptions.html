@@ -55,6 +55,7 @@
             <th>邮箱</th>
             <th>IP</th>
             <th>到期时间</th>
+            <th>流量总量/已用流量</th>
             <th>VPN 状态</th>
             <th>编辑</th>
           </tr>
@@ -70,6 +71,7 @@
               </td>
               <td>{{ u["assigned_ip"] or "-" }}</td>
               <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
+              <td>{{ u["traffic_plan_usage_display"] }}</td>
               <td>
                 {% if u["wg_enabled"] == 1 %}
                   <span class="tag tag-ok">已启用</span>

@@ -10194,7 +10194,9 @@ def load_admin_subscriptions(db: DatabaseConnection, email_query: str = ""):
             email,
             assigned_ip,
             subscription_expires_at,
-            wg_enabled
+            wg_enabled,
+            traffic_quota_bytes,
+            traffic_used_bytes
         FROM users
         WHERE {normalized_role_sql} IN ('user', 'admin')
     """
@@ -10209,7 +10211,23 @@ def load_admin_subscriptions(db: DatabaseConnection, email_query: str = ""):
         + " = 'admin' THEN 1 ELSE 0 END, COALESCE(subscription_expires_at, '') DESC, id DESC"
     )
     base_sql = base_sql.format(normalized_role_sql=normalized_role_sql)
-    return db.execute(base_sql, params).fetchall()
+    rows = db.execute(base_sql, params).fetchall()
+    result: list[dict] = []
+    for row in rows:
+        quota_bytes = to_non_negative_int(row_get(row, "traffic_quota_bytes", 0))
+        used_bytes = to_non_negative_int(row_get(row, "traffic_used_bytes", 0))
+        if used_bytes > quota_bytes:
+            used_bytes = quota_bytes
+        if quota_bytes > 0:
+            traffic_plan_usage_display = (
+                f"{format_bytes_in_gb(quota_bytes)} / {format_bytes_in_gb(used_bytes)}"
+            )
+        else:
+            traffic_plan_usage_display = "-"
+        item = dict(row)
+        item["traffic_plan_usage_display"] = traffic_plan_usage_display
+        result.append(item)
+    return result
 
 
 def load_expiring_subscriptions(
