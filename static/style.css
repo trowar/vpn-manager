@@ -560,6 +560,30 @@ td {
   gap: 10px;
 }
 
+.stats-grid-single-row {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+.stats-grid-single-row .stat-item {
+  min-width: 180px;
+  flex: 1 0 180px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stats-grid-single-row .stat-label,
+.stats-grid-single-row .stat-value {
+  white-space: nowrap;
+}
+
+.stats-grid-single-row .stat-value {
+  font-size: 18px;
+}
+
 .overview-grid {
   margin-top: 10px;
   display: grid;

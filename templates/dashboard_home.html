@@ -28,7 +28,7 @@
     <p><strong>有效期至：</strong>{{ subscription_expiry_display }} ｜ <strong>流量剩余：</strong>{{ traffic_stats["remaining_display"] }}</p>
     <p><strong>权益信息：</strong>{{ benefit_summary }}</p>
 
-    <div class="stats-grid">
+    <div class="stats-grid stats-grid-single-row">
       <div class="stat-item">
         <span class="stat-label">已用总流量</span>
         <strong class="stat-value">{{ traffic_stats["total_human"] }}</strong>
@@ -41,19 +41,16 @@
         <span class="stat-label">上传流量</span>
         <strong class="stat-value">{{ traffic_stats["tx_human"] }}</strong>
       </div>
-    </div>
-
-    <div class="stats-grid">
       <div class="stat-item">
-        <span class="stat-label">Plan Total</span>
+        <span class="stat-label">套餐总量</span>
         <strong class="stat-value">{{ traffic_stats["plan_total_display"] }}</strong>
       </div>
       <div class="stat-item">
-        <span class="stat-label">Plan Used</span>
+        <span class="stat-label">套餐已用</span>
         <strong class="stat-value">{{ traffic_stats["plan_used_display"] }}</strong>
       </div>
       <div class="stat-item">
-        <span class="stat-label">Plan Remaining</span>
+        <span class="stat-label">套餐剩余</span>
         <strong class="stat-value">{{ traffic_stats["plan_remaining_display"] }}</strong>
       </div>
     </div>
