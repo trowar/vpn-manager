@@ -596,6 +596,20 @@ td {
   font-size: 18px;
 }
 
+.traffic-stats-wrap {
+  margin: 10px 0 14px;
+}
+
+.traffic-stats-table {
+  table-layout: fixed;
+}
+
+.traffic-stats-table th,
+.traffic-stats-table td {
+  text-align: center;
+  white-space: nowrap;
+}
+
 .overview-grid {
   margin-top: 10px;
   display: grid;

@@ -43,31 +43,25 @@
       <button type="submit" {% if not can_choose_duration and not can_choose_traffic %}disabled{% endif %}>保存设置</button>
     </form>
 
-    <div class="stats-grid stats-grid-single-row">
-      <div class="stat-item">
-        <span class="stat-label">已用总流量</span>
-        <strong class="stat-value">{{ traffic_stats["total_human"] }}</strong>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">下载流量</span>
-        <strong class="stat-value">{{ traffic_stats["rx_human"] }}</strong>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">上传流量</span>
-        <strong class="stat-value">{{ traffic_stats["tx_human"] }}</strong>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">套餐总量</span>
-        <strong class="stat-value">{{ traffic_stats["plan_total_display"] }}</strong>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">套餐已用</span>
-        <strong class="stat-value">{{ traffic_stats["plan_used_display"] }}</strong>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">套餐剩余</span>
-        <strong class="stat-value">{{ traffic_stats["plan_remaining_display"] }}</strong>
-      </div>
+    <div class="table-scroll traffic-stats-wrap">
+      <table class="subscriptions-table traffic-stats-table">
+        <thead>
+          <tr>
+            <th>已用总流量（GB）</th>
+            <th>实时下载（MB）</th>
+            <th>实时上传（MB）</th>
+            <th>套餐总量 / 剩余（GB）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{{ traffic_stats["total_gb"] }}</td>
+            <td>{{ traffic_stats["rx_mb"] }}</td>
+            <td>{{ traffic_stats["tx_mb"] }}</td>
+            <td>{{ traffic_stats["plan_total_remaining_gb"] }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div class="actions">

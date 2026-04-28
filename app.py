@@ -7176,6 +7176,16 @@ def format_bytes(num_bytes: int) -> str:
     return "0 B"
 
 
+def format_bytes_in_mb(num_bytes: int) -> str:
+    value = float(max(0, int(num_bytes))) / (1024 ** 2)
+    return f"{value:.2f} MB"
+
+
+def format_bytes_in_gb(num_bytes: int) -> str:
+    value = float(max(0, int(num_bytes))) / (1024 ** 3)
+    return f"{value:.2f} GB"
+
+
 def get_wireguard_peer_state(
     public_key: str | None,
     *,
@@ -7285,6 +7295,15 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
         plan_used_display = format_bytes(total_bytes)
         plan_remaining_display = "-"
 
+    if quota_bytes > 0:
+        plan_total_remaining_gb = (
+            f"{format_bytes_in_gb(quota_bytes)} / {format_bytes_in_gb(remaining_bytes)}"
+        )
+    elif has_time:
+        plan_total_remaining_gb = "不限 / 永久"
+    else:
+        plan_total_remaining_gb = "- / -"
+
     return {
         "rx_bytes": rx_bytes,
         "tx_bytes": tx_bytes,
@@ -7292,6 +7311,9 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
         "rx_human": format_bytes(rx_bytes),
         "tx_human": format_bytes(tx_bytes),
         "total_human": format_bytes(total_bytes),
+        "total_gb": format_bytes_in_gb(total_bytes),
+        "rx_mb": format_bytes_in_mb(rx_bytes),
+        "tx_mb": format_bytes_in_mb(tx_bytes),
         "quota_bytes": quota_bytes,
         "used_bytes": used_bytes,
         "remaining_bytes": remaining_bytes,
@@ -7303,6 +7325,7 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
         "plan_total_display": plan_total_display,
         "plan_used_display": plan_used_display,
         "plan_remaining_display": plan_remaining_display,
+        "plan_total_remaining_gb": plan_total_remaining_gb,
         "has_active_time": has_time,
         "has_active_traffic": has_traffic,
         "preferred_mode": preferred_mode,
