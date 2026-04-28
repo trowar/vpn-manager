@@ -12,55 +12,49 @@
     {% else %}
       {% set default_plan = available_plans[0] %}
       <div class="purchase-layout">
-        <div>
-          <table class="subscriptions-table purchase-plan-table">
-            <thead>
-              <tr>
-                <th>选择</th>
-                <th>套餐名称</th>
-                <th>收费模式</th>
-                <th>套餐内容</th>
-                <th>价格</th>
+        <table class="subscriptions-table purchase-plan-table">
+          <thead>
+            <tr>
+              <th>选择</th>
+              <th>套餐名称</th>
+              <th>收费模式</th>
+              <th>套餐内容</th>
+              <th>价格</th>
+            </tr>
+          </thead>
+          <tbody id="purchase-plan-body">
+            {% for plan in available_plans %}
+              <tr
+                class="purchase-plan-row {% if loop.first %}active{% endif %}"
+                data-plan-id="{{ plan['id'] }}"
+                data-plan-name="{{ plan['plan_name'] }}"
+                data-plan-mode="{{ plan['mode_label'] }}"
+                data-plan-value="{{ plan['value_label'] }}"
+                data-plan-display="{{ plan['display_name'] }}"
+                data-price="{{ plan['price_usdt'] }}"
+              >
+                <td>
+                  <input
+                    type="radio"
+                    name="selected_plan"
+                    class="purchase-plan-radio"
+                    value="{{ plan['id'] }}"
+                    {% if loop.first %}checked{% endif %}
+                  >
+                </td>
+                <td>{{ plan["plan_name"] }}</td>
+                <td>{{ plan["mode_label"] }}</td>
+                <td>{{ plan["value_label"] }}</td>
+                <td>{{ plan["price_usdt"] }} USDT</td>
               </tr>
-            </thead>
-            <tbody id="purchase-plan-body">
-              {% for plan in available_plans %}
-                <tr
-                  class="purchase-plan-row {% if loop.first %}active{% endif %}"
-                  data-plan-id="{{ plan['id'] }}"
-                  data-plan-name="{{ plan['plan_name'] }}"
-                  data-plan-mode="{{ plan['mode_label'] }}"
-                  data-plan-value="{{ plan['value_label'] }}"
-                  data-plan-display="{{ plan['display_name'] }}"
-                  data-price="{{ plan['price_usdt'] }}"
-                >
-                  <td>
-                    <input
-                      type="radio"
-                      name="selected_plan"
-                      class="purchase-plan-radio"
-                      value="{{ plan['id'] }}"
-                      {% if loop.first %}checked{% endif %}
-                    >
-                  </td>
-                  <td>{{ plan["plan_name"] }}</td>
-                  <td>{{ plan["mode_label"] }}</td>
-                  <td>{{ plan["value_label"] }}</td>
-                  <td>{{ plan["price_usdt"] }} USDT</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
+            {% endfor %}
+          </tbody>
+        </table>
 
-        <div class="purchase-summary">
-          <p>已选套餐：<strong><span id="selected-plan-name">{{ default_plan['display_name'] }}</span></strong></p>
-          <p>计费模式：<strong><span id="selected-plan-mode">{{ default_plan['mode_label'] }}</span></strong></p>
-          <p>套餐内容：<strong><span id="selected-plan-value">{{ default_plan['value_label'] }}</span></strong></p>
-          <p>应付金额：<strong><span id="selected-price">{{ default_plan['price_usdt'] }}</span> USDT</strong>（{{ usdt_default_network }}）</p>
+        <div class="purchase-actions">
           <button type="button" id="purchase-next" {% if pending_orders %}disabled{% endif %}>下一步</button>
           {% if pending_orders %}
-            <p class="helper">你有未完成订单，请先完成当前订单支付并提交 TxHash。</p>
+            <p class="helper purchase-actions-helper">你有未完成订单，请先完成当前订单支付并提交 TxHash。</p>
           {% endif %}
         </div>
       </div>
@@ -191,11 +185,6 @@
       return;
     }
 
-    var selectedPlanName = document.getElementById("selected-plan-name");
-    var selectedPlanMode = document.getElementById("selected-plan-mode");
-    var selectedPlanValue = document.getElementById("selected-plan-value");
-    var selectedPriceLabel = document.getElementById("selected-price");
-
     var modalPlanName = document.getElementById("modal-plan-name");
     var modalPlanMode = document.getElementById("modal-plan-mode");
     var modalPlanValue = document.getElementById("modal-plan-value");
@@ -222,19 +211,6 @@
       var planMode = row.getAttribute("data-plan-mode") || "";
       var planValue = row.getAttribute("data-plan-value") || "";
       var price = row.getAttribute("data-price") || "";
-
-      if (selectedPlanName) {
-        selectedPlanName.textContent = planDisplay;
-      }
-      if (selectedPlanMode) {
-        selectedPlanMode.textContent = planMode;
-      }
-      if (selectedPlanValue) {
-        selectedPlanValue.textContent = planValue;
-      }
-      if (selectedPriceLabel) {
-        selectedPriceLabel.textContent = price;
-      }
 
       if (modalPlanName) {
         modalPlanName.textContent = planDisplay;

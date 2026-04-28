@@ -5438,6 +5438,7 @@ def init_db() -> None:
             approved_at TEXT,
             subscription_expires_at TEXT,
             wg_enabled INTEGER NOT NULL DEFAULT 0,
+            preferred_billing_mode TEXT NOT NULL DEFAULT 'duration',
             traffic_quota_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_used_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0,
@@ -5747,6 +5748,10 @@ def migrate_schema(db: DatabaseConnection) -> None:
         db.execute("ALTER TABLE users ADD COLUMN subscription_expires_at TEXT")
     if "wg_enabled" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN wg_enabled INTEGER NOT NULL DEFAULT 0")
+    if "preferred_billing_mode" not in user_columns:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN preferred_billing_mode TEXT NOT NULL DEFAULT 'duration'"
+        )
     if "traffic_quota_bytes" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN traffic_quota_bytes INTEGER NOT NULL DEFAULT 0")
     if "traffic_used_bytes" not in user_columns:
@@ -5781,6 +5786,22 @@ def migrate_schema(db: DatabaseConnection) -> None:
         db.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT")
     if "session_version" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
+    db.execute(
+        """
+        UPDATE users
+        SET preferred_billing_mode = ?
+        WHERE preferred_billing_mode IS NULL OR trim(preferred_billing_mode) = ''
+        """,
+        (PLAN_MODE_DURATION,),
+    )
+    db.execute(
+        """
+        UPDATE users
+        SET preferred_billing_mode = ?
+        WHERE lower(trim(preferred_billing_mode)) NOT IN ('duration', 'traffic')
+        """,
+        (PLAN_MODE_DURATION,),
+    )
 
     order_columns = {
         row["name"]: row
@@ -7241,7 +7262,9 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
     remaining_bytes = max(0, quota_bytes - used_bytes)
     has_time = has_active_time_subscription(user)
     has_traffic = has_active_traffic_subscription(user)
-    remaining_is_permanent = has_time
+    preferred_mode = get_user_preferred_billing_mode(user)
+    effective_mode = get_user_effective_billing_mode(user)
+    remaining_is_permanent = has_time and effective_mode == PLAN_MODE_DURATION
     if remaining_is_permanent:
         remaining_display = "永久"
     elif quota_bytes > 0:
@@ -7282,6 +7305,10 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
         "plan_remaining_display": plan_remaining_display,
         "has_active_time": has_time,
         "has_active_traffic": has_traffic,
+        "preferred_mode": preferred_mode,
+        "preferred_mode_label": plan_mode_label(preferred_mode),
+        "effective_mode": effective_mode,
+        "effective_mode_label": plan_mode_label(effective_mode),
     }
 
 
@@ -8138,6 +8165,25 @@ def has_active_traffic_subscription(user: DatabaseRow) -> bool:
     return quota_bytes > 0 and used_bytes < quota_bytes
 
 
+def get_user_preferred_billing_mode(user: DatabaseRow) -> str:
+    return normalize_plan_mode(row_get(user, "preferred_billing_mode", PLAN_MODE_DURATION))
+
+
+def get_user_effective_billing_mode(user: DatabaseRow) -> str:
+    preferred_mode = get_user_preferred_billing_mode(user)
+    has_time = has_active_time_subscription(user)
+    has_traffic = has_active_traffic_subscription(user)
+    if preferred_mode == PLAN_MODE_TRAFFIC and has_traffic:
+        return PLAN_MODE_TRAFFIC
+    if preferred_mode == PLAN_MODE_DURATION and has_time:
+        return PLAN_MODE_DURATION
+    if has_time:
+        return PLAN_MODE_DURATION
+    if has_traffic:
+        return PLAN_MODE_TRAFFIC
+    return preferred_mode
+
+
 def sync_user_traffic_usage(
     db: DatabaseConnection,
     user: DatabaseRow,
@@ -8154,6 +8200,18 @@ def sync_user_traffic_usage(
         rx_bytes, tx_bytes = get_user_runtime_transfer_bytes(user)
         current_total_bytes = rx_bytes + tx_bytes
     current_total_bytes = max(0, int(current_total_bytes))
+    effective_mode = get_user_effective_billing_mode(user)
+    if (
+        has_active_time_subscription(user)
+        and effective_mode == PLAN_MODE_DURATION
+        and current_total_bytes != last_total_bytes
+    ):
+        db.execute(
+            "UPDATE users SET traffic_last_total_bytes = ? WHERE id = ?",
+            (current_total_bytes, user["id"]),
+        )
+        db.commit()
+        return db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
 
     traffic_delta = current_total_bytes - last_total_bytes
     if traffic_delta < 0:
@@ -9496,6 +9554,8 @@ def dashboard_home():
     current_plan_display = get_user_current_plan_display(db, user)
     has_time = has_active_time_subscription(user)
     has_traffic = has_active_traffic_subscription(user)
+    preferred_mode = get_user_preferred_billing_mode(user)
+    effective_mode = get_user_effective_billing_mode(user)
     if has_time and has_traffic:
         benefit_summary = "时长权益 + 流量权益"
     elif has_time:
@@ -9504,10 +9564,10 @@ def dashboard_home():
         benefit_summary = "流量权益（有效期永久）"
     else:
         benefit_summary = "暂无生效权益"
-    if has_traffic and not has_time:
-        subscription_expiry_display = "永久"
-    else:
+    if has_time:
         subscription_expiry_display = format_utc(user["subscription_expires_at"])
+    else:
+        subscription_expiry_display = "-"
     if is_dynamic_ip_assignment_mode():
         assigned_ip_display = "DHCP 动态分配"
     else:
@@ -9532,8 +9592,49 @@ def dashboard_home():
         assigned_ip_display=assigned_ip_display,
         current_server=current_server,
         node_alert_text=node_alert_text,
+        preferred_billing_mode=preferred_mode,
+        effective_billing_mode=effective_mode,
+        can_choose_duration=has_time,
+        can_choose_traffic=has_traffic,
         dashboard_page="home",
     )
+
+
+@app.route("/dashboard/billing-mode", methods=["POST"])
+@login_required
+def dashboard_set_billing_mode():
+    user = current_user()
+    if user["role"] == "admin":
+        return redirect(url_for("admin_home"))
+
+    requested_mode = normalize_plan_mode(request.form.get("billing_mode", PLAN_MODE_DURATION))
+    db = get_db()
+    reconcile_expired_subscriptions(db)
+    latest_user = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+        (int(user["id"]),),
+    ).fetchone()
+    if not latest_user:
+        flash("用户不存在。", "error")
+        return redirect(url_for("dashboard_home"))
+
+    latest_user = sync_user_traffic_usage(db, latest_user)
+    has_time = has_active_time_subscription(latest_user)
+    has_traffic = has_active_traffic_subscription(latest_user)
+    if requested_mode == PLAN_MODE_DURATION and not has_time:
+        flash("当前没有可用时长权益，无法切换为按时长。", "error")
+        return redirect(url_for("dashboard_home"))
+    if requested_mode == PLAN_MODE_TRAFFIC and not has_traffic:
+        flash("当前没有可用流量权益，无法切换为按流量。", "error")
+        return redirect(url_for("dashboard_home"))
+
+    db.execute(
+        "UPDATE users SET preferred_billing_mode = ? WHERE id = ? AND role = 'user'",
+        (requested_mode, int(latest_user["id"])),
+    )
+    db.commit()
+    flash(f"默认计费方式已切换为：{plan_mode_label(requested_mode)}。", "success")
+    return redirect(url_for("dashboard_home"))
 
 
 @app.route("/dashboard/guide")
@@ -13778,8 +13879,10 @@ def admin_set_user_expiry(user_id: int):
         flash("用户不存在。", "error")
         return redirect_admin_subscriptions()
 
+    user = sync_user_traffic_usage(db, user)
     try:
-        if expires_at_utc >= utcnow():
+        has_traffic = has_active_traffic_subscription(user)
+        if expires_at_utc >= utcnow() or has_traffic:
             vpn_data = ensure_user_vpn_ready(db, user)
             assigned_server_id = vpn_data.get("assigned_server_id")
             if assigned_server_id is None:
@@ -13912,7 +14015,18 @@ def admin_disable_user(user_id: int):
     db = get_db()
     user = db.execute(
         """
-        SELECT id, username, role, assigned_server_id, client_public_key, wg_enabled
+        SELECT
+            id,
+            username,
+            role,
+            assigned_server_id,
+            client_public_key,
+            wg_enabled,
+            subscription_expires_at,
+            preferred_billing_mode,
+            traffic_quota_bytes,
+            traffic_used_bytes,
+            traffic_last_total_bytes
         FROM users
         WHERE id = ? AND role = 'user'
         LIMIT 1
@@ -13921,6 +14035,11 @@ def admin_disable_user(user_id: int):
     ).fetchone()
     if not user:
         flash("用户不存在。", "error")
+        return redirect_admin_subscriptions()
+
+    user = sync_user_traffic_usage(db, user)
+    if has_active_traffic_subscription(user):
+        flash(f"用户 {user['username']} 仍有未用完的流量套餐，不能停用。", "error")
         return redirect_admin_subscriptions()
 
     try:
@@ -13958,6 +14077,71 @@ def admin_disable_user(user_id: int):
         except Exception:
             pass
         flash(f"停用用户失败：{exc}", "error")
+    return redirect_admin_subscriptions()
+
+
+@app.route("/admin/users/<int:user_id>/enable", methods=["POST"])
+@login_required
+@admin_required
+def admin_enable_user(user_id: int):
+    db = get_db()
+    user = db.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE id = ? AND role = 'user'
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    if not user:
+        flash("用户不存在。", "error")
+        return redirect_admin_subscriptions()
+
+    user = sync_user_traffic_usage(db, user)
+    if not (has_active_time_subscription(user) or has_active_traffic_subscription(user)):
+        flash(f"用户 {user['username']} 没有可用的时长或流量权益，无法启用。", "error")
+        return redirect_admin_subscriptions()
+
+    try:
+        vpn_data = ensure_user_vpn_ready(db, user)
+        assigned_server_id = vpn_data.get("assigned_server_id")
+        if assigned_server_id is None:
+            assigned_server_id = row_get(user, "assigned_server_id")
+        db.execute(
+            """
+            UPDATE users
+            SET assigned_ip = ?,
+                assigned_server_id = ?,
+                client_private_key = ?,
+                client_public_key = ?,
+                client_psk = ?,
+                config_path = ?,
+                qr_path = ?,
+                approved_at = ?,
+                wg_enabled = 1
+            WHERE id = ?
+            """,
+            (
+                vpn_data["assigned_ip"],
+                assigned_server_id,
+                vpn_data["client_private_key"],
+                vpn_data["client_public_key"],
+                vpn_data["client_psk"],
+                vpn_data["config_path"],
+                vpn_data["qr_path"],
+                utcnow_iso(),
+                user_id,
+            ),
+        )
+        db.commit()
+        flash(f"用户 {user['username']} 已启用。", "success")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        flash(f"启用用户失败：{exc}", "error")
     return redirect_admin_subscriptions()
 
 

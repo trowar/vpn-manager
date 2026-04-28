@@ -198,6 +198,18 @@ button:disabled,
   flex-wrap: wrap;
 }
 
+.dashboard-mode-form {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: end;
+  margin: 10px 0 14px;
+}
+
+.dashboard-mode-form label {
+  min-width: 220px;
+}
+
 .captcha-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 124px;
@@ -700,9 +712,9 @@ td {
 
 .purchase-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
-  gap: 14px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
 }
 
 .purchase-plan-table th:first-child,
@@ -746,17 +758,17 @@ td {
   border-color: var(--primary);
 }
 
-.purchase-summary {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #fafcff;
+.purchase-actions {
   padding: 12px;
   display: grid;
+  justify-items: end;
   gap: 8px;
 }
 
-.purchase-summary p {
+.purchase-actions-helper {
   margin: 0;
+  text-align: right;
+  max-width: 460px;
 }
 
 .payment-modal {

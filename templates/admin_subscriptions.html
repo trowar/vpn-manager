@@ -87,6 +87,7 @@
                     data-user-email="{{ u['email'] }}"
                     data-expires-local="{{ u['subscription_expires_at']|fmt_local_date_input }}"
                     data-set-expiry-url="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
+                    data-enable-url="{{ url_for('admin_enable_user', user_id=u['id']) }}"
                     data-disable-url="{{ url_for('admin_disable_user', user_id=u['id']) }}"
                     data-reset-url="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
                     data-delete-url="{{ url_for('admin_delete_user', user_id=u['id']) }}"
@@ -129,6 +130,16 @@
           >
         </label>
         <button type="submit">保存期限</button>
+      </form>
+
+      <form
+        method="post"
+        id="user-edit-enable-form"
+        class="form"
+        onsubmit="return confirm('确认启用该用户吗？启用后会恢复 VPN 连接。');"
+      >
+        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <button type="submit" class="btn">启用用户</button>
       </form>
 
       <form
@@ -176,9 +187,16 @@
     var userEmailText = document.getElementById("user-edit-email");
     var expiryForm = document.getElementById("user-edit-expiry-form");
     var expiryInput = document.getElementById("user-edit-expiry-input");
+    var enableForm = document.getElementById("user-edit-enable-form");
     var disableForm = document.getElementById("user-edit-disable-form");
     var resetForm = document.getElementById("user-edit-reset-form");
     var deleteForm = document.getElementById("user-edit-delete-form");
+
+    function todayDateInput() {
+      var now = new Date();
+      now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+      return now.toISOString().slice(0, 10);
+    }
 
     function openModal(modal) {
       if (!modal) {
@@ -220,7 +238,10 @@
           expiryForm.action = button.dataset.setExpiryUrl || "";
         }
         if (expiryInput) {
-          expiryInput.value = button.dataset.expiresLocal || "";
+          expiryInput.value = button.dataset.expiresLocal || todayDateInput();
+        }
+        if (enableForm) {
+          enableForm.action = button.dataset.enableUrl || "";
         }
         if (disableForm) {
           disableForm.action = button.dataset.disableUrl || "";

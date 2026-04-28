@@ -27,6 +27,21 @@
     </p>
     <p><strong>有效期至：</strong>{{ subscription_expiry_display }} ｜ <strong>流量剩余：</strong>{{ traffic_stats["remaining_display"] }}</p>
     <p><strong>权益信息：</strong>{{ benefit_summary }}</p>
+    <p class="helper">说明：有效期仅代表时长权益；流量权益按剩余流量计算。</p>
+    <p><strong>默认计费方式：</strong>{{ traffic_stats["effective_mode_label"] }}</p>
+    <form method="post" action="{{ url_for('dashboard_set_billing_mode') }}" class="dashboard-mode-form">
+      <label>切换默认计费方式
+        <select name="billing_mode" {% if not can_choose_duration and not can_choose_traffic %}disabled{% endif %}>
+          {% if can_choose_duration %}
+            <option value="duration" {% if preferred_billing_mode == 'duration' %}selected{% endif %}>按时长</option>
+          {% endif %}
+          {% if can_choose_traffic %}
+            <option value="traffic" {% if preferred_billing_mode == 'traffic' %}selected{% endif %}>按流量</option>
+          {% endif %}
+        </select>
+      </label>
+      <button type="submit" {% if not can_choose_duration and not can_choose_traffic %}disabled{% endif %}>保存设置</button>
+    </form>
 
     <div class="stats-grid stats-grid-single-row">
       <div class="stat-item">
