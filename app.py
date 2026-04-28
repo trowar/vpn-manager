@@ -7712,13 +7712,6 @@ def build_user_shadowsocks_clash_profile(
             mixed-port: 7890
             mode: rule
             proxies:
-              - name: {yaml_str(ss_proxy_name)}
-                type: ss
-                server: {yaml_str(host)}
-                port: {ss_port}
-                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-                password: {yaml_str(ss_password)}
-                udp: true
               - name: {yaml_str(kcptun_proxy_name)}
                 type: ss
                 server: {yaml_str(host)}
@@ -7732,18 +7725,25 @@ def build_user_shadowsocks_clash_profile(
                   crypt: {yaml_str(KCPTUN_CRYPT)}
                   mode: {yaml_str(KCPTUN_MODE)}
                   mtu: {KCPTUN_MTU}
+              - name: {yaml_str(ss_proxy_name)}
+                type: ss
+                server: {yaml_str(host)}
+                port: {ss_port}
+                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
+                password: {yaml_str(ss_password)}
+                udp: true
             proxy-groups:
               - name: "PROXY"
                 type: select
                 proxies:
-                  - {yaml_str(ss_proxy_name)}
                   - {yaml_str(kcptun_proxy_name)}
+                  - {yaml_str(ss_proxy_name)}
                   - "DIRECT"
               - name: "GLOBAL"
                 type: select
                 proxies:
-                  - {yaml_str(ss_proxy_name)}
                   - {yaml_str(kcptun_proxy_name)}
+                  - {yaml_str(ss_proxy_name)}
                   - "DIRECT"
             rules:
               - MATCH,PROXY
