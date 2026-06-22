@@ -7,8 +7,7 @@
       <div class="alert alert-error">{{ node_alert_text }}</div>
     {% endif %}
     <p><strong>账号：</strong>{{ user["username"] }}</p>
-    <p><strong>当前套餐：</strong>{{ current_plan_display }}</p>
-    <p><strong>分配 IP：</strong>{{ assigned_ip_display }}</p>
+    <p><strong>账号类型：</strong>{{ current_plan_display }}</p>
     <p>
       <strong>当前服务器：</strong>
       {% if current_server %}
@@ -18,30 +17,16 @@
       {% endif %}
     </p>
     <p>
-      <strong>订阅状态：</strong>
+      <strong>账号状态：</strong>
       {% if active %}
-        <span class="tag tag-ok">已生效</span>
+        <span class="tag tag-ok">已启用</span>
       {% else %}
-        <span class="tag tag-warn">未生效 / 已过期</span>
+        <span class="tag tag-warn">已停用</span>
       {% endif %}
     </p>
-    <p><strong>有效期至：</strong>{{ subscription_expiry_display }} ｜ <strong>流量剩余：</strong>{{ traffic_stats["remaining_display"] }}</p>
+    <p><strong>有效期：</strong>{{ subscription_expiry_display }} ｜ <strong>流量剩余：</strong>{{ traffic_stats["remaining_display"] }}</p>
     <p><strong>权益信息：</strong>{{ benefit_summary }}</p>
-    <p class="helper">说明：有效期仅代表时长权益；流量权益按剩余流量计算。</p>
-    <p><strong>默认计费方式：</strong>{{ traffic_stats["effective_mode_label"] }}</p>
-    <form method="post" action="{{ url_for('dashboard_set_billing_mode') }}" class="dashboard-mode-form">
-      <label>切换默认计费方式
-        <select name="billing_mode" {% if not can_choose_duration and not can_choose_traffic %}disabled{% endif %}>
-          {% if can_choose_duration %}
-            <option value="duration" {% if preferred_billing_mode == 'duration' %}selected{% endif %}>按时长</option>
-          {% endif %}
-          {% if can_choose_traffic %}
-            <option value="traffic" {% if preferred_billing_mode == 'traffic' %}selected{% endif %}>按流量</option>
-          {% endif %}
-        </select>
-      </label>
-      <button type="submit" {% if not can_choose_duration and not can_choose_traffic %}disabled{% endif %}>保存设置</button>
-    </form>
+    <p class="helper">说明：公司内部账号不设置购买套餐和到期时间，由管理员统一启用或停用。</p>
 
     <div class="table-scroll traffic-stats-wrap">
       <table class="subscriptions-table traffic-stats-table">
@@ -50,14 +35,14 @@
             <th>已用总流量</th>
             <th>实时下载（MB）</th>
             <th>实时上传（MB）</th>
-            <th>套餐总量 / 剩余（GB）</th>
+            <th>内部账号额度 / 剩余</th>
           </tr>
         </thead>
         <tbody>
           <tr>
             <td>{{ traffic_stats["total_gb"] }}</td>
-            <td>{{ traffic_stats["rx_mb"] }}</td>
-            <td>{{ traffic_stats["tx_mb"] }}</td>
+            <td>{{ traffic_stats["download_mb"] }}</td>
+            <td>{{ traffic_stats["upload_mb"] }}</td>
             <td>{{ traffic_stats["plan_total_remaining_gb"] }}</td>
           </tr>
         </tbody>
@@ -65,7 +50,6 @@
     </div>
 
     <div class="actions">
-      <a class="btn secondary" href="{{ url_for('dashboard_orders') }}">订单管理</a>
       <a class="btn secondary" href="{{ url_for('dashboard_config') }}">下载配置与切换节点</a>
     </div>
     {% if telegram_contact %}

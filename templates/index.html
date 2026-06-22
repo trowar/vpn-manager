@@ -1,76 +1,340 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="guest-topbar">
-  {% if registration_open %}
-    <a class="btn" href="{{ url_for('register') }}">注册账号</a>
-  {% else %}
-    <span class="tag tag-warn">当前暂停开放注册</span>
-  {% endif %}
-  <a class="btn secondary" href="{{ url_for('login') }}">登录</a>
+<section class="guest-video-page" aria-label="视频播放页">
+  <header class="guest-stream-header">
+    <div class="guest-stream-brand">
+      <span class="guest-stream-menu">☰</span>
+      <a
+        class="guest-stream-logo"
+        href="{{ url_for('public_client_download') }}"
+        aria-label="下载客户端"
+        title="下载客户端"
+      >▶</a>
+      <span class="guest-stream-wordmark">{{ guest_brand_label }}</span>
+    </div>
+    <div class="guest-stream-search">
+      <input type="search" aria-label="搜索" placeholder="搜索">
+      <button type="button" aria-label="搜索">⌕</button>
+    </div>
+    <div class="guest-stream-actions">
+      <span class="guest-stream-icon">⋮</span>
+    </div>
+  </header>
+
+  <div class="guest-stream-layout">
+    <main class="guest-stream-watch">
+      <div class="guest-stream-player">
+        <div
+          id="guest-stream-bg"
+          class="guest-video-bg guest-stream-shell"
+          aria-label="视频播放器"
+        ></div>
+        <div class="guest-video-fallback" aria-hidden="true"></div>
+      </div>
+      <h2 class="guest-stream-title">4 Days in Hong Kong 2026 - A Travel Guide for First-Time Visitors</h2>
+    </main>
+
+    <aside class="guest-stream-sidebar" aria-label="推荐视频">
+      <article class="guest-stream-ad">
+        <img src="https://i.ytimg.com/vi/SYyvx6GE2UI/hqdefault.jpg" alt="">
+        <div>
+          <strong>Go everywhere, your way</strong>
+          <span>赞助商广告 · indrive.com</span>
+        </div>
+        <button type="button">Get a ride</button>
+      </article>
+      <article class="guest-stream-card">
+        <img src="https://i.ytimg.com/vi/RzVvThhjAKw/hqdefault.jpg" alt="">
+        <div>
+          <strong>Fly Better across Europe</strong>
+          <span>Thinking of flying? Join us on board</span>
+          <small>赞助商广告 · Emirates Airline</small>
+        </div>
+      </article>
+      <article class="guest-stream-card">
+        <img src="https://i.ytimg.com/vi/AKeUssuu3Is/hqdefault.jpg" alt="">
+        <div>
+          <strong>ENTERING HONG KONG IN 2026</strong>
+          <span>Jay and Karolina</span>
+          <small>27万次观看 · 5个月前</small>
+        </div>
+      </article>
+      <article class="guest-stream-card">
+        <img src="https://i.ytimg.com/vi/KLuTLF3x9sA/hqdefault.jpg" alt="">
+        <div>
+          <strong>7 Days in TOKYO JAPAN</strong>
+          <span>Best CITY in the World?!</span>
+          <small>10万次观看 · 4天前</small>
+        </div>
+      </article>
+      <article class="guest-stream-card">
+        <img src="https://i.ytimg.com/vi/KJwYBJMSbPI/hqdefault.jpg" alt="">
+        <div>
+          <strong>Best HONG KONG Street Food!!</strong>
+          <span>Ultimate Hong Kong Food</span>
+          <small>531万次观看 · 1年前</small>
+        </div>
+      </article>
+    </aside>
+  </div>
+</section>
+
+<div class="payment-modal guest-login-modal" id="guest-login-modal" hidden>
+  <div class="payment-modal-card guest-login-card">
+    <div class="section-title-row">
+      <h4>登录</h4>
+      <button type="button" class="btn secondary modal-close-x" id="guest-login-close">×</button>
+    </div>
+    <form method="post" action="{{ url_for('index') }}" class="form">
+      <label>用户名
+        <input type="text" name="identity" id="guest-login-identity" autocomplete="username" required>
+      </label>
+      <label>密码
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <label class="login-captcha-line">
+        <span>图片验证码</span>
+        <span class="captcha-row">
+          <input type="text" name="captcha" maxlength="6" required placeholder="输入右侧验证码">
+          <img
+            id="captcha-guest-login"
+            class="captcha-img"
+            data-captcha-url="{{ url_for('captcha_svg', scene='login') }}"
+            alt="验证码"
+            title="点击刷新验证码"
+          >
+        </span>
+      </label>
+      <button type="submit">登录</button>
+    </form>
+  </div>
 </div>
 
-<section class="card hero">
-  <h2>边缘节点网络管理系统</h2>
-  <p>支持多节点统一管理与快速连接，适用于跨地域访问与移动办公场景。</p>
-</section>
+<script>
+  (function () {
+    var modal = document.getElementById("guest-login-modal");
+    var closeButton = document.getElementById("guest-login-close");
+    var identityInput = document.getElementById("guest-login-identity");
+    var captcha = document.getElementById("captcha-guest-login");
+    var youtubeMount = document.getElementById("guest-stream-bg");
+    var searchInput = document.querySelector(".guest-stream-search input");
+    var buffer = "";
+    var trigger = "admin";
+    var player = null;
+    var activeClip = null;
+    var attemptedVideoIds = [];
+    var watchdogId = null;
+    var youtubeVideos = [
+      { id: "KS0DByI-dcs", maxStart: 3000 },
+      { id: "SYyvx6GE2UI", maxStart: 3000 },
+      { id: "RzVvThhjAKw", maxStart: 3000 },
+      { id: "AKeUssuu3Is", maxStart: 3000 },
+      { id: "KLuTLF3x9sA", maxStart: 3000 },
+      { id: "KJwYBJMSbPI", maxStart: 3000 },
+      { id: "b1ZmoT5uWjA", maxStart: 2400 },
+      { id: "WBIOP01Bb_U", maxStart: 3000 },
+      { id: "p1w5Wop_ARI", maxStart: 3000 },
+      { id: "ofUOATVjKF0", maxStart: 3000 }
+    ];
 
-<section class="card">
-  <div class="section-title-row">
-    <h3>套餐种类与价格</h3>
-    <span class="helper">默认支付方式：USDT（{{ usdt_default_network }}）</span>
-  </div>
-  {% if landing_plans %}
-    <table class="subscriptions-table">
-      <thead>
-        <tr>
-          <th>套餐名称</th>
-          <th>收费模式</th>
-          <th>套餐内容</th>
-          <th>价格</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for plan in landing_plans %}
-          <tr>
-            <td>{{ plan["plan_name"] }}</td>
-            <td>{{ plan["mode_label"] }}</td>
-            <td>{{ plan["value_label"] }}</td>
-            <td><strong>{{ plan["price_usdt"] }} USDT</strong></td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p class="helper">管理员暂未配置可售套餐，请稍后再试。</p>
-  {% endif %}
-</section>
+    function randomInt(max) {
+      return Math.floor(Math.random() * Math.max(1, max + 1));
+    }
 
-<section class="card">
-  <h3>客户端下载</h3>
-  <p class="helper">推荐统一客户端，点击下方按钮下载。</p>
-  <div class="feature-grid">
-    <div class="feature-item">
-      <h4>Shadowsocks 客户端</h4>
-      <p>支持 Windows/macOS/Android/iOS，导入 YAML 配置即可使用。</p>
-      <div class="actions">
-        <a class="btn secondary" href="{{ url_for('login') }}">登录后下载配置</a>
-        <a class="btn secondary" href="https://github.com/KaringX/clashmi/releases" target="_blank" rel="noopener">点此下载</a>
-      </div>
-    </div>
-  </div>
-</section>
+    function pickYoutubeClip() {
+      var pool = youtubeVideos.filter(function (item) {
+        return attemptedVideoIds.indexOf(item.id) === -1;
+      });
+      if (!pool.length) {
+        attemptedVideoIds = [];
+        pool = youtubeVideos.slice();
+      }
+      var item = pool[randomInt(pool.length - 1)];
+      var start = randomInt(item.maxStart || 0);
+      return {
+        id: item.id,
+        start: start,
+        end: start + 60
+      };
+    }
 
-<section class="card">
-  <h3>客户端使用说明</h3>
-  <ol class="guide-steps">
-    <li>安装 Shadowsocks 客户端。</li>
-    <li>登录用户控制台并确认订阅状态为“已生效”。</li>
-    <li>下载并导入 Shadowsocks 配置文件。</li>
-    <li>连接成功后访问外网。</li>
-  </ol>
-  <p class="helper">如连接失败，请检查套餐是否生效、节点是否在线，以及本地防火墙是否放行客户端端口。</p>
-  {% if telegram_contact %}
-    <p class="helper">技术支持（Telegram）：{{ telegram_contact }}</p>
-  {% endif %}
-</section>
+    function clearWatchdog() {
+      if (watchdogId) {
+        window.clearTimeout(watchdogId);
+        watchdogId = null;
+      }
+    }
+
+    function armWatchdog() {
+      clearWatchdog();
+      watchdogId = window.setTimeout(function () {
+        loadNextYoutubeClip();
+      }, 8000);
+    }
+
+    function hideYoutubeBackground() {
+      if (youtubeMount) {
+        youtubeMount.hidden = true;
+      }
+      clearWatchdog();
+    }
+
+    function loadNextYoutubeClip() {
+      if (!window.YT || !window.YT.Player || !youtubeMount || !youtubeVideos.length) {
+        hideYoutubeBackground();
+        return;
+      }
+      if (activeClip && attemptedVideoIds.indexOf(activeClip.id) === -1) {
+        attemptedVideoIds.push(activeClip.id);
+      }
+      if (attemptedVideoIds.length >= youtubeVideos.length) {
+        hideYoutubeBackground();
+        return;
+      }
+      loadYoutubeClip();
+    }
+
+    function loadYoutubeClip() {
+      if (!window.YT || !window.YT.Player || !youtubeMount) return;
+      activeClip = pickYoutubeClip();
+      youtubeMount.hidden = false;
+      var playerVars = {
+        autoplay: 1,
+        controls: 0,
+        disablekb: 1,
+        fs: 0,
+        iv_load_policy: 3,
+        modestbranding: 1,
+        playsinline: 1,
+        rel: 0,
+        start: activeClip.start,
+        end: activeClip.end
+      };
+      if (!player) {
+        player = new window.YT.Player("guest-stream-bg", {
+          host: "https://www.youtube-nocookie.com",
+          videoId: activeClip.id,
+          playerVars: playerVars,
+          events: {
+            onReady: function (event) {
+              event.target.mute();
+              event.target.playVideo();
+              armWatchdog();
+            },
+            onStateChange: function (event) {
+              if (event.data === window.YT.PlayerState.PLAYING) {
+                clearWatchdog();
+              }
+              if (event.data === window.YT.PlayerState.ENDED && activeClip) {
+                event.target.seekTo(activeClip.start, true);
+                event.target.playVideo();
+              }
+            },
+            onError: function () {
+              loadNextYoutubeClip();
+            }
+          }
+        });
+        return;
+      }
+      player.loadVideoById({
+        videoId: activeClip.id,
+        startSeconds: activeClip.start,
+        endSeconds: activeClip.end
+      });
+      armWatchdog();
+    }
+
+    window.onYouTubeIframeAPIReady = function () {
+      loadYoutubeClip();
+    };
+
+    function loadYoutubeApi() {
+      if (window.YT && window.YT.Player) {
+        loadYoutubeClip();
+        return;
+      }
+      var script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      script.async = true;
+      script.onerror = hideYoutubeBackground;
+      document.head.appendChild(script);
+      window.setTimeout(function () {
+        if (!window.YT || !window.YT.Player) {
+          hideYoutubeBackground();
+        }
+      }, 8000);
+    }
+
+    function refreshCaptcha() {
+      if (!captcha) return;
+      var baseUrl = captcha.dataset.captchaUrl || "{{ url_for('captcha_svg', scene='login') }}";
+      captcha.src = baseUrl + (baseUrl.indexOf("?") === -1 ? "?" : "&") + "t=" + Date.now();
+    }
+
+    function openLogin() {
+      if (!modal) return;
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+      refreshCaptcha();
+      if (identityInput) {
+        identityInput.value = "admin";
+        window.setTimeout(function () {
+          identityInput.value = "admin";
+          identityInput.focus();
+          identityInput.select();
+        }, 0);
+      }
+    }
+
+    function closeLogin() {
+      if (!modal) return;
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    function rememberTriggerText(text) {
+      buffer = (buffer + String(text || "").toLowerCase()).slice(-trigger.length);
+      if (buffer === trigger) {
+        buffer = "";
+        openLogin();
+      }
+    }
+
+    if (captcha) {
+      captcha.addEventListener("click", refreshCaptcha);
+    }
+    loadYoutubeApi();
+    if (new URLSearchParams(window.location.search).get("login") === "1") {
+      window.setTimeout(openLogin, 80);
+    }
+    if (closeButton) {
+      closeButton.addEventListener("click", closeLogin);
+    }
+    if (modal) {
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) closeLogin();
+      });
+    }
+    if (searchInput) {
+      searchInput.addEventListener("input", function () {
+        rememberTriggerText(searchInput.value);
+      });
+    }
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        closeLogin();
+        return;
+      }
+      var target = event.target;
+      if (modal && !modal.hidden && target && modal.contains(target)) {
+        return;
+      }
+      if (!event.key || event.key.length !== 1) {
+        return;
+      }
+      rememberTriggerText(event.key);
+    });
+  })();
+</script>
 {% endblock %}

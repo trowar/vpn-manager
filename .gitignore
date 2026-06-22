@@ -12,11 +12,27 @@ venv/
 # Runtime data
 data/
 *.db
+*.sqlite
 
 # Logs / temp
 *.log
 *.tmp
 tmp/
+.tmp_*
+
+# Build artifacts
+client/dist/
+client/package/
+client-go/*.exe
+client-go/*.zip
+client-go/.tmp*
+
+# Local visual previews
+client-*-preview*.png
+client-ui-*.png
+client-login-align-preview.png
+client-multi-server-preview.png
+client-multi-server-domain-preview.png
 
 # OS / editor
 .DS_Store

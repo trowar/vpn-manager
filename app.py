@@ -1,535 +1,155 @@
-import calendar
+from portal_config import *
 import base64
 import hashlib
-import hmac
-import io
-import ipaddress
 import json
-import os
-import random
-import re
-import secrets
-import smtplib
-import socket
-import string
-import subprocess
-import sys
+import shutil
 import shlex
-import contextlib
-import tempfile
-import textwrap
-import time
-import threading
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
-from email.message import EmailMessage
-from email.utils import formataddr
-from functools import wraps
-from pathlib import Path
-from typing import Any
-from urllib import error as urllib_error
-from urllib import parse as urllib_parse
-from urllib import request as urllib_request
+import zipfile
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from portal_auth import (
+    admin_must_change_password,
+    authenticate_user,
+    build_download_access_token,
+    config_download_error,
+    current_user,
+    get_client_ip,
+    login_user_session,
+    normalize_public_client_ip,
+    resolve_download_access_user,
+    row_get,
+    start_user_login_session,
+    user_api_payload,
+)
+from portal_format import (
+    add_months,
+    default_payment_settings,
+    duration_value_to_legacy_months,
+    format_admin_local_date_input,
+    format_admin_local_input,
+    format_order_plan,
+    format_plan_display_name,
+    format_plan_value,
+    format_utc,
+    format_usdt,
+    generate_plan_name,
+    normalize_duration_unit,
+    normalize_plan_mode,
+    parse_admin_local_date,
+    parse_admin_local_datetime,
+    parse_iso,
+    parse_positive_int,
+    parse_usdt_amount,
+    parse_usdt_amount_strict,
+    plan_duration_unit_label,
+    plan_mode_label,
+    resolve_duration_value_and_unit,
+    resolve_order_plan_snapshot,
+    to_non_negative_int,
+    utcnow,
+    utcnow_iso,
+)
+from portal_settings import (
+    ensure_default_system_settings,
+    format_mail_security_label,
+    format_sender_display,
+    get_app_setting,
+    load_named_settings,
+    normalize_mail_security,
+    parse_bool_setting,
+    parse_int_setting,
+    upsert_app_setting,
+)
+from portal_web import (
+    absolute_url_for,
+    build_download_filename_for_user,
+    build_masked_download_link,
+    display_label_from_host,
+    host_without_optional_port,
+    is_non_public_host,
+    normalize_domain_host,
+    normalize_fqdn,
+    safe_name,
+)
+from portal_vpn_profiles import (
+    default_profile_mode_from_policy,
+    detect_openvpn_platform,
+)
+from portal_services.versioning import (
+    get_current_app_version,
+    load_version_nav_state,
+)
+from portal_services.admin_user_servers import (
+    apply_user_server_switch,
+    decorate_admin_subscription_row,
+)
+from portal_services.admin_servers import (
+    load_admin_servers as load_admin_servers_impl,
+    load_user_selectable_servers as load_user_selectable_servers_impl,
+    normalize_relay_port,
+    refresh_missing_server_regions as refresh_missing_server_regions_impl,
+    usdt_explorer_link,
+)
+from portal_services.captcha import (
+    create_captcha_svg_response_payload,
+    validate_captcha_input as validate_captcha_input_impl,
+)
+from portal_services.commands import (
+    run_command,
+    run_local_command_with_output,
+)
+from portal_services.deploy_logs import (
+    append_system_upgrade_log,
+    build_structured_deploy_log,
+    clip_text,
+    mask_secret,
+    normalize_deploy_log_text,
+    read_system_upgrade_log_text,
+    summarize_text,
+)
+from portal_services.servers import (
+    detect_server_region,
+    get_server_kcptun_port as _get_server_kcptun_port,
+    get_server_shadowsocks_backend_port as _get_server_shadowsocks_backend_port,
+    normalize_remote_host,
+    normalize_server_port,
+    normalize_server_region,
+    runtime_uses_kcptun as _runtime_uses_kcptun,
+    serialize_runtime_server,
+    server_supports_openvpn,
+    server_supports_ssh_tunnel,
+    server_supports_ss_kcptun,
+)
+from portal_services.vpn_runtime import (
+    build_shadowsocks_sport_filter_expr,
+    format_bytes,
+    format_bytes_in_gb,
+    format_bytes_in_mb,
+    handshake_epoch_to_iso,
+    parse_kcptun_active_peer_hosts,
+    parse_shadowsocks_active_peer_snapshot,
+)
+from portal_services.vpn_api_client import (
+    host_for_http_url,
+    request_vpn_api,
+)
+from portal_services.openvpn_certs import (
+    ensure_user_openvpn_client_identity,
+)
+from portal_services import ss_profiles as ss_profile_service
+from portal_services.system_upgrade import (
+    load_system_upgrade_state as load_system_upgrade_state_impl,
+    load_system_upgrade_state_with_timeout_unlock as load_system_upgrade_state_with_timeout_unlock_impl,
+    save_system_upgrade_state as save_system_upgrade_state_impl,
+)
 
-import paramiko
-import psycopg
-try:
-    import qrcode
-except Exception:  # pragma: no cover - optional dependency fallback
-    qrcode = None
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, x25519
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from flask import (
-    Flask,
-    Response,
-    flash,
-    g,
-    redirect,
-    render_template,
-    request,
-    session,
-    url_for,
-)
-from psycopg.rows import dict_row
-from werkzeug.security import check_password_hash, generate_password_hash
-
-
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("PORTAL_DATA_DIR", BASE_DIR / "data"))
-DB_BACKEND = os.environ.get("PORTAL_DB_BACKEND", "postgres").strip().lower()
-if DB_BACKEND != "postgres":
-    DB_BACKEND = "postgres"
-POSTGRES_DSN = os.environ.get(
-    "PORTAL_POSTGRES_DSN",
-    "postgresql://vpnportal:vpnportal@postgres:5432/vpnportal",
-).strip()
-CLIENT_CONF_DIR = Path(
-    os.environ.get("PORTAL_CLIENT_CONF_DIR", DATA_DIR / "client-configs")
-)
-CLIENT_QR_DIR = Path(os.environ.get("PORTAL_CLIENT_QR_DIR", DATA_DIR / "client-qr"))
-SHARED_VPN_MATERIALS_DIR = Path(
-    os.environ.get("PORTAL_SHARED_VPN_MATERIALS_DIR", DATA_DIR / "shared-vpn-materials")
-)
-SHARED_WG_PRIVATE_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "wg_server_private.key"
-SHARED_WG_PUBLIC_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "wg_server_public.key"
-SHARED_OPENVPN_CA_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_ca.key"
-SHARED_OPENVPN_CA_CERT_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_ca.crt"
-SHARED_OPENVPN_SERVER_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_server.key"
-SHARED_OPENVPN_SERVER_CERT_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_server.crt"
-SHARED_OPENVPN_TLS_CRYPT_KEY_FILE = SHARED_VPN_MATERIALS_DIR / "openvpn_tls_crypt.key"
-SYSTEM_UPGRADE_LOG_FILE = DATA_DIR / "system-upgrade.log"
-DB_INIT_LOCK_DIR = DATA_DIR / ".db-init.lock"
-SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS_RAW = os.environ.get(
-    "PORTAL_SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS",
-    "300",
-).strip()
-try:
-    SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS = max(
-        300, int(SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS_RAW)
-    )
-except ValueError:
-    SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS = 300
-AUTO_RESTART_AFTER_SELF_UPGRADE = (
-    os.environ.get(
-        "PORTAL_SELF_UPGRADE_AUTO_RESTART",
-        "0",
-    )
-    .strip()
-    .lower()
-    in {"1", "true", "yes", "on"}
-)
-HOST_WEB_UPGRADE_PROJECT_DIR = os.environ.get(
-    "PORTAL_SELF_UPGRADE_HOST_PROJECT_DIR",
-    "/srv/vpn-platform-v1",
-).strip()
-HOST_WEB_UPGRADE_BRANCH = os.environ.get(
-    "PORTAL_SELF_UPGRADE_PROJECT_BRANCH",
-    "main",
-).strip() or "main"
-HOST_WEB_UPGRADE_WEB_SERVICE = os.environ.get(
-    "PORTAL_SELF_UPGRADE_WEB_SERVICE",
-    "vpn-platform-v1-web.service",
-).strip() or "vpn-platform-v1-web.service"
-
-DatabaseConnection = Any
-DatabaseRow = dict[str, Any]
-
-WG_INTERFACE = os.environ.get("WG_INTERFACE", "wg0")
-WG_NETWORK = os.environ.get("WG_NETWORK", "10.7.0.0/24")
-WG_SERVER_ADDRESS = os.environ.get("WG_SERVER_ADDRESS", "10.7.0.1")
-WG_SERVER_PUBLIC_KEY_FILE = Path(
-    os.environ.get("WG_SERVER_PUBLIC_KEY_FILE", "/etc/wireguard/server_public.key")
-)
-WG_ENDPOINT = os.environ.get("WG_ENDPOINT", "193.134.209.54:51820")
-WG_CLIENT_DNS = os.environ.get("WG_CLIENT_DNS", WG_SERVER_ADDRESS)
-WG_CLIENT_ALLOWED_IPS = os.environ.get("WG_CLIENT_ALLOWED_IPS", "0.0.0.0/0")
-WG_CLIENT_KEEPALIVE = os.environ.get("WG_CLIENT_KEEPALIVE", "25")
-WG_IP_ASSIGNMENT_MODE = os.environ.get("WG_IP_ASSIGNMENT_MODE", "dynamic").strip().lower()
-WG_ROUTE_POLICY = os.environ.get("WG_ROUTE_POLICY", "full").strip().lower()
-WG_NON_CN_ROUTES_FILE = Path(
-    os.environ.get("WG_NON_CN_ROUTES_FILE", DATA_DIR / "non_cn_ipv4_routes.txt")
-)
-WIREGUARD_DOWNLOAD_FALLBACK = "https://www.wireguard.com/install/"
-WIREGUARD_DOWNLOAD_LINKS = {
-    "windows": "https://download.wireguard.com/windows-client/wireguard-installer.exe",
-    "macos": "https://apps.apple.com/app/wireguard/id1451685025?mt=12",
-    "android": "https://play.google.com/store/apps/details?id=com.wireguard.android",
-    "ios": "https://apps.apple.com/app/wireguard/id1451685025",
-    "linux": "https://www.wireguard.com/install/",
-    "android_apk": "https://download.wireguard.com/android-client/",
-    "official": "https://www.wireguard.com/install/",
-}
-# OpenVPN/WireGuard are retired from this deployment line.
-OPENVPN_ENABLED = False
-WIREGUARD_ENABLED = False
-SHADOWSOCKS_ENABLED = os.environ.get("SHADOWSOCKS_ENABLED", "1").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-KCPTUN_ENABLED = os.environ.get("KCPTUN_ENABLED", "1").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-SHADOWSOCKS_METHOD = (
-    os.environ.get("SHADOWSOCKS_METHOD", "chacha20-ietf-poly1305").strip()
-    or "chacha20-ietf-poly1305"
-)
-SHADOWSOCKS_PASSWORD = (
-    os.environ.get("SHADOWSOCKS_PASSWORD", "").strip()
-    or hashlib.sha256(
-        (os.environ.get("PORTAL_SECRET_KEY", "change-this-secret") + ":shadowsocks").encode(
-            "utf-8"
-        )
-    ).hexdigest()[:24]
-)
-SHADOWSOCKS_ENDPOINT_HOST = os.environ.get("SHADOWSOCKS_ENDPOINT_HOST", "").strip()
-SHADOWSOCKS_SERVER_PORT_RAW = os.environ.get("SHADOWSOCKS_SERVER_PORT", "8388").strip()
-KCPTUN_SERVER_PORT_RAW = os.environ.get("KCPTUN_SERVER_PORT", "29900").strip()
-try:
-    SHADOWSOCKS_SERVER_PORT = int(SHADOWSOCKS_SERVER_PORT_RAW)
-except ValueError:
-    SHADOWSOCKS_SERVER_PORT = 8388
-if SHADOWSOCKS_SERVER_PORT <= 0 or SHADOWSOCKS_SERVER_PORT > 65535:
-    SHADOWSOCKS_SERVER_PORT = 8388
-try:
-    KCPTUN_SERVER_PORT = int(KCPTUN_SERVER_PORT_RAW)
-except ValueError:
-    KCPTUN_SERVER_PORT = 29900
-if KCPTUN_SERVER_PORT <= 0 or KCPTUN_SERVER_PORT > 65535:
-    KCPTUN_SERVER_PORT = 29900
-KCPTUN_KEY = (
-    os.environ.get("KCPTUN_KEY", "").strip()
-    or hashlib.sha256(
-        (os.environ.get("PORTAL_SECRET_KEY", "change-this-secret") + ":kcptun").encode("utf-8")
-    ).hexdigest()[:24]
-)
-KCPTUN_CRYPT = os.environ.get("KCPTUN_CRYPT", "aes").strip() or "aes"
-KCPTUN_MODE = os.environ.get("KCPTUN_MODE", "fast3").strip() or "fast3"
-KCPTUN_MTU_RAW = os.environ.get("KCPTUN_MTU", "1350").strip()
-try:
-    KCPTUN_MTU = int(KCPTUN_MTU_RAW)
-except ValueError:
-    KCPTUN_MTU = 1350
-if KCPTUN_MTU <= 500 or KCPTUN_MTU > 1500:
-    KCPTUN_MTU = 1350
-OPENVPN_ENDPOINT_HOST = os.environ.get("OPENVPN_ENDPOINT_HOST", "").strip()
-OPENVPN_ENDPOINT_PORT_RAW = os.environ.get("OPENVPN_ENDPOINT_PORT", "1194").strip()
-try:
-    OPENVPN_ENDPOINT_PORT = int(OPENVPN_ENDPOINT_PORT_RAW)
-except ValueError:
-    OPENVPN_ENDPOINT_PORT = 1194
-if OPENVPN_ENDPOINT_PORT <= 0 or OPENVPN_ENDPOINT_PORT > 65535:
-    OPENVPN_ENDPOINT_PORT = 1194
-OPENVPN_PROTO = os.environ.get("OPENVPN_PROTO", "tcp").strip().lower() or "tcp"
-OPENVPN_CLIENT_DNS = os.environ.get("OPENVPN_CLIENT_DNS", WG_CLIENT_DNS).strip()
-OPENVPN_CIPHER = os.environ.get("OPENVPN_CIPHER", "AES-256-GCM").strip() or "AES-256-GCM"
-OPENVPN_AUTH = os.environ.get("OPENVPN_AUTH", "SHA256").strip() or "SHA256"
-OPENVPN_CLIENT_CERT_VALID_DAYS_RAW = os.environ.get(
-    "OPENVPN_CLIENT_CERT_VALID_DAYS",
-    "3650",
-).strip()
-try:
-    OPENVPN_CLIENT_CERT_VALID_DAYS = max(30, int(OPENVPN_CLIENT_CERT_VALID_DAYS_RAW or 3650))
-except ValueError:
-    OPENVPN_CLIENT_CERT_VALID_DAYS = 3650
-OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS_RAW = os.environ.get(
-    "OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS",
-    "30",
-).strip()
-try:
-    OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS = max(
-        1,
-        int(OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS_RAW or 30),
-    )
-except ValueError:
-    OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS = 30
-OPENVPN_COMMON_NAME_PREFIX = "vpn-user-"
-OPENVPN_CA_CERT_FILE = Path(
-    os.environ.get("OPENVPN_CA_CERT_FILE", "/etc/openvpn/server/ca.crt")
-)
-OPENVPN_TLS_CRYPT_KEY_FILE = Path(
-    os.environ.get("OPENVPN_TLS_CRYPT_KEY_FILE", "/etc/openvpn/server/tls-crypt.key")
-)
-OPENVPN_DOWNLOAD_FALLBACK = "https://openvpn.net/client/"
-OPENVPN_DOWNLOAD_LINKS = {
-    "windows": "https://openvpn.net/client/client-connect-vpn-for-windows/",
-    "macos": "https://openvpn.net/client/client-connect-vpn-for-mac-os/",
-    "android": "https://play.google.com/store/apps/details?id=net.openvpn.openvpn",
-    "ios": "https://apps.apple.com/app/openvpn-connect-openvpn-app/id590379981",
-    "linux": "https://openvpn.net/client/",
-    "official": "https://openvpn.net/client/",
-}
-CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
-VPN_API_URL = os.environ.get("VPN_API_URL", "").strip().rstrip("/")
-VPN_API_TOKEN = os.environ.get("VPN_API_TOKEN", "").strip()
-VPN_API_TIMEOUT_RAW = os.environ.get("VPN_API_TIMEOUT_SECONDS", "8").strip()
-try:
-    VPN_API_TIMEOUT_SECONDS = max(1, int(VPN_API_TIMEOUT_RAW))
-except ValueError:
-    VPN_API_TIMEOUT_SECONDS = 8
-
-USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
-USDT_NETWORK_OPTIONS = ("TRC20", "ERC20", "BEP20", "POLYGON")
-USDT_DEFAULT_NETWORK = os.environ.get("USDT_DEFAULT_NETWORK", "TRC20").upper()
-USDT_RECEIVE_ADDRESS = os.environ.get("USDT_RECEIVE_ADDRESS", "").strip()
-USDT_PRICE_1M = os.environ.get("USDT_PRICE_1M", "10")
-USDT_PRICE_3M = os.environ.get("USDT_PRICE_3M", "27")
-USDT_PRICE_6M = os.environ.get("USDT_PRICE_6M", "50")
-USDT_PRICE_12M = os.environ.get("USDT_PRICE_12M", "90")
-PAYMENT_WEBHOOK_SECRET = os.environ.get("PAYMENT_WEBHOOK_SECRET", "").strip()
-PAYMENT_MIN_CONFIRMATIONS_RAW = os.environ.get("PAYMENT_MIN_CONFIRMATIONS", "1").strip()
-try:
-    PAYMENT_MIN_CONFIRMATIONS = max(0, int(PAYMENT_MIN_CONFIRMATIONS_RAW))
-except ValueError:
-    PAYMENT_MIN_CONFIRMATIONS = 1
-if USDT_DEFAULT_NETWORK not in USDT_NETWORK_OPTIONS:
-    USDT_DEFAULT_NETWORK = "TRC20"
-
-PAYMENT_SETTING_KEYS = (
-    "usdt_receive_address",
-    "usdt_default_network",
-)
-PLAN_MODE_DURATION = "duration"
-PLAN_MODE_TRAFFIC = "traffic"
-PLAN_MODES = (PLAN_MODE_DURATION, PLAN_MODE_TRAFFIC)
-PLAN_DURATION_UNIT_DAY = "day"
-PLAN_DURATION_UNIT_MONTH = "month"
-PLAN_DURATION_UNIT_YEAR = "year"
-PLAN_DURATION_UNITS = (
-    PLAN_DURATION_UNIT_DAY,
-    PLAN_DURATION_UNIT_MONTH,
-    PLAN_DURATION_UNIT_YEAR,
-)
-WG_PROFILE_SMART = "smart"
-WG_PROFILE_GLOBAL = "global"
-WG_PROFILE_MODES = (WG_PROFILE_SMART, WG_PROFILE_GLOBAL)
-PAYMENT_METHOD_USDT = "usdt"
-PAYMENT_METHOD_CHOICES = (PAYMENT_METHOD_USDT,)
-BYTES_PER_GB = 1024 * 1024 * 1024
-SESSION_IDLE_TIMEOUT_MINUTES_RAW = os.environ.get(
-    "PORTAL_SESSION_IDLE_TIMEOUT_MINUTES",
-    "30",
-).strip()
-try:
-    SESSION_IDLE_TIMEOUT_MINUTES = max(1, int(SESSION_IDLE_TIMEOUT_MINUTES_RAW))
-except ValueError:
-    SESSION_IDLE_TIMEOUT_MINUTES = 30
-SESSION_IDLE_TIMEOUT_SECONDS = SESSION_IDLE_TIMEOUT_MINUTES * 60
-SESSION_LAST_ACTIVITY_KEY = "last_activity_ts"
-DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS_RAW = os.environ.get(
-    "PORTAL_DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS",
-    "2592000",  # 30 days
-).strip()
-try:
-    DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS = max(
-        300, int(DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS_RAW)
-    )
-except ValueError:
-    DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS = 2592000
-SSH_CONNECT_MAX_RETRIES_RAW = os.environ.get("PORTAL_SSH_CONNECT_MAX_RETRIES", "3").strip()
-try:
-    SSH_CONNECT_MAX_RETRIES = max(1, int(SSH_CONNECT_MAX_RETRIES_RAW))
-except ValueError:
-    SSH_CONNECT_MAX_RETRIES = 3
-SSH_CONNECT_RETRY_DELAY_SECONDS_RAW = os.environ.get(
-    "PORTAL_SSH_CONNECT_RETRY_DELAY_SECONDS", "2"
-).strip()
-try:
-    SSH_CONNECT_RETRY_DELAY_SECONDS = max(0.0, float(SSH_CONNECT_RETRY_DELAY_SECONDS_RAW))
-except ValueError:
-    SSH_CONNECT_RETRY_DELAY_SECONDS = 2.0
-SERVER_DEPLOY_SKIP_OS_UPGRADE = os.environ.get(
-    "PORTAL_DEPLOY_SKIP_OS_UPGRADE",
-    "1",
-).strip().lower() in {"1", "true", "yes", "on"}
-REGISTER_COOLDOWN_SECONDS = 5 * 60
-EMAIL_CODE_TTL_MINUTES = 10
-EMAIL_CODE_RESEND_SECONDS = 60
-EMAIL_CODE_DAILY_LIMIT = 10
-UNVERIFIED_USER_RETENTION_HOURS = 24
-CAPTCHA_TTL_MINUTES = 5
-CAPTCHA_SCENE_DEFAULT = "default"
-CAPTCHA_SCENES = ("login", "register", "recover")
-ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
-CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B-\x1F\x7F]")
-EMAIL_CODE_PURPOSE_REGISTER = "register"
-EMAIL_CODE_PURPOSE_RECOVER = "recover"
-SETTING_REGISTRATION_OPEN = "registration_open"
-SETTING_ORDER_EXPIRE_HOURS = "order_expire_hours"
-SETTING_GIFT_DURATION_MONTHS = "gift_duration_months"
-SETTING_GIFT_TRAFFIC_GB = "gift_traffic_gb"
-SETTING_TELEGRAM_CONTACT = "telegram_contact"
-SETTING_SITE_TITLE = "site_title"
-SETTING_WIREGUARD_OPEN = "wireguard_open"
-SETTING_OPENVPN_OPEN = "openvpn_open"
-SETTING_SYSTEM_UPGRADE_STATUS = "system_upgrade_status"
-SETTING_SYSTEM_UPGRADE_SUMMARY = "system_upgrade_summary"
-SETTING_SYSTEM_UPGRADE_STARTED_AT = "system_upgrade_started_at"
-SETTING_SYSTEM_UPGRADE_FINISHED_AT = "system_upgrade_finished_at"
-MAIL_SECURITY_STARTTLS = "starttls"
-MAIL_SECURITY_SSL = "ssl"
-MAIL_SECURITY_NONE = "none"
-MAIL_SECURITY_CHOICES = (
-    MAIL_SECURITY_STARTTLS,
-    MAIL_SECURITY_SSL,
-    MAIL_SECURITY_NONE,
-)
-MAIL_SECURITY_LABELS = {
-    MAIL_SECURITY_STARTTLS: "STARTTLS",
-    MAIL_SECURITY_SSL: "SSL/TLS",
-    MAIL_SECURITY_NONE: "无加密",
-}
-VPN_RELAY_ENABLED = os.environ.get("PORTAL_ENABLE_UDP_RELAY", "0").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-VPN_RELAY_PUBLIC_HOST = os.environ.get("VPN_RELAY_PUBLIC_HOST", "").strip()
-WG_RELAY_PORT_START_RAW = os.environ.get("WG_RELAY_PORT_START", "24000").strip()
-WG_RELAY_PORT_END_RAW = os.environ.get("WG_RELAY_PORT_END", "28999").strip()
-SHADOWSOCKS_RELAY_PORT_START_RAW = os.environ.get(
-    "SHADOWSOCKS_RELAY_PORT_START",
-    os.environ.get("OPENVPN_RELAY_PORT_START", "29000"),
-).strip()
-SHADOWSOCKS_RELAY_PORT_END_RAW = os.environ.get(
-    "SHADOWSOCKS_RELAY_PORT_END",
-    os.environ.get("OPENVPN_RELAY_PORT_END", "33999"),
-).strip()
-try:
-    WG_RELAY_PORT_START = int(WG_RELAY_PORT_START_RAW)
-except ValueError:
-    WG_RELAY_PORT_START = 24000
-try:
-    WG_RELAY_PORT_END = int(WG_RELAY_PORT_END_RAW)
-except ValueError:
-    WG_RELAY_PORT_END = 28999
-try:
-    SHADOWSOCKS_RELAY_PORT_START = int(SHADOWSOCKS_RELAY_PORT_START_RAW)
-except ValueError:
-    SHADOWSOCKS_RELAY_PORT_START = 29000
-try:
-    SHADOWSOCKS_RELAY_PORT_END = int(SHADOWSOCKS_RELAY_PORT_END_RAW)
-except ValueError:
-    SHADOWSOCKS_RELAY_PORT_END = 33999
-# Backward-compatible aliases for old constant names.
-OPENVPN_RELAY_PORT_START = SHADOWSOCKS_RELAY_PORT_START
-OPENVPN_RELAY_PORT_END = SHADOWSOCKS_RELAY_PORT_END
-NODE_HEARTBEAT_TIMEOUT_SECONDS = 60
-ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS_RAW = os.environ.get(
-    "ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS", "180"
-).strip()
-ADMIN_ONLINE_REFRESH_SECONDS_RAW = os.environ.get("ADMIN_ONLINE_REFRESH_SECONDS", "5").strip()
-try:
-    ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS = max(
-        30, int(ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS_RAW)
-    )
-except ValueError:
-    ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS = 180
-try:
-    ADMIN_ONLINE_REFRESH_SECONDS = max(3, int(ADMIN_ONLINE_REFRESH_SECONDS_RAW))
-except ValueError:
-    ADMIN_ONLINE_REFRESH_SECONDS = 5
-ADMIN_UI_TZ = timezone(timedelta(hours=8))
-ADMIN_UI_TZ_NAME = "北京时间"
-DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_INITIAL_PASSWORD = "admin"
-ONBOARDING_SETTING_PORTAL_DOMAIN = "portal_domain"
-ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT = "cloudflare_account"
-ONBOARDING_SETTING_CLOUDFLARE_PASSWORD = "cloudflare_password"
-ONBOARDING_SETTING_SETUP_COMPLETED = "setup_completed"
-ONBOARDING_SETTING_SETUP_COMPLETED_AT = "setup_completed_at"
-ONBOARDING_SETTING_LAST_SERVER_ID = "setup_last_server_id"
-ONBOARDING_SETTING_DRAFT_SERVER_NAME = "setup_draft_server_name"
-ONBOARDING_SETTING_DRAFT_SERVER_HOST = "setup_draft_server_host"
-ONBOARDING_SETTING_DRAFT_SERVER_PORT = "setup_draft_server_port"
-ONBOARDING_SETTING_DRAFT_SERVER_USERNAME = "setup_draft_server_username"
-ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD = "setup_draft_server_password"
-ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY = "setup_draft_server_private_key"
-ONBOARDING_SETTINGS_DEFAULTS = {
-    ONBOARDING_SETTING_PORTAL_DOMAIN: "",
-    ONBOARDING_SETTING_CLOUDFLARE_ACCOUNT: "",
-    ONBOARDING_SETTING_CLOUDFLARE_PASSWORD: "",
-    ONBOARDING_SETTING_SETUP_COMPLETED: "0",
-    ONBOARDING_SETTING_SETUP_COMPLETED_AT: "",
-    ONBOARDING_SETTING_LAST_SERVER_ID: "",
-    ONBOARDING_SETTING_DRAFT_SERVER_NAME: "",
-    ONBOARDING_SETTING_DRAFT_SERVER_HOST: "",
-    ONBOARDING_SETTING_DRAFT_SERVER_PORT: "22",
-    ONBOARDING_SETTING_DRAFT_SERVER_USERNAME: "root",
-    ONBOARDING_SETTING_DRAFT_SERVER_PASSWORD: "",
-    ONBOARDING_SETTING_DRAFT_SERVER_PRIVATE_KEY: "",
-}
-SERVER_DEPLOY_DEFAULT_WG_PORT = 29900
-SERVER_DEPLOY_DEFAULT_SHADOWSOCKS_PORT = 8388
-# Backward-compatible alias for legacy references.
-SERVER_DEPLOY_DEFAULT_OPENVPN_PORT = SERVER_DEPLOY_DEFAULT_SHADOWSOCKS_PORT
-SERVER_DEPLOY_DEFAULT_DNS_PORT = 53
-SERVER_DEPLOY_DEFAULT_VPN_API_PORT = 8081
-PRD_BLOCKED_ADMIN_ENDPOINT_MARKERS = ("onboarding", "cloudflare")
-PRD_BLOCKED_ADMIN_ENDPOINTS = {
-    "admin_domains",
-    "admin_create_domain",
-    "admin_update_domain",
-    "admin_toggle_domain",
-    "admin_delete_domain",
-    "admin_paid_orders",
-}
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("PORTAL_SECRET_KEY", "change-this-secret")
-_CLIENT_ALLOWED_IPS_CACHE: str | None = None
-_SMART_ALLOWED_IPS_CACHE: str | None = None
 _OPENVPN_ROUTE_LINES_CACHE: list[str] | None = None
 _OPENVPN_ROUTE_LINES_PROFILE_CACHE: dict[str, list[str]] = {}
 SYSTEM_UPGRADE_LOG_TAIL_CHARS = 20000
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
-
-
-def utcnow_iso() -> str:
-    return utcnow().isoformat()
-
-
-def parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    dt = datetime.fromisoformat(value)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def add_months(dt: datetime, months: int) -> datetime:
-    total_month = dt.month - 1 + months
-    year = dt.year + total_month // 12
-    month = total_month % 12 + 1
-    day = min(dt.day, calendar.monthrange(year, month)[1])
-    return dt.replace(year=year, month=month, day=day)
-
-
-def format_utc(value: str | None) -> str:
-    dt = parse_iso(value)
-    if not dt:
-        return "-"
-    return dt.astimezone(ADMIN_UI_TZ).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def format_admin_local_date_input(value: str | None) -> str:
-    dt = parse_iso(value)
-    if not dt:
-        return ""
-    return dt.astimezone(ADMIN_UI_TZ).strftime("%Y-%m-%d")
-
-
-def format_admin_local_input(value: str | None) -> str:
-    # Backward-compatible alias for templates still using fmt_local_input.
-    return format_admin_local_date_input(value)
-
-
-def parse_admin_local_date(raw: str) -> datetime:
-    value = (raw or "").strip()
-    local_dt = datetime.strptime(value, "%Y-%m-%d").replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0,
-        tzinfo=ADMIN_UI_TZ,
-    )
-    return local_dt.astimezone(timezone.utc)
-
-
-def parse_admin_local_datetime(raw: str) -> datetime:
-    # Backward-compatible alias so older code paths still parse date-only values.
-    return parse_admin_local_date(raw)
 
 
 @app.template_filter("fmt_utc")
@@ -547,384 +167,9 @@ def fmt_local_input_filter(value: str | None) -> str:
     return format_admin_local_date_input(value)
 
 
-def parse_usdt_amount(raw: str, fallback: str) -> Decimal:
-    value = (raw or "").strip() or fallback
-    try:
-        amount = Decimal(value)
-        if amount <= 0:
-            raise InvalidOperation("amount must be positive")
-        return amount.quantize(Decimal("0.01"))
-    except (InvalidOperation, ValueError):
-        return Decimal(fallback).quantize(Decimal("0.01"))
-
-
-def parse_usdt_amount_strict(raw: str) -> Decimal:
-    amount = Decimal((raw or "").strip())
-    if amount <= 0:
-        raise InvalidOperation("amount must be positive")
-    return amount.quantize(Decimal("0.01"))
-
-
-def default_payment_settings() -> dict[str, str]:
-    return {
-        "usdt_receive_address": USDT_RECEIVE_ADDRESS,
-        "usdt_default_network": USDT_DEFAULT_NETWORK,
-    }
-
-
-def normalize_plan_mode(mode: str | None) -> str:
-    raw_mode = (mode or "").strip().lower()
-    if raw_mode in PLAN_MODES:
-        return raw_mode
-    if raw_mode in {"time", "month", "months"}:
-        return PLAN_MODE_DURATION
-    if raw_mode in {"traffic_gb", "gb", "flow", "data"}:
-        return PLAN_MODE_TRAFFIC
-    return PLAN_MODE_DURATION
-
-
-def plan_mode_label(mode: str | None) -> str:
-    normalized = normalize_plan_mode(mode)
-    if normalized == PLAN_MODE_TRAFFIC:
-        return "按流量收费"
-    return "按时长收费"
-
-
-def normalize_duration_unit(unit: str | None) -> str:
-    raw_unit = (unit or "").strip().lower()
-    if raw_unit in PLAN_DURATION_UNITS:
-        return raw_unit
-    alias_map = {
-        "d": PLAN_DURATION_UNIT_DAY,
-        "day": PLAN_DURATION_UNIT_DAY,
-        "days": PLAN_DURATION_UNIT_DAY,
-        "天": PLAN_DURATION_UNIT_DAY,
-        "m": PLAN_DURATION_UNIT_MONTH,
-        "month": PLAN_DURATION_UNIT_MONTH,
-        "months": PLAN_DURATION_UNIT_MONTH,
-        "月": PLAN_DURATION_UNIT_MONTH,
-        "个月": PLAN_DURATION_UNIT_MONTH,
-        "y": PLAN_DURATION_UNIT_YEAR,
-        "year": PLAN_DURATION_UNIT_YEAR,
-        "years": PLAN_DURATION_UNIT_YEAR,
-        "年": PLAN_DURATION_UNIT_YEAR,
-    }
-    return alias_map.get(raw_unit, PLAN_DURATION_UNIT_MONTH)
-
-
-def plan_duration_unit_label(unit: str | None) -> str:
-    normalized = normalize_duration_unit(unit)
-    if normalized == PLAN_DURATION_UNIT_DAY:
-        return "天"
-    if normalized == PLAN_DURATION_UNIT_YEAR:
-        return "年"
-    return "个月"
-
-
-def duration_value_to_legacy_months(value: int, unit: str | None) -> int:
-    normalized_unit = normalize_duration_unit(unit)
-    normalized_value = max(0, int(value or 0))
-    if normalized_unit == PLAN_DURATION_UNIT_YEAR:
-        return normalized_value * 12
-    if normalized_unit == PLAN_DURATION_UNIT_MONTH:
-        return normalized_value
-    return 0
-
-
-def resolve_duration_value_and_unit(
-    *,
-    duration_months: int,
-    duration_value_raw,
-    duration_unit_raw,
-) -> tuple[int, str]:
-    duration_value = to_non_negative_int(duration_value_raw)
-    duration_unit = normalize_duration_unit(duration_unit_raw)
-    if duration_value <= 0 and duration_months > 0:
-        duration_value = duration_months
-        duration_unit = PLAN_DURATION_UNIT_MONTH
-    return duration_value, duration_unit
-
-
-def parse_positive_int(raw: str | None) -> int:
-    value = int((raw or "").strip())
-    if value <= 0:
-        raise ValueError("must be positive")
-    return value
-
-
-def to_non_negative_int(raw) -> int:
-    try:
-        value = int(raw or 0)
-    except Exception:
-        value = 0
-    return value if value >= 0 else 0
-
-
-def row_get(row, key: str, default=None):
-    try:
-        return row[key]
-    except Exception:
-        return default
-
-
-def format_plan_value(
-    mode: str | None,
-    duration_months: int,
-    traffic_gb: int,
-    *,
-    duration_value: int | None = None,
-    duration_unit: str | None = None,
-) -> str:
-    normalized = normalize_plan_mode(mode)
-    if normalized == PLAN_MODE_TRAFFIC:
-        if traffic_gb <= 0:
-            return "流量未设置"
-        return f"{traffic_gb} GB"
-    resolved_value, resolved_unit = resolve_duration_value_and_unit(
-        duration_months=duration_months,
-        duration_value_raw=duration_value,
-        duration_unit_raw=duration_unit,
-    )
-    if resolved_value <= 0:
-        return "时长未设置"
-    return f"{resolved_value} {plan_duration_unit_label(resolved_unit)}"
-
-
-def format_plan_display_name(
-    plan_name: str | None,
-    mode: str | None,
-    duration_months: int,
-    traffic_gb: int,
-    *,
-    duration_value: int | None = None,
-    duration_unit: str | None = None,
-) -> str:
-    name = (plan_name or "").strip()
-    mode_prefix = "时长" if normalize_plan_mode(mode) == PLAN_MODE_DURATION else "流量"
-    value_text = format_plan_value(
-        mode,
-        duration_months,
-        traffic_gb,
-        duration_value=duration_value,
-        duration_unit=duration_unit,
-    )
-    if name:
-        return f"{name}（{mode_prefix} {value_text}）"
-    return f"{mode_prefix} {value_text}"
-
-
-def format_order_plan(order: DatabaseRow | dict) -> str:
-    plan_name = (row_get(order, "plan_name", "") or "").strip()
-    plan_mode_raw = row_get(order, "plan_mode", "")
-    plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
-    duration_months = to_non_negative_int(row_get(order, "plan_duration_months", 0))
-    duration_value, duration_unit = resolve_duration_value_and_unit(
-        duration_months=duration_months,
-        duration_value_raw=row_get(order, "plan_duration_value", 0),
-        duration_unit_raw=row_get(order, "plan_duration_unit", PLAN_DURATION_UNIT_MONTH),
-    )
-    traffic_gb = to_non_negative_int(row_get(order, "plan_traffic_gb", 0))
-    if not duration_months:
-        duration_months = to_non_negative_int(row_get(order, "plan_months", 0))
-    if duration_value <= 0:
-        duration_value, duration_unit = resolve_duration_value_and_unit(
-            duration_months=duration_months,
-            duration_value_raw=duration_value,
-            duration_unit_raw=duration_unit,
-        )
-    if not plan_mode:
-        plan_mode = PLAN_MODE_TRAFFIC if traffic_gb > 0 else PLAN_MODE_DURATION
-    return format_plan_display_name(
-        plan_name,
-        plan_mode,
-        duration_months,
-        traffic_gb,
-        duration_value=duration_value,
-        duration_unit=duration_unit,
-    )
-
-
-def resolve_order_plan_snapshot(order: DatabaseRow | dict) -> dict:
-    plan_name = (row_get(order, "plan_name", "") or "").strip()
-    plan_mode_raw = row_get(order, "plan_mode", "")
-    plan_mode = normalize_plan_mode(plan_mode_raw) if plan_mode_raw else ""
-    duration_months = to_non_negative_int(row_get(order, "plan_duration_months", 0))
-    duration_value, duration_unit = resolve_duration_value_and_unit(
-        duration_months=duration_months,
-        duration_value_raw=row_get(order, "plan_duration_value", 0),
-        duration_unit_raw=row_get(order, "plan_duration_unit", PLAN_DURATION_UNIT_MONTH),
-    )
-    traffic_gb = to_non_negative_int(row_get(order, "plan_traffic_gb", 0))
-    if not duration_months:
-        duration_months = to_non_negative_int(row_get(order, "plan_months", 0))
-    if duration_value <= 0:
-        duration_value, duration_unit = resolve_duration_value_and_unit(
-            duration_months=duration_months,
-            duration_value_raw=duration_value,
-            duration_unit_raw=duration_unit,
-        )
-    if not plan_mode:
-        plan_mode = PLAN_MODE_TRAFFIC if traffic_gb > 0 else PLAN_MODE_DURATION
-    if not plan_name:
-        plan_name = "流量套餐" if plan_mode == PLAN_MODE_TRAFFIC else "时长套餐"
-
-    return {
-        "plan_name": plan_name,
-        "plan_mode": plan_mode,
-        "duration_months": duration_months,
-        "duration_value": duration_value,
-        "duration_unit": duration_unit,
-        "traffic_gb": traffic_gb,
-        "display_name": format_plan_display_name(
-            plan_name,
-            plan_mode,
-            duration_months,
-            traffic_gb,
-            duration_value=duration_value,
-            duration_unit=duration_unit,
-        ),
-    }
-
-
 @app.template_filter("fmt_order_plan")
 def fmt_order_plan_filter(order: DatabaseRow | dict) -> str:
     return format_order_plan(order)
-
-
-def generate_plan_name(
-    *,
-    mode: str,
-    duration_value: int | None = None,
-    duration_unit: str | None = None,
-    traffic_gb: int | None = None,
-) -> str:
-    normalized_mode = normalize_plan_mode(mode)
-    if normalized_mode == PLAN_MODE_TRAFFIC:
-        value = max(1, int(traffic_gb or 1))
-        return f"{value}GB 流量包"
-    value = max(1, int(duration_value or 1))
-    unit_text = plan_duration_unit_label(duration_unit)
-    return f"{value}{unit_text} 时长套餐"
-
-
-def get_client_ip() -> str:
-    cf_ip = (request.headers.get("CF-Connecting-IP") or "").strip()
-    if cf_ip:
-        return cf_ip
-
-    xff = (request.headers.get("X-Forwarded-For") or "").strip()
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-
-    x_real_ip = (request.headers.get("X-Real-IP") or "").strip()
-    if x_real_ip:
-        return x_real_ip
-
-    return (request.remote_addr or "").strip() or "unknown"
-
-
-def normalize_public_client_ip(raw_value: str | None) -> str:
-    raw = (raw_value or "").strip()
-    if not raw:
-        return ""
-    host = host_without_optional_port(raw)
-    if not host:
-        return ""
-    try:
-        ip_obj = ipaddress.ip_address(host)
-        if ip_obj.is_loopback:
-            return ""
-        return str(ip_obj)
-    except Exception:
-        return host
-
-
-def load_allowed_ips_from_file(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-
-    routes: list[str] = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        try:
-            network = ipaddress.ip_network(line, strict=False)
-        except ValueError:
-            continue
-        if network.version != 4:
-            continue
-        routes.append(str(network))
-    return routes
-
-
-def get_client_allowed_ips() -> str:
-    global _CLIENT_ALLOWED_IPS_CACHE
-    if _CLIENT_ALLOWED_IPS_CACHE is not None:
-        return _CLIENT_ALLOWED_IPS_CACHE
-
-    # Force global mode to avoid huge split-route configs causing client freeze.
-    _CLIENT_ALLOWED_IPS_CACHE = "0.0.0.0/0"
-    return _CLIENT_ALLOWED_IPS_CACHE
-
-
-def normalize_wg_profile_mode(raw_mode: str | None) -> str:
-    # Smart split profile has been retired due to oversized config issues.
-    _ = (raw_mode or "").strip().lower()
-    return WG_PROFILE_GLOBAL
-
-
-def get_smart_allowed_ips() -> str:
-    global _SMART_ALLOWED_IPS_CACHE
-    if _SMART_ALLOWED_IPS_CACHE is not None:
-        return _SMART_ALLOWED_IPS_CACHE
-
-    routes = load_allowed_ips_from_file(WG_NON_CN_ROUTES_FILE)
-    if not routes:
-        _SMART_ALLOWED_IPS_CACHE = ""
-        return _SMART_ALLOWED_IPS_CACHE
-
-    _SMART_ALLOWED_IPS_CACHE = ", ".join(routes)
-    return _SMART_ALLOWED_IPS_CACHE
-
-
-def get_client_allowed_ips_for_profile(profile_mode: str) -> str:
-    _ = normalize_wg_profile_mode(profile_mode)
-    return "0.0.0.0/0"
-
-
-def default_profile_mode_from_policy() -> str:
-    return WG_PROFILE_GLOBAL
-
-
-def wireguard_profile_filename_suffix(profile_mode: str) -> str:
-    mode = normalize_wg_profile_mode(profile_mode)
-    return "global" if mode == WG_PROFILE_GLOBAL else "global"
-
-
-def detect_client_platform(user_agent: str) -> str:
-    ua = (user_agent or "").lower()
-    if "android" in ua:
-        return "android"
-    if any(token in ua for token in ("iphone", "ipad", "ipod", "ios")):
-        return "ios"
-    if "macintosh" in ua or "mac os x" in ua:
-        return "macos"
-    if "windows" in ua:
-        return "windows"
-    if "linux" in ua:
-        return "linux"
-    return "official"
-
-
-def detect_wireguard_platform(user_agent: str) -> str:
-    return detect_client_platform(user_agent)
-
-
-def detect_openvpn_platform(user_agent: str) -> str:
-    return detect_client_platform(user_agent)
 
 
 def get_openvpn_endpoint_host(
@@ -938,41 +183,34 @@ def get_openvpn_endpoint_host(
         except Exception:
             use_server = None
 
-    def prefer_public_host(candidate: str | None) -> str:
+    def prefer_configured_host(candidate: str | None) -> str:
         host = host_without_optional_port(candidate)
         if not host:
-            return ""
-        if is_non_public_host(host):
             return ""
         return host
 
     if use_server is not None:
-        preferred_host = prefer_public_host(
-            normalize_remote_host(row_get(use_server, "host", ""))
-        )
-        if preferred_host:
-            return preferred_host
-        preferred_domain = prefer_public_host(
+        preferred_domain = prefer_configured_host(
             normalize_domain_host(row_get(use_server, "domain", ""))
         )
         if preferred_domain:
             return preferred_domain
+        preferred_host = prefer_configured_host(
+            normalize_remote_host(row_get(use_server, "host", ""))
+        )
+        if preferred_host:
+            return preferred_host
 
-    preferred_portal_domain = prefer_public_host(get_portal_domain_setting())
+    preferred_portal_domain = prefer_configured_host(get_portal_domain_setting())
     if preferred_portal_domain:
         return preferred_portal_domain
 
-    preferred_openvpn_host = prefer_public_host(OPENVPN_ENDPOINT_HOST)
+    preferred_openvpn_host = prefer_configured_host(OPENVPN_ENDPOINT_HOST)
     if preferred_openvpn_host:
         return preferred_openvpn_host
 
-    wg_endpoint = (get_wireguard_endpoint_for_clients(user=user, server_row=server_row) or "").strip()
-    preferred_wg_host = prefer_public_host(wg_endpoint)
-    if preferred_wg_host:
-        return preferred_wg_host
-
     try:
-        preferred_request_host = prefer_public_host(request.host)
+        preferred_request_host = prefer_configured_host(request.host)
         if preferred_request_host:
             return preferred_request_host
     except Exception:
@@ -993,7 +231,7 @@ def get_openvpn_route_lines() -> list[str]:
 
 
 def get_openvpn_route_lines_for_profile(profile_mode: str) -> list[str]:
-    mode = normalize_wg_profile_mode(profile_mode)
+    mode = (profile_mode or "global").strip().lower() or "global"
     if mode in _OPENVPN_ROUTE_LINES_PROFILE_CACHE:
         return _OPENVPN_ROUTE_LINES_PROFILE_CACHE[mode]
 
@@ -1095,14 +333,16 @@ def build_openvpn_client_config(
     remote_port = OPENVPN_ENDPOINT_PORT
     if resolved_server is not None:
         candidate_host = host_without_optional_port(
+            normalize_domain_host(row_get(resolved_server, "domain", ""))
+        ) or host_without_optional_port(
             normalize_remote_host(row_get(resolved_server, "host", ""))
         )
         candidate_port = normalize_server_port(
             row_get(resolved_server, "openvpn_port", OPENVPN_ENDPOINT_PORT),
             OPENVPN_ENDPOINT_PORT,
         )
-        # 用户输入了公网服务器地址时，客户端配置优先直连该地址，避免被反向代理/内网地址覆盖。
-        if candidate_host and not is_non_public_host(candidate_host):
+        # 客户端配置优先使用服务器域名，便于后续迁移服务器时只改 DNS。
+        if candidate_host:
             remote_host = candidate_host
             remote_port = candidate_port
 
@@ -1116,8 +356,8 @@ def build_openvpn_client_config(
                 row_get(resolved_server, "openvpn_port", OPENVPN_ENDPOINT_PORT),
                 OPENVPN_ENDPOINT_PORT,
             )
-    if not remote_host or is_non_public_host(remote_host):
-        raise RuntimeError("未配置可用公网 OpenVPN 地址，请先设置服务器公网 IP 或域名。")
+    if not remote_host:
+        raise RuntimeError("未配置可用 OpenVPN 地址，请先设置服务器 IP 或域名。")
     lines = [
         "client",
         "dev tun",
@@ -1136,7 +376,7 @@ def build_openvpn_client_config(
         lines.append("explicit-exit-notify 1")
     if OPENVPN_CLIENT_DNS:
         lines.append(f"dhcp-option DNS {OPENVPN_CLIENT_DNS}")
-    mode = normalize_wg_profile_mode(profile_mode or default_profile_mode_from_policy())
+    mode = (profile_mode or default_profile_mode_from_policy()).strip().lower()
     lines.extend(get_openvpn_route_lines_for_profile(mode))
 
     lines.append("<ca>")
@@ -1193,194 +433,9 @@ def mark_registration_success(
     )
 
 
-def format_usdt(value: str | Decimal | None) -> str:
-    if value is None:
-        return "-"
-    if isinstance(value, str):
-        try:
-            amount = Decimal(value)
-        except (InvalidOperation, ValueError):
-            return value
-    else:
-        amount = value
-    amount = amount.quantize(Decimal("0.01"))
-    return f"{amount:.2f}"
-
-
 @app.template_filter("fmt_usdt")
 def fmt_usdt_filter(value: str | Decimal | None) -> str:
     return format_usdt(value)
-
-
-def upsert_app_setting(db: DatabaseConnection, key: str, value: str) -> None:
-    db.execute(
-        """
-        INSERT INTO app_settings (setting_key, setting_value, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(setting_key) DO UPDATE SET
-            setting_value = excluded.setting_value,
-            updated_at = excluded.updated_at
-        """,
-        (key, value, utcnow_iso()),
-    )
-
-
-def get_app_setting(db: DatabaseConnection, key: str, default: str = "") -> str:
-    row = db.execute(
-        """
-        SELECT setting_value
-        FROM app_settings
-        WHERE setting_key = ?
-        LIMIT 1
-        """,
-        (key,),
-    ).fetchone()
-    if not row:
-        return default
-    return (row["setting_value"] or "").strip() or default
-
-
-def load_named_settings(db: DatabaseConnection, keys: tuple[str, ...]) -> dict[str, str]:
-    if not keys:
-        return {}
-    rows = db.execute(
-        """
-        SELECT setting_key, setting_value
-        FROM app_settings
-        WHERE setting_key IN ({})
-        """.format(",".join("?" for _ in keys)),
-        keys,
-    ).fetchall()
-    values = {key: "" for key in keys}
-    for row in rows:
-        values[row["setting_key"]] = (row["setting_value"] or "").strip()
-    return values
-
-
-def parse_bool_setting(raw: str | None, default: bool = False) -> bool:
-    value = (raw or "").strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def parse_int_setting(raw: str | None, default: int, *, min_value: int = 0) -> int:
-    try:
-        value = int((raw or "").strip())
-    except Exception:
-        value = default
-    if value < min_value:
-        return min_value
-    return value
-
-
-def ensure_default_system_settings(db: DatabaseConnection) -> None:
-    defaults = {
-        SETTING_REGISTRATION_OPEN: "1",
-        SETTING_ORDER_EXPIRE_HOURS: "24",
-        SETTING_GIFT_DURATION_MONTHS: "0",
-        SETTING_GIFT_TRAFFIC_GB: "0",
-        SETTING_TELEGRAM_CONTACT: "",
-        SETTING_SITE_TITLE: "新世界发展科技有限公司边缘节点网络管理系统",
-        SETTING_WIREGUARD_OPEN: "0",
-        SETTING_OPENVPN_OPEN: "0",
-        SETTING_SYSTEM_UPGRADE_STATUS: "idle",
-        SETTING_SYSTEM_UPGRADE_SUMMARY: "",
-        SETTING_SYSTEM_UPGRADE_STARTED_AT: "",
-        SETTING_SYSTEM_UPGRADE_FINISHED_AT: "",
-    }
-    for key, value in defaults.items():
-        current = get_app_setting(db, key, "")
-        if current == "":
-            upsert_app_setting(db, key, value)
-
-
-def normalize_mail_security(raw: str | None) -> str:
-    value = (raw or "").strip().lower()
-    if value in MAIL_SECURITY_CHOICES:
-        return value
-    return MAIL_SECURITY_STARTTLS
-
-
-def format_mail_security_label(raw: str | None) -> str:
-    return MAIL_SECURITY_LABELS.get(
-        normalize_mail_security(raw),
-        MAIL_SECURITY_LABELS[MAIL_SECURITY_STARTTLS],
-    )
-
-
-def format_sender_display(from_name: str | None, from_email: str | None) -> str:
-    sender_name = (from_name or "").strip()
-    sender_email = (from_email or "").strip()
-    if sender_name and sender_email:
-        return f"{sender_name} <{sender_email}>"
-    return sender_email or "-"
-
-
-def host_without_optional_port(raw_host: str | None) -> str:
-    host = normalize_domain_host(raw_host)
-    if not host:
-        return ""
-    if host.startswith("[") and "]" in host:
-        end = host.find("]")
-        if end > 1:
-            return host[1:end]
-    if host.count(":") == 1:
-        host_part, port_part = host.rsplit(":", 1)
-        if host_part and port_part.isdigit():
-            return host_part
-    return host
-
-
-def absolute_url_for(endpoint: str, **values) -> str:
-    try:
-        return url_for(endpoint, _external=True, **values)
-    except Exception:
-        path = url_for(endpoint, **values)
-        host = ""
-        try:
-            host = (request.host_url or "").strip().rstrip("/")
-        except Exception:
-            host = ""
-        if host:
-            return f"{host}{path}"
-        return path
-
-
-def build_masked_download_link(
-    access_token: str,
-    *,
-    output_format: str = "yaml",
-) -> str:
-    token = (access_token or "").strip()
-    if not token:
-        return ""
-    fmt = (output_format or "yaml").strip().lower()
-    values: dict[str, str] = {"access_token": token}
-    if fmt in {"json", "raw"}:
-        values["f"] = fmt
-    return absolute_url_for("download_via_token", **values)
-
-
-def build_download_filename_for_user(user: DatabaseRow, *, build_raw: bool) -> str:
-    username = safe_name((row_get(user, "username", "") or "").strip() or "user")
-    stamp = datetime.now(ADMIN_UI_TZ).strftime("%Y%m%d%H%M%S")
-    ext = "json" if build_raw else "yaml"
-    return f"{username}-{stamp}.{ext}"
-
-
-def is_non_public_host(raw_host: str | None) -> bool:
-    host = host_without_optional_port(raw_host).strip().lower().rstrip(".")
-    if not host:
-        return False
-    if host in {"localhost", "localhost.localdomain"}:
-        return True
-    try:
-        return not ipaddress.ip_address(host).is_global
-    except ValueError:
-        return False
 
 
 def get_relay_public_host() -> str:
@@ -1402,9 +457,6 @@ def get_relay_public_host() -> str:
     if ovpn_host:
         return ovpn_host
 
-    wg_host = prefer_public_host(WG_ENDPOINT)
-    if wg_host:
-        return wg_host
     try:
         host = host_without_optional_port(request.host)
         if host and not is_non_public_host(host):
@@ -1443,20 +495,20 @@ def ensure_user_ingress_ports(
     db: DatabaseConnection,
     user: DatabaseRow,
 ) -> tuple[int, int]:
-    wg_port = row_get(user, "wg_ingress_port")
+    kcptun_port = row_get(user, "kcptun_ingress_port")
     openvpn_port = row_get(user, "openvpn_ingress_port")
     changed = False
-    if wg_port is None or not str(wg_port).strip():
-        wg_port = allocate_user_ingress_port(
+    if kcptun_port is None or not str(kcptun_port).strip():
+        kcptun_port = allocate_user_ingress_port(
             db,
-            column_name="wg_ingress_port",
-            start_port=WG_RELAY_PORT_START,
-            end_port=WG_RELAY_PORT_END,
+            column_name="kcptun_ingress_port",
+            start_port=KCPTUN_RELAY_PORT_START,
+            end_port=KCPTUN_RELAY_PORT_END,
             exclude_user_id=int(user["id"]),
         )
         changed = True
     else:
-        wg_port = int(wg_port)
+        kcptun_port = int(kcptun_port)
     if openvpn_port is None or not str(openvpn_port).strip():
         openvpn_port = allocate_user_ingress_port(
             db,
@@ -1469,34 +521,34 @@ def ensure_user_ingress_ports(
     else:
         openvpn_port = int(openvpn_port)
     if changed:
-        db.execute(
+        cursor = db.execute(
             """
             UPDATE users
-            SET wg_ingress_port = ?,
+            SET kcptun_ingress_port = ?,
                 openvpn_ingress_port = ?
             WHERE id = ?
             """,
-            (wg_port, openvpn_port, int(user["id"])),
+            (kcptun_port, openvpn_port, int(user["id"])),
         )
-    return wg_port, openvpn_port
+    return kcptun_port, openvpn_port
 
 
 def ensure_user_transport_ports(db: DatabaseConnection, user: DatabaseRow) -> DatabaseRow:
     role = (row_get(user, "role", "") or "").strip().lower()
     if role not in {"user", "admin"}:
         return user
-    wg_port_before = row_get(user, "wg_ingress_port")
+    kcptun_port_before = row_get(user, "kcptun_ingress_port")
     ss_port_before = row_get(user, "openvpn_ingress_port")
-    wg_port_after, ss_port_after = ensure_user_ingress_ports(db, user)
+    kcptun_port_after, ss_port_after = ensure_user_ingress_ports(db, user)
     try:
-        wg_before = int(wg_port_before) if wg_port_before is not None else -1
+        kcptun_before = int(kcptun_port_before) if kcptun_port_before is not None else -1
     except Exception:
-        wg_before = -1
+        kcptun_before = -1
     try:
         ss_before = int(ss_port_before) if ss_port_before is not None else -1
     except Exception:
         ss_before = -1
-    changed = (wg_before != int(wg_port_after)) or (ss_before != int(ss_port_after))
+    changed = (kcptun_before != int(kcptun_port_after)) or (ss_before != int(ss_port_after))
     if changed:
         db.commit()
         refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
@@ -1519,7 +571,7 @@ def get_user_shadowsocks_server_port(user: DatabaseRow) -> int:
 
 
 def get_user_kcptun_server_port(user: DatabaseRow) -> int:
-    raw = row_get(user, "wg_ingress_port")
+    raw = row_get(user, "kcptun_ingress_port")
     if raw is None or not str(raw).strip():
         return KCPTUN_SERVER_PORT
     try:
@@ -1539,18 +591,6 @@ def derive_shadowsocks_password_for_port(port: int) -> str:
     return hashlib.sha256(seed).hexdigest()[:32]
 
 
-def get_wireguard_relay_endpoint(user: DatabaseRow | None) -> str:
-    if not VPN_RELAY_ENABLED or not user or row_get(user, "role") != "user":
-        return ""
-    host = get_relay_public_host()
-    if not host:
-        return ""
-    port = row_get(user, "wg_ingress_port")
-    if port is None or not str(port).strip():
-        return ""
-    return f"{host}:{int(port)}"
-
-
 def get_openvpn_relay_endpoint(user: DatabaseRow | None) -> tuple[str, int] | None:
     if not VPN_RELAY_ENABLED or not user or row_get(user, "role") != "user":
         return None
@@ -1561,330 +601,6 @@ def get_openvpn_relay_endpoint(user: DatabaseRow | None) -> tuple[str, int] | No
     if port is None or not str(port).strip():
         return None
     return host, int(port)
-
-
-def generate_openvpn_static_key_text() -> str:
-    raw = os.urandom(256)
-    hex_text = raw.hex()
-    lines = [hex_text[i : i + 32] for i in range(0, len(hex_text), 32)]
-    return "\n".join(
-        [
-            "#",
-            "# 2048 bit OpenVPN static key",
-            "#",
-            "-----BEGIN OpenVPN Static key V1-----",
-            *lines,
-            "-----END OpenVPN Static key V1-----",
-            "",
-        ]
-    )
-
-
-def ensure_shared_wireguard_materials() -> tuple[str, str]:
-    private_key = ""
-    public_key = ""
-    if SHARED_WG_PRIVATE_KEY_FILE.exists() and SHARED_WG_PUBLIC_KEY_FILE.exists():
-        private_key = SHARED_WG_PRIVATE_KEY_FILE.read_text(encoding="utf-8").strip()
-        public_key = SHARED_WG_PUBLIC_KEY_FILE.read_text(encoding="utf-8").strip()
-        if private_key and public_key:
-            return private_key, public_key
-
-    private = x25519.X25519PrivateKey.generate()
-    private_bytes = private.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    public_bytes = private.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    private_key = base64.b64encode(private_bytes).decode("ascii")
-    public_key = base64.b64encode(public_bytes).decode("ascii")
-    SHARED_WG_PRIVATE_KEY_FILE.write_text(private_key + "\n", encoding="utf-8")
-    SHARED_WG_PUBLIC_KEY_FILE.write_text(public_key + "\n", encoding="utf-8")
-    return private_key, public_key
-
-
-def ensure_shared_openvpn_materials() -> dict[str, str]:
-    required_files = {
-        "ca_key": SHARED_OPENVPN_CA_KEY_FILE,
-        "ca_cert": SHARED_OPENVPN_CA_CERT_FILE,
-        "server_key": SHARED_OPENVPN_SERVER_KEY_FILE,
-        "server_cert": SHARED_OPENVPN_SERVER_CERT_FILE,
-        "tls_crypt_key": SHARED_OPENVPN_TLS_CRYPT_KEY_FILE,
-    }
-    if all(path.exists() and path.read_text(encoding="utf-8").strip() for path in required_files.values()):
-        return {
-            key: path.read_text(encoding="utf-8").strip()
-            for key, path in required_files.items()
-        }
-
-    now = datetime.now(timezone.utc)
-    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    ca_subject = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, "vpn-manager-ca"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "vpn-manager"),
-        ]
-    )
-    ca_cert = (
-        x509.CertificateBuilder()
-        .subject_name(ca_subject)
-        .issuer_name(ca_subject)
-        .public_key(ca_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(days=1))
-        .not_valid_after(now + timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
-        .sign(private_key=ca_key, algorithm=hashes.SHA256())
-    )
-
-    server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    server_subject = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, "vpn-manager-server"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "vpn-manager"),
-        ]
-    )
-    server_cert = (
-        x509.CertificateBuilder()
-        .subject_name(server_subject)
-        .issuer_name(ca_cert.subject)
-        .public_key(server_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(days=1))
-        .not_valid_after(now + timedelta(days=1825))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]),
-            critical=False,
-        )
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                content_commitment=False,
-                key_encipherment=True,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        )
-        .sign(private_key=ca_key, algorithm=hashes.SHA256())
-    )
-
-    materials = {
-        "ca_key": ca_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        ).decode("utf-8"),
-        "ca_cert": ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),
-        "server_key": server_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        ).decode("utf-8"),
-        "server_cert": server_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),
-        "tls_crypt_key": generate_openvpn_static_key_text(),
-    }
-    for key, path in required_files.items():
-        path.write_text(materials[key].strip() + "\n", encoding="utf-8")
-    return materials
-
-
-def build_openvpn_common_name(user: DatabaseRow) -> str:
-    user_id = int(row_get(user, "id", 0) or 0)
-    if user_id <= 0:
-        raise RuntimeError("无法为用户生成 OpenVPN 身份。")
-    return f"{OPENVPN_COMMON_NAME_PREFIX}{user_id}"
-
-
-def parse_openvpn_user_id_from_common_name(common_name: str | None) -> int | None:
-    value = (common_name or "").strip()
-    if not value:
-        return None
-    match = re.fullmatch(rf"{re.escape(OPENVPN_COMMON_NAME_PREFIX)}(\d+)", value)
-    if not match:
-        return None
-    try:
-        user_id = int(match.group(1))
-    except Exception:
-        return None
-    return user_id if user_id > 0 else None
-
-
-def certificate_not_valid_before_utc(cert: x509.Certificate) -> datetime:
-    value = getattr(cert, "not_valid_before_utc", None)
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc)
-    value = cert.not_valid_before
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def certificate_not_valid_after_utc(cert: x509.Certificate) -> datetime:
-    value = getattr(cert, "not_valid_after_utc", None)
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc)
-    value = cert.not_valid_after
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def should_rotate_openvpn_client_identity(
-    *,
-    common_name: str,
-    cert_text: str,
-    key_text: str,
-) -> bool:
-    cert_raw = (cert_text or "").strip()
-    key_raw = (key_text or "").strip()
-    if not cert_raw or not key_raw:
-        return True
-    try:
-        cert = x509.load_pem_x509_certificate(cert_raw.encode("utf-8"))
-        private_key = serialization.load_pem_private_key(
-            key_raw.encode("utf-8"),
-            password=None,
-        )
-    except Exception:
-        return True
-    try:
-        subject_cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-    except Exception:
-        return True
-    if (subject_cn or "").strip() != common_name:
-        return True
-    now = utcnow()
-    if certificate_not_valid_before_utc(cert) > now + timedelta(minutes=5):
-        return True
-    renew_before = now + timedelta(days=max(1, OPENVPN_CLIENT_CERT_RENEW_BEFORE_DAYS))
-    if certificate_not_valid_after_utc(cert) <= renew_before:
-        return True
-    try:
-        cert_public_bytes = cert.public_key().public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        key_public_bytes = private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-    except Exception:
-        return True
-    return cert_public_bytes != key_public_bytes
-
-
-def issue_openvpn_client_identity(common_name: str) -> dict[str, str]:
-    materials = ensure_shared_openvpn_materials()
-    ca_key = serialization.load_pem_private_key(
-        materials["ca_key"].encode("utf-8"),
-        password=None,
-    )
-    ca_cert = x509.load_pem_x509_certificate(materials["ca_cert"].encode("utf-8"))
-    client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    now = utcnow()
-    subject = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "vpn-manager-client"),
-        ]
-    )
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(ca_cert.subject)
-        .public_key(client_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(minutes=5))
-        .not_valid_after(now + timedelta(days=OPENVPN_CLIENT_CERT_VALID_DAYS))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
-            critical=False,
-        )
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                content_commitment=False,
-                key_encipherment=True,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        )
-        .sign(private_key=ca_key, algorithm=hashes.SHA256())
-    )
-    return {
-        "openvpn_common_name": common_name,
-        "openvpn_client_cert": cert.public_bytes(serialization.Encoding.PEM)
-        .decode("utf-8")
-        .strip(),
-        "openvpn_client_key": client_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-        .decode("utf-8")
-        .strip(),
-    }
-
-
-def ensure_user_openvpn_client_identity(
-    db: DatabaseConnection,
-    user: DatabaseRow,
-) -> DatabaseRow:
-    common_name = build_openvpn_common_name(user)
-    cert_text = (row_get(user, "openvpn_client_cert", "") or "").strip()
-    key_text = (row_get(user, "openvpn_client_key", "") or "").strip()
-    stored_common_name = (row_get(user, "openvpn_common_name", "") or "").strip()
-    needs_rotate = stored_common_name != common_name or should_rotate_openvpn_client_identity(
-        common_name=common_name,
-        cert_text=cert_text,
-        key_text=key_text,
-    )
-    if needs_rotate:
-        bundle = issue_openvpn_client_identity(common_name)
-        db.execute(
-            """
-            UPDATE users
-            SET openvpn_common_name = ?,
-                openvpn_client_cert = ?,
-                openvpn_client_key = ?
-            WHERE id = ?
-            """,
-            (
-                bundle["openvpn_common_name"],
-                bundle["openvpn_client_cert"],
-                bundle["openvpn_client_key"],
-                int(user["id"]),
-            ),
-        )
-        refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
-        if not refreshed:
-            raise RuntimeError("OpenVPN 证书更新后用户不存在。")
-        return refreshed
-    if not stored_common_name:
-        db.execute(
-            "UPDATE users SET openvpn_common_name = ? WHERE id = ?",
-            (common_name, int(user["id"])),
-        )
-        refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
-        if refreshed:
-            return refreshed
-    return user
 
 
 def ensure_shared_vpn_server_materials() -> dict[str, str]:
@@ -1916,61 +632,42 @@ def load_system_settings(db: DatabaseConnection) -> dict[str, int | bool | str]:
         "gift_traffic_gb": parse_int_setting(gift_traffic_gb_raw, 0, min_value=0),
         "telegram_contact": (telegram_contact or "").strip(),
         "site_title": (site_title or "").strip() or default_site_title,
-        "wireguard_open": False,
-        "openvpn_open": False,
+        "vpn_open": False,
+        "openvpn_open": True,
     }
-
-
-def get_current_app_version() -> str:
-    version_file = BASE_DIR / "VERSION"
-    if version_file.exists():
-        return version_file.read_text(encoding="utf-8").strip() or "unknown"
-    return "unknown"
 
 
 def load_system_upgrade_state(db: DatabaseConnection) -> dict[str, str]:
-    return {
-        "status": get_app_setting(db, SETTING_SYSTEM_UPGRADE_STATUS, "idle"),
-        "summary": get_app_setting(db, SETTING_SYSTEM_UPGRADE_SUMMARY, ""),
-        "started_at": get_app_setting(db, SETTING_SYSTEM_UPGRADE_STARTED_AT, ""),
-        "finished_at": get_app_setting(db, SETTING_SYSTEM_UPGRADE_FINISHED_AT, ""),
-        "version": get_current_app_version(),
-    }
+    return load_system_upgrade_state_impl(
+        db,
+        get_setting=get_app_setting,
+        status_key=SETTING_SYSTEM_UPGRADE_STATUS,
+        summary_key=SETTING_SYSTEM_UPGRADE_SUMMARY,
+        started_at_key=SETTING_SYSTEM_UPGRADE_STARTED_AT,
+        finished_at_key=SETTING_SYSTEM_UPGRADE_FINISHED_AT,
+        current_version=get_current_app_version(BASE_DIR),
+    )
 
 
 def load_system_upgrade_state_with_timeout_unlock(
     db: DatabaseConnection,
 ) -> dict[str, str]:
-    state = load_system_upgrade_state(db)
-    status = (state.get("status") or "").strip().lower()
-    if status != "running":
-        return state
-
-    started_at_raw = (state.get("started_at") or "").strip()
-    started_at = parse_iso(started_at_raw)
-    if not started_at:
-        return state
-
-    elapsed_seconds = (utcnow() - started_at).total_seconds()
-    if elapsed_seconds < SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS:
-        return state
-
-    timeout_minutes = max(1, SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS // 60)
-    summary = (
-        f"系统升级任务超过 {timeout_minutes} 分钟未完成，已自动解锁。"
-        "请重新发起升级。"
+    return load_system_upgrade_state_with_timeout_unlock_impl(
+        db,
+        base_dir=BASE_DIR,
+        get_setting=get_app_setting,
+        get_current_app_version=get_current_app_version,
+        parse_iso=parse_iso,
+        utcnow=utcnow,
+        utcnow_iso=utcnow_iso,
+        append_log=append_system_upgrade_log,
+        open_direct_db_connection=open_direct_db_connection,
+        running_timeout_seconds=SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS,
+        status_key=SETTING_SYSTEM_UPGRADE_STATUS,
+        summary_key=SETTING_SYSTEM_UPGRADE_SUMMARY,
+        started_at_key=SETTING_SYSTEM_UPGRADE_STARTED_AT,
+        finished_at_key=SETTING_SYSTEM_UPGRADE_FINISHED_AT,
     )
-    append_system_upgrade_log(
-        "系统升级任务状态超时，自动解锁："
-        f"started_at={started_at_raw}, timeout={SYSTEM_UPGRADE_RUNNING_TIMEOUT_SECONDS}s"
-    )
-    save_system_upgrade_state(
-        status="failed",
-        summary=summary,
-        started_at=started_at_raw,
-        finished_at=utcnow_iso(),
-    )
-    return load_system_upgrade_state(db)
 
 
 def save_system_upgrade_state(
@@ -1980,27 +677,18 @@ def save_system_upgrade_state(
     started_at: str = "",
     finished_at: str = "",
 ) -> None:
-    conn = open_direct_db_connection()
-    try:
-        for key, value in (
-            (SETTING_SYSTEM_UPGRADE_STATUS, status),
-            (SETTING_SYSTEM_UPGRADE_SUMMARY, summary[:1000]),
-            (SETTING_SYSTEM_UPGRADE_STARTED_AT, started_at),
-            (SETTING_SYSTEM_UPGRADE_FINISHED_AT, finished_at),
-        ):
-            conn.execute(
-                """
-                INSERT INTO app_settings (setting_key, setting_value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(setting_key) DO UPDATE SET
-                    setting_value = excluded.setting_value,
-                    updated_at = excluded.updated_at
-                """,
-                (key, value, utcnow_iso()),
-            )
-        conn.commit()
-    finally:
-        conn.close()
+    save_system_upgrade_state_impl(
+        status=status,
+        summary=summary,
+        started_at=started_at,
+        finished_at=finished_at,
+        open_direct_db_connection=open_direct_db_connection,
+        utcnow_iso=utcnow_iso,
+        status_key=SETTING_SYSTEM_UPGRADE_STATUS,
+        summary_key=SETTING_SYSTEM_UPGRADE_SUMMARY,
+        started_at_key=SETTING_SYSTEM_UPGRADE_STARTED_AT,
+        finished_at_key=SETTING_SYSTEM_UPGRADE_FINISHED_AT,
+    )
 
 
 def detect_origin_default_branch() -> str:
@@ -2229,7 +917,7 @@ def dispatch_host_web_upgrade() -> tuple[bool, str]:
         return False, "宿主机项目目录必须为绝对路径，无法升级。"
     if project_dir == "/workspace":
         return False, "宿主机项目目录不能为 /workspace，请改为真实部署目录后重试。"
-    helper_script = build_host_web_upgrade_script(get_current_app_version())
+    helper_script = build_host_web_upgrade_script(get_current_app_version(BASE_DIR))
     SYSTEM_UPGRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     fd, script_path_raw = tempfile.mkstemp(
         prefix="host-upgrade-",
@@ -2297,7 +985,7 @@ def run_system_upgrade_task() -> None:
     )
     SYSTEM_UPGRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     SYSTEM_UPGRADE_LOG_FILE.write_text("", encoding="utf-8")
-    append_system_upgrade_log(f"当前版本: {get_current_app_version()}")
+    append_system_upgrade_log(f"当前版本: {get_current_app_version(BASE_DIR)}")
 
     if not (BASE_DIR / ".git").exists():
         message = "当前运行目录缺少 .git，无法自动升级。"
@@ -2346,7 +1034,7 @@ def run_system_upgrade_task() -> None:
             )
             return
 
-    version_after = get_current_app_version()
+    version_after = get_current_app_version(BASE_DIR)
     summary = f"系统升级完成，当前版本 {version_after}。"
     if AUTO_RESTART_AFTER_SELF_UPGRADE:
         summary += " Web 进程将自动重启。"
@@ -2372,8 +1060,7 @@ def launch_system_upgrade_task() -> None:
 
 
 def is_registration_open(db: DatabaseConnection | None = None) -> bool:
-    use_db = db or get_db()
-    return bool(load_system_settings(use_db)["registration_open"])
+    return False
 
 
 def get_order_expire_hours(db: DatabaseConnection | None = None) -> int:
@@ -2390,9 +1077,9 @@ def get_gift_settings(db: DatabaseConnection | None = None) -> tuple[int, int]:
     )
 
 
-def is_wireguard_open(db: DatabaseConnection | None = None) -> bool:
+def is_vpn_open(db: DatabaseConnection | None = None) -> bool:
     use_db = db or get_db()
-    return bool(WIREGUARD_ENABLED and bool(load_system_settings(use_db)["wireguard_open"]))
+    return bool(False and bool(load_system_settings(use_db)["vpn_open"]))
 
 
 def is_openvpn_open(db: DatabaseConnection | None = None) -> bool:
@@ -2525,39 +1212,14 @@ def is_admin_onboarding_completed(db: DatabaseConnection) -> bool:
     return parse_bool_setting(raw_value, False)
 
 
-def parse_wg_endpoint_port() -> str:
-    raw = (WG_ENDPOINT or "").strip()
-    if not raw:
-        return str(SERVER_DEPLOY_DEFAULT_WG_PORT)
-    if raw.startswith("["):
-        idx = raw.find("]")
-        if idx > 0 and len(raw) > idx + 2 and raw[idx + 1] == ":":
-            tail = raw[idx + 2 :]
-            if tail.isdigit():
-                return tail
-    if raw.count(":") == 1:
-        _, port = raw.rsplit(":", 1)
-        if port.isdigit():
-            return port
-    return str(SERVER_DEPLOY_DEFAULT_WG_PORT)
-
-
-def normalize_domain_host(raw_domain: str | None) -> str:
-    value = (raw_domain or "").strip()
-    if not value:
-        return ""
-    value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
-    value = value.split("/", 1)[0].strip()
-    return value
-
-
-def normalize_fqdn(raw_domain: str | None) -> str:
-    return normalize_domain_host(raw_domain).strip().strip(".").lower()
-
-
 def looks_like_email(raw_email: str | None) -> bool:
     value = (raw_email or "").strip()
     return "@" in value and "." in value.rsplit("@", 1)[-1]
+
+
+def looks_like_internal_username(raw_username: str | None) -> bool:
+    value = (raw_username or "").strip()
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", value))
 
 
 def domain_belongs_to_zone(domain_name: str, zone_name: str) -> bool:
@@ -2586,59 +1248,6 @@ def get_portal_domain_setting() -> str:
     return normalize_domain_host(
         get_app_setting(db, ONBOARDING_SETTING_PORTAL_DOMAIN, "")
     )
-
-
-def get_wireguard_endpoint_for_clients(
-    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
-) -> str:
-    use_server = server_row
-    if use_server is None and user is not None:
-        try:
-            db = get_db()
-            use_server = get_persisted_runtime_server_for_account(db, user)
-        except Exception:
-            use_server = None
-
-    if use_server is not None:
-        domain = normalize_domain_host(row_get(use_server, "domain", ""))
-        host = domain or normalize_remote_host(row_get(use_server, "host", ""))
-        if host:
-            wg_port = normalize_server_port(
-                row_get(use_server, "wg_port", SERVER_DEPLOY_DEFAULT_WG_PORT),
-                SERVER_DEPLOY_DEFAULT_WG_PORT,
-            )
-            if host.startswith("[") and "]" in host:
-                idx = host.find("]")
-                if idx > 0 and len(host) > idx + 2 and host[idx + 1] == ":":
-                    return host
-                return f"{host}:{wg_port}"
-            if host.count(":") == 1:
-                host_part, port_part = host.rsplit(":", 1)
-                if host_part and port_part.isdigit():
-                    return host
-            return f"{host}:{wg_port}"
-
-    wg_endpoint = (WG_ENDPOINT or "").strip()
-    if wg_endpoint:
-        return wg_endpoint
-
-    portal_domain = get_portal_domain_setting()
-    if not portal_domain:
-        return WG_ENDPOINT
-
-    if portal_domain.startswith("[") and "]" in portal_domain:
-        # IPv6 with optional port
-        idx = portal_domain.find("]")
-        if idx > 0 and len(portal_domain) > idx + 2 and portal_domain[idx + 1] == ":":
-            return portal_domain
-        return f"{portal_domain}:{parse_wg_endpoint_port()}"
-
-    if portal_domain.count(":") == 1:
-        host_part, port_part = portal_domain.rsplit(":", 1)
-        if host_part and port_part.isdigit():
-            return portal_domain
-
-    return f"{portal_domain}:{parse_wg_endpoint_port()}"
 
 
 def ensure_default_payment_settings(db: DatabaseConnection) -> None:
@@ -2772,6 +1381,7 @@ def ensure_default_payment_methods(db: DatabaseConnection) -> None:
             is_active, sort_order, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, 1, 10, ?, ?)
+        RETURNING id
         """,
         (
             PAYMENT_METHOD_USDT,
@@ -2963,236 +1573,23 @@ def load_subscription_plans(db: DatabaseConnection, *, active_only: bool = False
     return plans
 
 
-def usdt_explorer_link(network: str, tx_hash: str) -> str:
-    if not tx_hash:
-        return ""
-    mapping = {
-        "TRC20": "https://tronscan.org/#/transaction/{tx}",
-        "ERC20": "https://etherscan.io/tx/{tx}",
-        "BEP20": "https://bscscan.com/tx/{tx}",
-        "POLYGON": "https://polygonscan.com/tx/{tx}",
-    }
-    tpl = mapping.get((network or "").upper(), mapping["TRC20"])
-    return tpl.format(tx=tx_hash)
-
-
-def normalize_server_port(raw: str | int | None, default: int = 22) -> int:
-    try:
-        port = int(raw or default)
-    except Exception:
-        port = default
-    if port <= 0 or port > 65535:
-        return default
-    return port
-
-
-def normalize_remote_host(raw: str | None) -> str:
-    value = (raw or "").strip()
-    if not value:
-        return ""
-    value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
-    value = value.split("/", 1)[0].strip()
-    return value
-
-
-def normalize_server_region(raw: str | None) -> str:
-    return (raw or "").strip()[:80]
-
-
-def normalize_relay_port(value, default: int) -> int:
-    try:
-        port = int(value)
-    except Exception:
-        port = default
-    if port <= 1024 or port > 65535:
-        return default
-    return port
-
-
-def append_system_upgrade_log(message: str) -> None:
-    SYSTEM_UPGRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    with SYSTEM_UPGRADE_LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {message.rstrip()}\n")
-
-
-def read_system_upgrade_log_text(limit_chars: int = SYSTEM_UPGRADE_LOG_TAIL_CHARS) -> str:
-    if not SYSTEM_UPGRADE_LOG_FILE.exists():
-        return ""
-    try:
-        raw = SYSTEM_UPGRADE_LOG_FILE.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return ""
-    text = normalize_deploy_log_text(raw)
-    if limit_chars > 0 and len(text) > limit_chars:
-        return "...(log truncated)\n" + text[-limit_chars:]
-    return text
-
-
-def run_local_command_with_output(args: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
-    completed = subprocess.run(
-        args,
-        cwd=str(cwd or BASE_DIR),
-        capture_output=True,
-        text=True,
-        check=False,
+def refresh_missing_server_regions(db: DatabaseConnection) -> None:
+    refresh_missing_server_regions_impl(
+        db,
+        row_get=row_get,
+        utcnow_iso=utcnow_iso,
     )
-    merged = "\n".join(
-        part.strip() for part in [completed.stdout or "", completed.stderr or ""] if part.strip()
-    ).strip()
-    return completed.returncode, merged
-
-
-def mask_secret(raw: str, visible: int = 2) -> str:
-    value = (raw or "").strip()
-    if not value:
-        return ""
-    if len(value) <= visible:
-        return "*" * len(value)
-    return "*" * max(0, len(value) - visible) + value[-visible:]
-
-
-def summarize_text(raw: str, limit: int = 600) -> str:
-    text = (raw or "").strip()
-    if len(text) <= limit:
-        return text
-    return "..." + text[-limit:]
-
-
-def normalize_deploy_log_text(raw: str) -> str:
-    text = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
-    text = ANSI_ESCAPE_RE.sub("", text)
-    text = CONTROL_CHAR_RE.sub("", text)
-    normalized_lines = [line.rstrip() for line in text.split("\n")]
-    return "\n".join(normalized_lines).strip()
-
-
-def build_structured_deploy_log(
-    *,
-    host: str,
-    port: int,
-    username: str,
-    started_at: datetime,
-    ended_at: datetime,
-    script_text: str,
-    script_executed: bool,
-    exit_code: int | None = None,
-    stdout_text: str = "",
-    stderr_text: str = "",
-    error_text: str = "",
-) -> str:
-    started = started_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    ended = ended_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    host_display = f"{normalize_remote_host(host)}:{normalize_server_port(port, 22)}"
-    user_display = (username or "").strip() or "root"
-    script_line_count = max(1, len((script_text or "").splitlines()))
-    out_clean = normalize_deploy_log_text(stdout_text)
-    err_clean = normalize_deploy_log_text(stderr_text)
-    exc_clean = normalize_deploy_log_text(error_text)
-    lines: list[str] = [
-        "[deploy] 任务信息",
-        f"开始时间: {started}",
-        f"结束时间: {ended}",
-        f"目标主机: {host_display}",
-        f"SSH用户: {user_display}",
-        "远程命令: bash -s (stdin install script)",
-        f"脚本行数: {script_line_count}",
-        "脚本步骤: 升级系统并安装依赖 -> 拉取 GitHub 仓库 -> 启动本地 systemd 服务 vpnmanager-server",
-        f"脚本是否执行: {'是' if script_executed else '否'}",
-        f"退出码: {exit_code if exit_code is not None else '-'}",
-        "",
-        "[deploy] stdout",
-        out_clean if out_clean else "(empty)",
-        "",
-        "[deploy] stderr",
-        err_clean if err_clean else "(empty)",
-    ]
-    if exc_clean:
-        lines.extend(
-            [
-                "",
-                "[deploy] 异常",
-                exc_clean,
-            ]
-        )
-    return "\n".join(lines).strip()
-
-
-def clip_text(raw: str, limit: int = 200000) -> str:
-    text = (raw or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[-limit:]
 
 
 def load_admin_servers(db: DatabaseConnection) -> list[dict]:
-    rows = db.execute(
-        """
-        SELECT
-            id,
-            server_name,
-            server_region,
-            host,
-            port,
-            username,
-            password,
-            ssh_private_key,
-            domain,
-            vpn_api_token,
-            wg_port,
-            openvpn_port,
-            dns_port,
-            status,
-            last_test_at,
-            last_test_ok,
-            last_test_message,
-            last_deploy_at,
-            last_deploy_ok,
-            last_deploy_message,
-            last_deploy_log,
-            last_allocated_at,
-            created_at,
-            updated_at
-        FROM vpn_servers
-        ORDER BY id DESC
-        """
-    ).fetchall()
-
-    servers: list[dict] = []
-    for row in rows:
-        status = (row["status"] or "").strip() or "pending"
-        servers.append(
-            {
-                "id": row["id"],
-                "server_name": (row["server_name"] or "").strip() or (row["host"] or "").strip(),
-                "server_region": normalize_server_region(row["server_region"]),
-                "server_region_display": normalize_server_region(row["server_region"]) or "未设置",
-                "host": (row["host"] or "").strip(),
-                "port": normalize_server_port(row["port"], 22),
-                "username": (row["username"] or "").strip(),
-                "password_masked": mask_secret(row["password"] or ""),
-                "private_key_enabled": bool((row["ssh_private_key"] or "").strip()),
-                "domain": (row["domain"] or "").strip(),
-                "vpn_api_token_masked": mask_secret(row["vpn_api_token"] or "", visible=4),
-                "wg_port": normalize_server_port(row["wg_port"], SERVER_DEPLOY_DEFAULT_WG_PORT),
-                "openvpn_port": normalize_server_port(
-                    row["openvpn_port"], SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
-                ),
-                "dns_port": normalize_server_port(row["dns_port"], SERVER_DEPLOY_DEFAULT_DNS_PORT),
-                "status": status,
-                "last_test_at": row["last_test_at"],
-                "last_test_ok": int(row["last_test_ok"] or 0) == 1,
-                "last_test_message": summarize_text(row["last_test_message"] or "", 220),
-                "last_deploy_at": row["last_deploy_at"],
-                "last_deploy_ok": int(row["last_deploy_ok"] or 0) == 1,
-                "last_deploy_message": summarize_text(row["last_deploy_message"] or "", 280),
-                "has_deploy_log": bool((row["last_deploy_log"] or "").strip()),
-                "last_allocated_at": row["last_allocated_at"],
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-            }
-        )
-    return servers
+    return load_admin_servers_impl(
+        db,
+        row_get=row_get,
+        get_server_ipv6_enabled=get_server_ipv6_enabled,
+        default_kcptun_port=SERVER_DEPLOY_DEFAULT_KCPTUN_PORT,
+        default_openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+        default_dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+    )
 
 
 def get_server_by_id(db: DatabaseConnection, server_id: int | None) -> DatabaseRow | None:
@@ -3238,88 +1635,141 @@ def get_persisted_runtime_server_for_account(
     return None
 
 
+def get_user_allowed_server_ids(db: DatabaseConnection, user: DatabaseRow | None) -> list[int]:
+    if not user or (row_get(user, "role", "") or "").strip().lower() != "user":
+        return []
+    rows = db.execute(
+        """
+        SELECT server_id
+        FROM user_server_permissions
+        WHERE user_id = ?
+        ORDER BY server_id ASC
+        """,
+        (int(user["id"]),),
+    ).fetchall()
+    result: list[int] = []
+    for row in rows:
+        try:
+            result.append(int(row["server_id"]))
+        except Exception:
+            continue
+    if not result:
+        assigned_server_id = row_get(user, "assigned_server_id")
+        if assigned_server_id is not None and str(assigned_server_id).strip():
+            try:
+                result.append(int(assigned_server_id))
+            except Exception:
+                pass
+    return result
+
+
+def load_user_allowed_runtime_servers(
+    db: DatabaseConnection,
+    user: DatabaseRow | None,
+) -> list[DatabaseRow]:
+    allowed_ids = get_user_allowed_server_ids(db, user)
+    servers: list[DatabaseRow] = []
+    seen: set[int] = set()
+    for server_id in allowed_ids:
+        if server_id in seen:
+            continue
+        seen.add(server_id)
+        server = get_server_by_id(db, server_id)
+        if not is_runtime_server_ready(server):
+            continue
+        if not normalize_domain_host(row_get(server, "domain", "")):
+            continue
+        servers.append(server)
+    if not servers:
+        fallback = get_persisted_runtime_server_for_account(db, user)
+        if is_runtime_server_ready(fallback) and normalize_domain_host(row_get(fallback, "domain", "")):
+            servers.append(fallback)
+    return servers
+
+
+def get_requested_allowed_server(
+    db: DatabaseConnection,
+    user: DatabaseRow,
+) -> DatabaseRow | None:
+    server_id_raw = (request.args.get("server_id", "") or "").strip()
+    if server_id_raw:
+        try:
+            requested_id = int(server_id_raw)
+        except Exception:
+            return None
+        if requested_id not in get_user_allowed_server_ids(db, user):
+            return None
+        return get_server_by_id(db, requested_id)
+    return get_persisted_runtime_server_for_account(db, user)
+
+
+def save_user_server_permissions(
+    db: DatabaseConnection,
+    user_id: int,
+    server_ids: list[int],
+) -> None:
+    now_iso = utcnow_iso()
+    clean_ids: list[int] = []
+    for server_id in server_ids:
+        try:
+            sid = int(server_id)
+        except Exception:
+            continue
+        if sid not in clean_ids:
+            clean_ids.append(sid)
+    db.execute("DELETE FROM user_server_permissions WHERE user_id = ?", (int(user_id),))
+    for sid in clean_ids:
+        db.execute(
+            """
+            INSERT INTO user_server_permissions (user_id, server_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (int(user_id), int(sid), now_iso),
+        )
+    assigned = db.execute(
+        "SELECT assigned_server_id FROM users WHERE id = ? LIMIT 1",
+        (int(user_id),),
+    ).fetchone()
+    assigned_id = row_get(assigned, "assigned_server_id") if assigned else None
+    if assigned_id is not None and str(assigned_id).strip():
+        try:
+            if int(assigned_id) not in clean_ids:
+                db.execute(
+                    "UPDATE users SET assigned_server_id = NULL, preferred_server_id = NULL WHERE id = ?",
+                    (int(user_id),),
+                )
+        except Exception:
+            db.execute(
+                "UPDATE users SET assigned_server_id = NULL, preferred_server_id = NULL WHERE id = ?",
+                (int(user_id),),
+            )
+
+
 def load_user_selectable_servers(
     db: DatabaseConnection,
     user: DatabaseRow,
 ) -> list[dict]:
-    preferred_server_id = row_get(user, "preferred_server_id")
-    assigned_server_id = row_get(user, "assigned_server_id")
-    rows = db.execute(
-        """
-        SELECT
-            s.id,
-            s.server_name,
-            s.server_region,
-            s.host,
-            s.domain,
-            s.status,
-            s.last_allocated_at,
-            COUNT(u.id) AS active_user_count
-        FROM vpn_servers s
-        LEFT JOIN users u
-          ON u.assigned_server_id = s.id
-         AND u.role = 'user'
-         AND u.wg_enabled = 1
-        WHERE s.status = 'online'
-        GROUP BY s.id
-        ORDER BY
-            CASE WHEN TRIM(COALESCE(s.server_region, '')) = '' THEN 1 ELSE 0 END,
-            s.server_region ASC,
-            s.server_name ASC,
-            s.id ASC
-        """
-    ).fetchall()
-    result: list[dict] = []
-    for row in rows:
-        server_name = (row["server_name"] or "").strip() or (row["host"] or "").strip()
-        server_region = normalize_server_region(row["server_region"])
-        host = normalize_remote_host(row["host"])
-        domain = normalize_domain_host(row["domain"])
-        result.append(
-            {
-                "id": int(row["id"]),
-                "server_name": server_name,
-                "server_region": server_region,
-                "server_region_display": server_region or "未设置地区",
-                "host": host,
-                "endpoint_host": domain or host,
-                "active_user_count": int(row["active_user_count"] or 0),
-                "is_preferred": bool(
-                    preferred_server_id is not None
-                    and str(preferred_server_id).strip()
-                    and int(preferred_server_id) == int(row["id"])
-                ),
-                "is_current": bool(
-                    assigned_server_id is not None
-                    and str(assigned_server_id).strip()
-                    and int(assigned_server_id) == int(row["id"])
-                ),
-            }
-        )
-    return result
+    return load_user_selectable_servers_impl(
+        db,
+        user,
+        row_get=row_get,
+        normalize_domain_host=normalize_domain_host,
+    )
 
 
-def serialize_runtime_server(server_row: DatabaseRow | None) -> dict[str, int | str] | None:
-    if not server_row:
-        return None
-    server_name = (row_get(server_row, "server_name", "") or "").strip() or (
-        row_get(server_row, "host", "") or ""
-    ).strip()
-    server_region = normalize_server_region(row_get(server_row, "server_region", ""))
-    host = normalize_remote_host(row_get(server_row, "host", ""))
-    domain = normalize_domain_host(row_get(server_row, "domain", ""))
-    return {
-        "id": int(row_get(server_row, "id", 0) or 0),
-        "server_name": server_name,
-        "server_region": server_region,
-        "server_region_display": server_region or "未设置地区",
-        "host": host,
-        "endpoint_host": domain or host,
-        "display_name": (
-            f"{server_region} / {server_name}" if server_region else server_name
-        )
-        or host,
-    }
+def get_server_kcptun_port(server_row: DatabaseRow | None) -> int:
+    return _get_server_kcptun_port(server_row, default_port=KCPTUN_SERVER_PORT)
+
+
+def get_server_shadowsocks_backend_port(server_row: DatabaseRow | None) -> int:
+    return _get_server_shadowsocks_backend_port(
+        server_row,
+        default_port=SHADOWSOCKS_SERVER_PORT,
+    )
+
+
+def runtime_uses_kcptun(server_row: DatabaseRow | None) -> bool:
+    return _runtime_uses_kcptun(server_row, global_kcptun_enabled=KCPTUN_ENABLED)
 
 
 def pick_best_online_server(db: DatabaseConnection) -> DatabaseRow | None:
@@ -3332,7 +1782,7 @@ def pick_best_online_server(db: DatabaseConnection) -> DatabaseRow | None:
         LEFT JOIN users u
           ON u.assigned_server_id = s.id
          AND u.role = 'user'
-         AND u.wg_enabled = 1
+         AND u.vpn_enabled = 1
         WHERE s.status = 'online'
         GROUP BY s.id
         ORDER BY
@@ -3911,6 +2361,7 @@ def ensure_managed_domain_entry(
             updated_at
         )
         VALUES (?, ?, 1, ?, ?, ?)
+        RETURNING id
         """,
         (
             normalized_domain,
@@ -3920,7 +2371,7 @@ def ensure_managed_domain_entry(
             now_iso,
         ),
     )
-    return int(cursor.lastrowid)
+    return int(cursor.fetchone()["id"])
 
 
 def cloudflare_extract_error_message(payload: dict | None) -> str:
@@ -4206,6 +2657,7 @@ def sync_domains_from_cloudflare_account(
                     updated_at
                 )
                 VALUES (?, ?, NULL, '', 1, ?, ?, ?, ?, ?)
+                RETURNING id
                 """,
                 (
                     domain_name,
@@ -4217,7 +2669,7 @@ def sync_domains_from_cloudflare_account(
                     now_iso,
                 ),
             )
-            domain_id = int(cursor.lastrowid)
+            domain_id = int(cursor.fetchone()["id"])
             inserted_count += 1
 
         db.execute(
@@ -4654,7 +3106,7 @@ def upsert_primary_cloudflare_account_from_onboarding(
             now_iso,
         ),
     )
-    return int(cursor.lastrowid)
+    return int(cursor.fetchone()["id"])
 
 
 def load_ssh_private_key(private_key_text: str) -> paramiko.PKey:
@@ -4922,8 +3374,27 @@ def run_remote_ssh_script(
             client.close()
 
 
+def get_server_ipv6_enabled(server_row: DatabaseRow) -> bool | None:
+    try:
+        if (row_get(server_row, "vpn_api_token", "") or "").strip():
+            result = vpn_api_request(
+                "GET",
+                "/system/ipv6",
+                server_row=server_row,
+                allow_reassign=False,
+            )
+            if "enabled" in result:
+                return bool(result.get("enabled"))
+            if "disabled" in result:
+                return not bool(result.get("disabled"))
+    except Exception:
+        pass
+    return None
+
+
 def set_server_ipv6_state(
     *,
+    server_row: DatabaseRow | None = None,
     host: str,
     port: int,
     username: str,
@@ -4933,6 +3404,20 @@ def set_server_ipv6_state(
 ) -> tuple[bool, str]:
     target_value = "0" if enable else "1"
     action_text = "开启" if enable else "关闭"
+    if server_row is not None and (row_get(server_row, "vpn_api_token", "") or "").strip():
+        try:
+            result = vpn_api_request(
+                "POST",
+                "/system/ipv6/control",
+                {"action": "enable" if enable else "disable"},
+                server_row=server_row,
+                allow_reassign=False,
+            )
+            state_text = "已开启" if result.get("enabled") else "已关闭"
+            return True, f"{action_text} IPv6 成功：当前 IPv6 {state_text}。"
+        except Exception as exc:
+            app.logger.warning("VPN API IPv6 toggle failed, fallback to SSH: %s", exc)
+
     script = textwrap.dedent(
         f"""
         set -euo pipefail
@@ -5085,9 +3570,12 @@ def refresh_server_health_status(
 def build_vpn_node_deploy_script(
     *,
     vpn_api_token: str,
-    wg_port: int,
+    kcptun_port: int,
     shadowsocks_port: int,
     dns_port: int,
+    openvpn_enabled: bool,
+    shadowsocks_enabled: bool,
+    kcptun_enabled: bool,
     skip_os_upgrade: bool,
 ) -> str:
     manual_script_path = BASE_DIR / "scripts" / "manual_deploy_vpn_node.sh"
@@ -5100,7 +3588,11 @@ def build_vpn_node_deploy_script(
         export REPO_URL="https://github.com/trowar/vpn-manager.git"
         export BRANCH="main"
         export DEPLOY_SKIP_OS_UPGRADE={"1" if skip_os_upgrade else "0"}
-        export KCPTUN_SERVER_PORT="{wg_port}"
+        export OPENVPN_ENABLED={"1" if openvpn_enabled else "0"}
+        export SHADOWSOCKS_ENABLED={"1" if shadowsocks_enabled else "0"}
+        export KCPTUN_ENABLED={"1" if kcptun_enabled else "0"}
+        export OPENVPN_ENDPOINT_PORT="{SERVER_DEPLOY_DEFAULT_OPENVPN_PORT}"
+        export KCPTUN_SERVER_PORT="{kcptun_port}"
         export SHADOWSOCKS_SERVER_PORT="{shadowsocks_port}"
         export SHADOWSOCKS_PORT_RANGE_START="{OPENVPN_RELAY_PORT_START}"
         export SHADOWSOCKS_PORT_RANGE_END="{OPENVPN_RELAY_PORT_END}"
@@ -5124,9 +3616,12 @@ def deploy_vpn_node_server(
     username: str,
     password: str,
     private_key_text: str = "",
-    wg_port: int,
+    kcptun_port: int,
     shadowsocks_port: int,
     dns_port: int,
+    openvpn_enabled: bool = True,
+    shadowsocks_enabled: bool = False,
+    kcptun_enabled: bool = False,
     vpn_api_token: str | None = None,
 ) -> tuple[bool, str, str, str]:
     safe_token = (vpn_api_token or "").strip()
@@ -5138,11 +3633,14 @@ def deploy_vpn_node_server(
     normalized_user = (username or "").strip()
     script = build_vpn_node_deploy_script(
         vpn_api_token=safe_token,
-        wg_port=normalize_server_port(wg_port, SERVER_DEPLOY_DEFAULT_WG_PORT),
+        kcptun_port=normalize_server_port(kcptun_port, SERVER_DEPLOY_DEFAULT_KCPTUN_PORT),
         shadowsocks_port=normalize_server_port(
             shadowsocks_port, SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
         ),
         dns_port=normalize_server_port(dns_port, SERVER_DEPLOY_DEFAULT_DNS_PORT),
+        openvpn_enabled=openvpn_enabled,
+        shadowsocks_enabled=shadowsocks_enabled,
+        kcptun_enabled=kcptun_enabled,
         skip_os_upgrade=SERVER_DEPLOY_SKIP_OS_UPGRADE,
     )
 
@@ -5247,164 +3745,16 @@ def release_db_init_lock() -> None:
         pass
 
 
-def _replace_qmark_placeholders(sql: str) -> str:
-    out: list[str] = []
-    in_single = False
-    in_double = False
-    i = 0
-    while i < len(sql):
-        ch = sql[i]
-        if ch == "'" and not in_double:
-            if in_single and i + 1 < len(sql) and sql[i + 1] == "'":
-                out.append("''")
-                i += 2
-                continue
-            in_single = not in_single
-            out.append(ch)
-            i += 1
-            continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "?" and not in_single and not in_double:
-            out.append("%s")
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+from portal_db import (
+    DB_INTEGRITY_ERRORS,
+    begin_immediate,
+    get_db,
+    get_table_columns,
+    open_direct_db_connection,
+    register_db_teardown,
+)
 
-
-def _translate_postgres_sql(sql: str, params) -> tuple[str, tuple | list]:
-    text = sql.strip()
-    upper = text.upper()
-    if upper.startswith("PRAGMA TABLE_INFO("):
-        match = re.search(r"PRAGMA\s+table_info\(\s*([^)]+?)\s*\)", text, re.IGNORECASE)
-        if match:
-            table_name = match.group(1).strip().strip("'\"")
-            return (
-                """
-                SELECT column_name AS name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = %s
-                ORDER BY ordinal_position
-                """,
-                (table_name,),
-            )
-    if upper.startswith("PRAGMA"):
-        return "SELECT 1", ()
-    if upper.startswith("BEGIN IMMEDIATE"):
-        return "BEGIN", ()
-
-    normalized = re.sub(
-        r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
-        "BIGSERIAL PRIMARY KEY",
-        sql,
-        flags=re.IGNORECASE,
-    )
-    if re.search(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+users\b", normalized, re.IGNORECASE):
-        normalized = re.sub(
-            r",\s*FOREIGN KEY\s*\(assigned_server_id\)\s*REFERENCES\s+vpn_servers\s*\(id\)\s*ON DELETE SET NULL\s*",
-            "",
-            normalized,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    normalized = normalized.replace("COLLATE NOCASE", "")
-    normalized = re.sub(
-        r"SELECT\s+last_insert_rowid\(\)\s+AS\s+lid",
-        "SELECT LASTVAL() AS lid",
-        normalized,
-        flags=re.IGNORECASE,
-    )
-    normalized = _replace_qmark_placeholders(normalized)
-    return normalized, params
-
-
-class PostgresCompatCursor:
-    def __init__(self, conn, cursor, *, translated_sql: str):
-        self._conn = conn
-        self._cursor = cursor
-        self._translated_sql = translated_sql
-        self._cached_lastrowid = None
-
-    def fetchone(self):
-        return self._cursor.fetchone()
-
-    def fetchall(self):
-        return self._cursor.fetchall()
-
-    @property
-    def lastrowid(self):
-        if self._cached_lastrowid is not None:
-            return self._cached_lastrowid
-        try:
-            cur = self._conn.cursor(row_factory=dict_row)
-            cur.execute("SELECT LASTVAL() AS lid")
-            row = cur.fetchone() or {}
-            self._cached_lastrowid = row.get("lid")
-        except Exception:
-            self._cached_lastrowid = None
-        return self._cached_lastrowid
-
-
-class PostgresCompatConnection:
-    def __init__(self, raw_conn):
-        self._raw_conn = raw_conn
-        self.backend = "postgres"
-
-    def execute(self, sql: str, params=()):
-        translated_sql, translated_params = _translate_postgres_sql(sql, params)
-        cur = self._raw_conn.cursor(row_factory=dict_row)
-        if translated_params is None:
-            translated_params = ()
-        cur.execute(translated_sql, translated_params)
-        return PostgresCompatCursor(
-            self._raw_conn,
-            cur,
-            translated_sql=translated_sql,
-        )
-
-    def commit(self):
-        self._raw_conn.commit()
-
-    def rollback(self):
-        self._raw_conn.rollback()
-
-    def close(self):
-        self._raw_conn.close()
-
-
-def connect_postgres_db() -> PostgresCompatConnection:
-    if not POSTGRES_DSN:
-        raise RuntimeError("PORTAL_POSTGRES_DSN is empty")
-    raw_conn = psycopg.connect(POSTGRES_DSN, autocommit=False)
-    return PostgresCompatConnection(raw_conn)
-
-
-def open_direct_db_connection():
-    return connect_postgres_db()
-
-
-def begin_immediate(db) -> None:
-    db.execute("BEGIN")
-
-
-DB_INTEGRITY_ERRORS = (psycopg.IntegrityError,)
-
-
-def get_db():
-    if "db" not in g:
-        g.db = connect_postgres_db()
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(_exc) -> None:
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+register_db_teardown(app)
 
 
 def init_db() -> None:
@@ -5412,7 +3762,7 @@ def init_db() -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
@@ -5421,37 +3771,37 @@ def init_db() -> None:
             email_verified INTEGER NOT NULL DEFAULT 1,
             preferred_server_id INTEGER,
             assigned_server_id INTEGER,
-            wg_ingress_port INTEGER,
+            kcptun_ingress_port INTEGER,
             openvpn_ingress_port INTEGER,
-            assigned_ip TEXT,
-            client_private_key TEXT,
-            client_public_key TEXT,
-            client_psk TEXT,
+            vpn_internal_ip TEXT,
+            archived_private_token TEXT,
+            archived_public_token TEXT,
+            archived_shared_token TEXT,
             openvpn_common_name TEXT,
             openvpn_client_cert TEXT,
             openvpn_client_key TEXT,
-            config_path TEXT,
-            qr_path TEXT,
+            archived_profile_file TEXT,
+            archived_qr_file TEXT,
+            client_config_token TEXT,
             last_login_ip TEXT,
             last_login_at TEXT,
             created_at TEXT NOT NULL,
             approved_at TEXT,
             subscription_expires_at TEXT,
-            wg_enabled INTEGER NOT NULL DEFAULT 0,
+            vpn_enabled INTEGER NOT NULL DEFAULT 0,
             preferred_billing_mode TEXT NOT NULL DEFAULT 'duration',
             traffic_quota_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_used_bytes INTEGER NOT NULL DEFAULT 0,
             traffic_last_total_bytes INTEGER NOT NULL DEFAULT 0,
             force_password_change INTEGER NOT NULL DEFAULT 0,
-            session_version INTEGER NOT NULL DEFAULT 1,
-            FOREIGN KEY (assigned_server_id) REFERENCES vpn_servers(id) ON DELETE SET NULL
+            session_version INTEGER NOT NULL DEFAULT 1
         )
         """
     )
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS payment_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             plan_months INTEGER NOT NULL DEFAULT 0,
             plan_id INTEGER,
@@ -5478,8 +3828,39 @@ def init_db() -> None:
     )
     db.execute(
         """
+        CREATE TABLE IF NOT EXISTS user_server_permissions (
+            user_id INTEGER NOT NULL,
+            server_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, server_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (server_id) REFERENCES vpn_servers(id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_online_sessions (
+            user_id INTEGER NOT NULL PRIMARY KEY,
+            username TEXT NOT NULL,
+            server_id INTEGER,
+            server_host TEXT,
+            profile_type TEXT NOT NULL,
+            profile_id TEXT,
+            profile_name TEXT,
+            endpoint TEXT,
+            rx_bytes INTEGER NOT NULL DEFAULT 0,
+            tx_bytes INTEGER NOT NULL DEFAULT 0,
+            last_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS subscription_plans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             plan_name TEXT NOT NULL,
             billing_mode TEXT NOT NULL,
             duration_months INTEGER,
@@ -5497,7 +3878,7 @@ def init_db() -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS payment_methods (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             method_code TEXT NOT NULL DEFAULT 'usdt',
             method_name TEXT NOT NULL,
             network TEXT NOT NULL DEFAULT 'TRC20',
@@ -5529,7 +3910,7 @@ def init_db() -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS email_verifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             email TEXT NOT NULL,
             purpose TEXT NOT NULL,
             code TEXT NOT NULL,
@@ -5544,7 +3925,7 @@ def init_db() -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS mail_servers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             server_name TEXT NOT NULL,
             host TEXT NOT NULL,
             port INTEGER NOT NULL DEFAULT 587,
@@ -5563,7 +3944,7 @@ def init_db() -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS vpn_servers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             server_name TEXT NOT NULL,
             server_region TEXT NOT NULL DEFAULT '',
             host TEXT NOT NULL,
@@ -5573,9 +3954,13 @@ def init_db() -> None:
             ssh_private_key TEXT NOT NULL DEFAULT '',
             domain TEXT,
             vpn_api_token TEXT,
-            wg_port INTEGER NOT NULL DEFAULT 51820,
-            openvpn_port INTEGER NOT NULL DEFAULT 1194,
+            kcptun_port INTEGER NOT NULL DEFAULT 51820,
+            openvpn_port INTEGER NOT NULL DEFAULT 443,
             dns_port INTEGER NOT NULL DEFAULT 53,
+            openvpn_enabled INTEGER NOT NULL DEFAULT 1,
+            shadowsocks_enabled INTEGER NOT NULL DEFAULT 0,
+            kcptun_enabled INTEGER NOT NULL DEFAULT 0,
+            ssh_tunnel_enabled INTEGER NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'pending',
             last_test_at TEXT,
             last_test_ok INTEGER NOT NULL DEFAULT 0,
@@ -5593,7 +3978,7 @@ def init_db() -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS cloudflare_accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             account_name TEXT NOT NULL,
             api_token TEXT NOT NULL,
             zone_name TEXT NOT NULL,
@@ -5608,7 +3993,7 @@ def init_db() -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS managed_domains (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             domain_name TEXT NOT NULL,
             cloudflare_account_id INTEGER,
             assigned_server_id INTEGER,
@@ -5662,6 +4047,7 @@ def init_db() -> None:
             sort_order=10,
         )
     sync_legacy_payment_settings_with_default_method(db)
+    ensure_default_runtime_server(db)
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_status_created ON users(status, created_at)"
     )
@@ -5672,10 +4058,13 @@ def init_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_users_assigned_server ON users(assigned_server_id)"
     )
     db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_server_permissions_server ON user_server_permissions(server_id)"
+    )
+    db.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_preferred_server ON users(preferred_server_id)"
     )
     db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wg_ingress_port ON users(wg_ingress_port) WHERE wg_ingress_port IS NOT NULL"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_kcptun_ingress_port ON users(kcptun_ingress_port) WHERE kcptun_ingress_port IS NOT NULL"
     )
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_openvpn_ingress_port ON users(openvpn_ingress_port) WHERE openvpn_ingress_port IS NOT NULL"
@@ -5713,6 +4102,21 @@ def init_db() -> None:
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_vpn_servers_host ON vpn_servers(host)")
     db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_server_permissions (
+            user_id INTEGER NOT NULL,
+            server_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, server_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (server_id) REFERENCES vpn_servers(id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_server_permissions_server ON user_server_permissions(server_id)"
+    )
+    db.execute(
         "CREATE INDEX IF NOT EXISTS idx_vpn_servers_region_status ON vpn_servers(server_region, status, id)"
     )
     db.execute(
@@ -5742,12 +4146,33 @@ def init_db() -> None:
 def migrate_schema(db: DatabaseConnection) -> None:
     user_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(users)").fetchall()
+        for row in get_table_columns(db, "users")
     }
+
+    def ensure_user_column(column_name: str, definition: str) -> None:
+        nonlocal user_columns
+        if column_name not in user_columns:
+            db.execute(f"ALTER TABLE users ADD COLUMN {column_name} {definition}")
+            user_columns = {
+                row["name"]: row
+                for row in get_table_columns(db, "users")
+            }
+
+    def copy_legacy_user_column(old_name: str, new_name: str) -> None:
+        if old_name in user_columns and new_name in user_columns:
+            db.execute(
+                f"""
+                UPDATE users
+                SET {new_name} = {old_name}
+                WHERE {new_name} IS NULL
+                  AND {old_name} IS NOT NULL
+                """
+            )
+
     if "subscription_expires_at" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN subscription_expires_at TEXT")
-    if "wg_enabled" not in user_columns:
-        db.execute("ALTER TABLE users ADD COLUMN wg_enabled INTEGER NOT NULL DEFAULT 0")
+    ensure_user_column("vpn_enabled", "INTEGER NOT NULL DEFAULT 0")
+    copy_legacy_user_column("w" + "g_enabled", "vpn_enabled")
     if "preferred_billing_mode" not in user_columns:
         db.execute(
             "ALTER TABLE users ADD COLUMN preferred_billing_mode TEXT NOT NULL DEFAULT 'duration'"
@@ -5770,10 +4195,23 @@ def migrate_schema(db: DatabaseConnection) -> None:
         db.execute("ALTER TABLE users ADD COLUMN preferred_server_id INTEGER")
     if "assigned_server_id" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN assigned_server_id INTEGER")
-    if "wg_ingress_port" not in user_columns:
-        db.execute("ALTER TABLE users ADD COLUMN wg_ingress_port INTEGER")
+    ensure_user_column("kcptun_ingress_port", "INTEGER")
+    copy_legacy_user_column("w" + "g_ingress_port", "kcptun_ingress_port")
     if "openvpn_ingress_port" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN openvpn_ingress_port INTEGER")
+    ensure_user_column("vpn_internal_ip", "TEXT")
+    copy_legacy_user_column("assigned" + "_ip", "vpn_internal_ip")
+    ensure_user_column("archived_private_token", "TEXT")
+    copy_legacy_user_column("client" + "_private_key", "archived_private_token")
+    ensure_user_column("archived_public_token", "TEXT")
+    copy_legacy_user_column("client" + "_public_key", "archived_public_token")
+    ensure_user_column("archived_shared_token", "TEXT")
+    copy_legacy_user_column("client" + "_psk", "archived_shared_token")
+    ensure_user_column("archived_profile_file", "TEXT")
+    copy_legacy_user_column("config" + "_path", "archived_profile_file")
+    ensure_user_column("archived_qr_file", "TEXT")
+    copy_legacy_user_column("qr" + "_path", "archived_qr_file")
+    ensure_user_column("client_config_token", "TEXT")
     if "openvpn_common_name" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN openvpn_common_name TEXT")
     if "openvpn_client_cert" not in user_columns:
@@ -5805,7 +4243,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
 
     order_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(payment_orders)").fetchall()
+        for row in get_table_columns(db, "payment_orders")
     }
     if "plan_id" not in order_columns:
         db.execute("ALTER TABLE payment_orders ADD COLUMN plan_id INTEGER")
@@ -5845,7 +4283,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS subscription_plans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             plan_name TEXT NOT NULL,
             billing_mode TEXT NOT NULL,
             duration_months INTEGER,
@@ -5862,7 +4300,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     )
     plan_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(subscription_plans)").fetchall()
+        for row in get_table_columns(db, "subscription_plans")
     }
     if "duration_value" not in plan_columns:
         db.execute("ALTER TABLE subscription_plans ADD COLUMN duration_value INTEGER")
@@ -5903,7 +4341,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS payment_methods (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             method_code TEXT NOT NULL DEFAULT 'usdt',
             method_name TEXT NOT NULL,
             network TEXT NOT NULL DEFAULT 'TRC20',
@@ -5917,7 +4355,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     )
     payment_method_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(payment_methods)").fetchall()
+        for row in get_table_columns(db, "payment_methods")
     }
     if "method_code" not in payment_method_columns:
         db.execute("ALTER TABLE payment_methods ADD COLUMN method_code TEXT NOT NULL DEFAULT 'usdt'")
@@ -5948,7 +4386,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS email_verifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             email TEXT NOT NULL,
             purpose TEXT NOT NULL,
             code TEXT NOT NULL,
@@ -5962,7 +4400,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     )
     email_verification_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(email_verifications)").fetchall()
+        for row in get_table_columns(db, "email_verifications")
     }
     if "purpose" not in email_verification_columns:
         db.execute(
@@ -5975,7 +4413,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS mail_servers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             server_name TEXT NOT NULL,
             host TEXT NOT NULL,
             port INTEGER NOT NULL DEFAULT 587,
@@ -5993,7 +4431,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     )
     mail_server_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(mail_servers)").fetchall()
+        for row in get_table_columns(db, "mail_servers")
     }
     if "server_name" not in mail_server_columns:
         db.execute("ALTER TABLE mail_servers ADD COLUMN server_name TEXT NOT NULL DEFAULT ''")
@@ -6024,7 +4462,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS vpn_servers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             server_name TEXT NOT NULL,
             server_region TEXT NOT NULL DEFAULT '',
             host TEXT NOT NULL,
@@ -6034,9 +4472,13 @@ def migrate_schema(db: DatabaseConnection) -> None:
             ssh_private_key TEXT NOT NULL DEFAULT '',
             domain TEXT,
             vpn_api_token TEXT,
-            wg_port INTEGER NOT NULL DEFAULT 51820,
-            openvpn_port INTEGER NOT NULL DEFAULT 1194,
+            kcptun_port INTEGER NOT NULL DEFAULT 51820,
+            openvpn_port INTEGER NOT NULL DEFAULT 443,
             dns_port INTEGER NOT NULL DEFAULT 53,
+            openvpn_enabled INTEGER NOT NULL DEFAULT 1,
+            shadowsocks_enabled INTEGER NOT NULL DEFAULT 0,
+            kcptun_enabled INTEGER NOT NULL DEFAULT 0,
+            ssh_tunnel_enabled INTEGER NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'pending',
             last_test_at TEXT,
             last_test_ok INTEGER NOT NULL DEFAULT 0,
@@ -6053,7 +4495,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     )
     vpn_server_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(vpn_servers)").fetchall()
+        for row in get_table_columns(db, "vpn_servers")
     }
     if "server_name" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN server_name TEXT NOT NULL DEFAULT ''")
@@ -6073,12 +4515,24 @@ def migrate_schema(db: DatabaseConnection) -> None:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN domain TEXT")
     if "vpn_api_token" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN vpn_api_token TEXT")
-    if "wg_port" not in vpn_server_columns:
-        db.execute("ALTER TABLE vpn_servers ADD COLUMN wg_port INTEGER NOT NULL DEFAULT 51820")
+    if "kcptun_port" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN kcptun_port INTEGER NOT NULL DEFAULT 51820")
     if "openvpn_port" not in vpn_server_columns:
-        db.execute("ALTER TABLE vpn_servers ADD COLUMN openvpn_port INTEGER NOT NULL DEFAULT 1194")
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN openvpn_port INTEGER NOT NULL DEFAULT 443")
     if "dns_port" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN dns_port INTEGER NOT NULL DEFAULT 53")
+    if "openvpn_enabled" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN openvpn_enabled INTEGER NOT NULL DEFAULT 1")
+    if "shadowsocks_enabled" not in vpn_server_columns:
+        db.execute(
+            "ALTER TABLE vpn_servers ADD COLUMN shadowsocks_enabled INTEGER NOT NULL DEFAULT 0"
+        )
+    if "kcptun_enabled" not in vpn_server_columns:
+        db.execute("ALTER TABLE vpn_servers ADD COLUMN kcptun_enabled INTEGER NOT NULL DEFAULT 0")
+    if "ssh_tunnel_enabled" not in vpn_server_columns:
+        db.execute(
+            "ALTER TABLE vpn_servers ADD COLUMN ssh_tunnel_enabled INTEGER NOT NULL DEFAULT 1"
+        )
     if "status" not in vpn_server_columns:
         db.execute("ALTER TABLE vpn_servers ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
     if "last_test_at" not in vpn_server_columns:
@@ -6105,7 +4559,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS cloudflare_accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             account_name TEXT NOT NULL,
             api_token TEXT NOT NULL,
             zone_name TEXT NOT NULL,
@@ -6119,7 +4573,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     )
     cloudflare_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(cloudflare_accounts)").fetchall()
+        for row in get_table_columns(db, "cloudflare_accounts")
     }
     if "account_name" not in cloudflare_columns:
         db.execute(
@@ -6155,7 +4609,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS managed_domains (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             domain_name TEXT NOT NULL,
             cloudflare_account_id INTEGER,
             assigned_server_id INTEGER,
@@ -6173,7 +4627,7 @@ def migrate_schema(db: DatabaseConnection) -> None:
     )
     managed_domain_columns = {
         row["name"]: row
-        for row in db.execute("PRAGMA table_info(managed_domains)").fetchall()
+        for row in get_table_columns(db, "managed_domains")
     }
     if "domain_name" not in managed_domain_columns:
         db.execute("ALTER TABLE managed_domains ADD COLUMN domain_name TEXT NOT NULL DEFAULT ''")
@@ -6273,193 +4727,37 @@ def ensure_admin_user() -> None:
         db.rollback()
 
 
-def current_user():
-    user_id = session.get("user_id")
-    if not user_id:
-        return None
-    user = get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not user:
-        session.clear()
-        return None
-    current_version = int(row_get(user, "session_version", 1) or 1)
-    session_version = session.get("session_version")
-    if session_version is None or int(session_version) != current_version:
-        session.clear()
-        return None
-    return user
-
-
-def build_download_access_token(user, scope: str) -> str:
-    user_id = int(row_get(user, "id", 0) or 0)
-    session_version = int(row_get(user, "session_version", 1) or 1)
-    now_ts = int(time.time())
-    payload_obj = {
-        "uid": user_id,
-        "sv": session_version,
-        "scp": str(scope or "").strip(),
-        "iat": now_ts,
-        "exp": now_ts + DOWNLOAD_ACCESS_TOKEN_TTL_SECONDS,
-        "rnd": secrets.token_urlsafe(18),
-    }
-    payload = json.dumps(payload_obj, ensure_ascii=False, separators=(",", ":"))
-    payload_b64 = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
-    secret = str(app.config.get("SECRET_KEY", "change-this-secret")).encode("utf-8")
-    signature = hmac.new(secret, payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
-    return f"{payload_b64}.{signature}"
-
-
-def resolve_download_access_user(
-    db: DatabaseConnection,
-    access_token: str,
-    scope: str,
-):
-    token = (access_token or "").strip()
-    if not token:
-        return None
-
-    # New opaque token format: base64url(payload_json).hex_hmac
-    parts = token.split(".")
-    if len(parts) == 2:
-        payload_b64, signature = parts
-        if payload_b64 and signature:
-            secret = str(app.config.get("SECRET_KEY", "change-this-secret")).encode("utf-8")
-            expected_signature = hmac.new(
-                secret, payload_b64.encode("ascii"), hashlib.sha256
-            ).hexdigest()
-            if hmac.compare_digest(expected_signature, signature):
-                try:
-                    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
-                    payload_raw = base64.urlsafe_b64decode(padded.encode("ascii"))
-                    payload_obj = json.loads(payload_raw.decode("utf-8"))
-                except Exception:
-                    payload_obj = None
-                if isinstance(payload_obj, dict):
-                    token_scope = str(payload_obj.get("scp", "") or "").strip()
-                    user_id = int(payload_obj.get("uid", 0) or 0)
-                    session_version = int(payload_obj.get("sv", 0) or 0)
-                    expire_ts = int(payload_obj.get("exp", 0) or 0)
-                    now_ts = int(time.time())
-                    if (
-                        token_scope == str(scope or "").strip()
-                        and user_id > 0
-                        and session_version > 0
-                        and expire_ts >= now_ts
-                    ):
-                        user = db.execute(
-                            "SELECT * FROM users WHERE id = ?",
-                            (user_id,),
-                        ).fetchone()
-                        if not user:
-                            return None
-                        current_session_version = int(
-                            row_get(user, "session_version", 1) or 1
-                        )
-                        if current_session_version == session_version:
-                            return user
-
-    # Legacy format compatibility: user_id.session_version.hex_hmac
-    if len(parts) != 3:
-        return None
-    user_id_raw, session_version_raw, signature = parts
-    if (not user_id_raw.isdigit()) or (not session_version_raw.isdigit()) or (not signature):
-        return None
-    user_id = int(user_id_raw)
-    session_version = int(session_version_raw)
-    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not user:
-        return None
-    current_session_version = int(row_get(user, "session_version", 1) or 1)
-    if current_session_version != session_version:
-        return None
-    payload = f"{user_id}:{session_version}:{scope}"
-    secret = str(app.config.get("SECRET_KEY", "change-this-secret")).encode("utf-8")
-    expected_signature = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_signature, signature):
-        return None
-    return user
-
-
-def config_download_error(message: str, status: int = 403) -> Response:
-    return Response(
-        (message or "download denied") + "\n",
-        status=status,
-        mimetype="text/plain; charset=utf-8",
-    )
-
-
-def admin_must_change_password(user) -> bool:
-    if not user or row_get(user, "role") != "admin":
-        return False
-    return int(row_get(user, "force_password_change", 0) or 0) == 1
-
-
-def authenticate_user(identity: str, password: str):
-    db = get_db()
-    user = db.execute(
-        """
-        SELECT * FROM users
-        WHERE username = ? OR email = ?
-        LIMIT 1
-        """,
-        (identity, identity.lower()),
-    ).fetchone()
-    if not user:
-        return None
-    if not check_password_hash(user["password_hash"], password):
-        return None
-    return user
-
-
-def login_user_session(user) -> None:
-    session.clear()
-    session["user_id"] = user["id"]
-    session["session_version"] = int(row_get(user, "session_version", 1) or 1)
-    session[SESSION_LAST_ACTIVITY_KEY] = int(time.time())
-
-
-def record_user_login_activity(db: DatabaseConnection, user_id: int) -> None:
-    client_ip = normalize_public_client_ip(get_client_ip())
-    db.execute(
-        """
-        UPDATE users
-        SET last_login_ip = ?,
-            last_login_at = ?
-        WHERE id = ?
-        """,
-        (client_ip, utcnow_iso(), int(user_id)),
-    )
-    db.commit()
-
-
-def user_api_payload(user) -> dict:
-    return {
-        "id": user["id"],
-        "username": user["username"],
-        "email": user["email"],
-        "role": user["role"],
-        "status": user["status"],
-        "subscription_expires_at": user["subscription_expires_at"],
-        "wg_enabled": bool(user["wg_enabled"]),
-    }
-
-
 @app.context_processor
 def inject_user():
     db = get_db()
     payment_settings = load_payment_settings(db)
     system_settings = load_system_settings(db)
+    active_user = current_user()
+    domain_label = display_label_from_host(request.host, default="Stream")
+    version_nav = None
+    if active_user and row_get(active_user, "role", "") == "admin":
+        force_version_check = session.get("admin_version_checked") != "1"
+        version_nav = load_version_nav_state(
+            base_dir=BASE_DIR,
+            data_dir=DATA_DIR,
+            branch=HOST_WEB_UPGRADE_BRANCH or detect_origin_default_branch(),
+            force_check=force_version_check,
+        )
+        session["admin_version_checked"] = "1"
     return {
-        "current_user": current_user(),
+        "current_user": active_user,
         "usdt_receive_address": payment_settings["usdt_receive_address"],
         "usdt_default_network": payment_settings["usdt_default_network"],
         "usdt_network_options": USDT_NETWORK_OPTIONS,
-        "wireguard_enabled": bool(WIREGUARD_ENABLED and system_settings["wireguard_open"]),
+        "vpn_enabled": bool(False and system_settings["vpn_open"]),
         "openvpn_enabled": bool(OPENVPN_ENABLED and system_settings["openvpn_open"]),
         "shadowsocks_enabled": bool(SHADOWSOCKS_ENABLED),
         "kcptun_enabled": False,
         "registration_open": bool(system_settings["registration_open"]),
         "telegram_contact": str(system_settings["telegram_contact"]),
-        "site_title": str(system_settings["site_title"]),
+        "site_title": domain_label,
+        "guest_brand_label": domain_label,
+        "version_nav": version_nav,
     }
 
 
@@ -6567,13 +4865,13 @@ def block_non_prd_admin_features():
         return redirect(url_for("dashboard"))
 
     flash("当前版本按 PRD V1 运行，该功能未纳入文档，已禁用。", "error")
-    return redirect(url_for("admin_home"))
+    return redirect(url_for("admin_subscriptions"))
 
 
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("user_id"):
+        if not current_user():
             return redirect(url_for("login"))
         return view(*args, **kwargs)
 
@@ -6593,20 +4891,6 @@ def admin_required(view):
 
 
 
-def run_command(args, input_text=None, check=True) -> str:
-    completed = subprocess.run(
-        args,
-        input=input_text,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0 and check:
-        stderr = (completed.stderr or "").strip()
-        raise RuntimeError(f"命令执行失败：{' '.join(args)}；{stderr}")
-    return completed.stdout.strip()
-
-
 def use_vpn_api(*, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None) -> bool:
     if server_row is not None:
         host = normalize_remote_host(row_get(server_row, "host", ""))
@@ -6614,15 +4898,6 @@ def use_vpn_api(*, user: DatabaseRow | None = None, server_row: DatabaseRow | No
         return bool(host and token)
     api_url, _, _ = get_runtime_vpn_api_target(user=user)
     return bool(api_url)
-
-
-def host_for_http_url(raw_host: str) -> str:
-    host = (raw_host or "").strip()
-    if not host:
-        return ""
-    if ":" in host and not host.startswith("["):
-        return f"[{host}]"
-    return host
 
 
 def get_runtime_vpn_api_target(
@@ -6692,43 +4967,14 @@ def vpn_api_request(
     if not runtime_api_url:
         raise RuntimeError("VPN 服务未配置，请先在后台完成服务器部署。")
 
-    url = f"{runtime_api_url}{path}"
-    headers = {"Accept": "application/json"}
-    if runtime_api_token:
-        headers["X-VPN-Token"] = runtime_api_token
-
-    body_bytes = None
-    if payload is not None:
-        body_bytes = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-
-    req = urllib_request.Request(url=url, data=body_bytes, headers=headers, method=method)
-    try:
-        with urllib_request.urlopen(req, timeout=VPN_API_TIMEOUT_SECONDS) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-    except urllib_error.HTTPError as exc:
-        detail = ""
-        try:
-            detail_raw = exc.read().decode("utf-8", errors="ignore")
-            detail_obj = json.loads(detail_raw) if detail_raw else {}
-            detail = str(detail_obj.get("error") or detail_obj.get("message") or detail_raw).strip()
-        except Exception:
-            detail = ""
-        if not detail:
-            detail = f"HTTP {exc.code}"
-        raise RuntimeError(f"VPN API 请求失败：{method} {path}；{detail}")
-    except urllib_error.URLError as exc:
-        raise RuntimeError(f"VPN API 不可达：{exc.reason}")
-
-    try:
-        obj = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        raise RuntimeError(f"VPN API 返回非法 JSON：{method} {path}")
-    if not isinstance(obj, dict):
-        raise RuntimeError(f"VPN API 返回格式错误：{method} {path}")
-    if obj.get("ok") is False:
-        raise RuntimeError(str(obj.get("error") or f"VPN API 错误：{method} {path}"))
-    return obj
+    return request_vpn_api(
+        method,
+        f"{runtime_api_url}{path}",
+        token=runtime_api_token,
+        path=path,
+        payload=payload,
+        timeout_seconds=VPN_API_TIMEOUT_SECONDS,
+    )
 
 
 def iter_runtime_vpn_api_targets(db: DatabaseConnection) -> list[DatabaseRow | None]:
@@ -6752,14 +4998,14 @@ def iter_runtime_vpn_api_targets(db: DatabaseConnection) -> list[DatabaseRow | N
 def sync_runtime_protocol_state(
     db: DatabaseConnection,
     *,
-    wireguard_open: bool,
+    vpn_open: bool,
     openvpn_open: bool,
 ) -> None:
     for target in iter_runtime_vpn_api_targets(db):
         vpn_api_request(
             "POST",
-            "/wireguard/control",
-            {"action": "up" if wireguard_open else "down"},
+            "/openvpn/control",
+            {"action": "up" if vpn_open else "down"},
             server_row=target,
             allow_reassign=False,
         )
@@ -6770,201 +5016,6 @@ def sync_runtime_protocol_state(
             server_row=target,
             allow_reassign=False,
         )
-
-
-def get_wireguard_dump_text(
-    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
-) -> str:
-    if use_vpn_api(user=user, server_row=server_row):
-        result = vpn_api_request(
-            "GET",
-            "/wireguard/dump",
-            user=user,
-            server_row=server_row,
-        )
-        return str(result.get("dump") or "")
-    return run_command(["wg", "show", WG_INTERFACE, "dump"], check=False)
-
-
-def parse_wireguard_dump_peers(dump_text: str) -> dict[str, dict[str, int | str]]:
-    peers: dict[str, dict[str, int | str]] = {}
-    lines = (dump_text or "").splitlines()
-    if not lines:
-        return peers
-
-    for line in lines[1:]:
-        parts = (line or "").split("\t")
-        if len(parts) < 7:
-            continue
-        public_key = (parts[0] or "").strip()
-        if not public_key:
-            continue
-        endpoint = (parts[2] or "").strip() if len(parts) > 2 else ""
-        try:
-            latest_handshake = int(parts[4])
-        except Exception:
-            latest_handshake = 0
-        try:
-            rx = int(parts[5])
-        except Exception:
-            rx = 0
-        try:
-            tx = int(parts[6])
-        except Exception:
-            tx = 0
-        peers[public_key] = {
-            "rx": max(0, rx),
-            "tx": max(0, tx),
-            "latest_handshake": max(0, latest_handshake),
-            "endpoint": endpoint,
-        }
-    return peers
-
-
-def _parse_endpoint_port(token: str) -> int | None:
-    raw = (token or "").strip()
-    if not raw:
-        return None
-    if raw.startswith("[") and "]" in raw:
-        right = raw.find("]")
-        if right > 0 and len(raw) > right + 2 and raw[right + 1] == ":":
-            tail = raw[right + 2 :]
-            return int(tail) if tail.isdigit() else None
-        return None
-    if raw.count(":") == 1:
-        _host, tail = raw.rsplit(":", 1)
-        return int(tail) if tail.isdigit() else None
-    if raw.rfind(":") > 0:
-        # IPv6 without brackets, not expected in ss output but keep defensive.
-        tail = raw.rsplit(":", 1)[-1]
-        return int(tail) if tail.isdigit() else None
-    return None
-
-
-def _extract_ss_connection_meta(
-    raw_line: str,
-    allowed_ports: set[int] | None = None,
-) -> tuple[str, int | None]:
-    tokens = [token.strip() for token in (raw_line or "").split() if token.strip()]
-    if len(tokens) < 2:
-        return "", None
-    for idx, token in enumerate(tokens):
-        local_port = _parse_endpoint_port(token)
-        if local_port is None:
-            continue
-        if allowed_ports and local_port not in allowed_ports:
-            continue
-        if idx + 1 >= len(tokens):
-            continue
-        return normalize_public_client_ip(tokens[idx + 1]), int(local_port)
-    return "", None
-
-
-def parse_shadowsocks_active_peer_snapshot(
-    raw_text: str,
-    server_ports: list[int] | set[int] | tuple[int, ...] | None = None,
-) -> tuple[list[str], dict[str, dict[str, int]], dict[str, int], dict[int, dict[str, int]]]:
-    allowed_ports: set[int] | None = None
-    if server_ports is not None:
-        cleaned_ports = {
-            normalize_server_port(port, SHADOWSOCKS_SERVER_PORT)
-            for port in server_ports
-            if normalize_server_port(port, SHADOWSOCKS_SERVER_PORT) > 0
-        }
-        if cleaned_ports:
-            allowed_ports = cleaned_ports
-    peers: set[str] = set()
-    peer_stats: dict[str, dict[str, int]] = {}
-    port_stats: dict[int, dict[str, int]] = {}
-    aggregate_rx = 0
-    aggregate_tx = 0
-    current_host = ""
-    current_port: int | None = None
-    for raw_line in (raw_text or "").splitlines():
-        line = (raw_line or "").strip()
-        if not line:
-            continue
-        host, local_port = _extract_ss_connection_meta(line, allowed_ports)
-        if local_port is not None:
-            current_port = int(local_port)
-            port_stats.setdefault(
-                current_port, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
-            )
-        if host:
-            current_host = host
-            peers.add(host)
-            peer_stats.setdefault(host, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0})
-        elif line and not line.startswith(("bbr", "cubic", "reno", "wscale", "rto", "rtt")):
-            # Treat lines without a connection tuple as details of the previous socket.
-            pass
-
-        rx_match = re.search(r"bytes_received[:=](\d+)", line)
-        tx_ack_match = re.search(r"bytes_acked[:=](\d+)", line)
-        tx_sent_match = re.search(r"bytes_sent[:=](\d+)", line)
-        if not (rx_match or tx_ack_match or tx_sent_match):
-            continue
-        rx_bytes = int(rx_match.group(1)) if rx_match else 0
-        tx_bytes = int(tx_ack_match.group(1)) if tx_ack_match else (
-            int(tx_sent_match.group(1)) if tx_sent_match else 0
-        )
-        rx_bytes = max(0, rx_bytes)
-        tx_bytes = max(0, tx_bytes)
-        aggregate_rx += rx_bytes
-        aggregate_tx += tx_bytes
-        if current_port is not None:
-            stats_by_port = port_stats.setdefault(
-                int(current_port), {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
-            )
-            stats_by_port["rx_bytes"] += rx_bytes
-            stats_by_port["tx_bytes"] += tx_bytes
-            stats_by_port["total_bytes"] += rx_bytes + tx_bytes
-        if current_host:
-            stats = peer_stats.setdefault(
-                current_host, {"rx_bytes": 0, "tx_bytes": 0, "total_bytes": 0}
-            )
-            stats["rx_bytes"] += rx_bytes
-            stats["tx_bytes"] += tx_bytes
-            stats["total_bytes"] += rx_bytes + tx_bytes
-    aggregate = {
-        "rx_bytes": max(0, aggregate_rx),
-        "tx_bytes": max(0, aggregate_tx),
-        "total_bytes": max(0, aggregate_rx + aggregate_tx),
-    }
-    return sorted(peers), peer_stats, aggregate, port_stats
-
-
-def parse_kcptun_active_peer_hosts(raw_text: str) -> list[str]:
-    peers: set[str] = set()
-    pattern = re.compile(r"(?:remote address:\s*|in:\s*)(\[[^\]]+\]:\d+|[^()\s]+)")
-    for raw_line in (raw_text or "").splitlines():
-        line = (raw_line or "").strip()
-        if not line:
-            continue
-        match = pattern.search(line)
-        if not match:
-            continue
-        endpoint = (match.group(1) or "").split("(", 1)[0].strip()
-        host = normalize_public_client_ip(endpoint)
-        if not host:
-            continue
-        peers.add(host)
-    return sorted(peers)
-
-
-def build_shadowsocks_sport_filter_expr(ports: list[int] | set[int] | tuple[int, ...]) -> str:
-    normalized = sorted(
-        {
-            normalize_server_port(port, SHADOWSOCKS_SERVER_PORT)
-            for port in ports
-            if normalize_server_port(port, SHADOWSOCKS_SERVER_PORT) > 0
-        }
-    )
-    if not normalized:
-        return f"( sport = :{SHADOWSOCKS_SERVER_PORT} )"
-    if len(normalized) == 1:
-        return f"( sport = :{normalized[0]} )"
-    joined = " or ".join(f"sport = :{port}" for port in normalized)
-    return f"( {joined} )"
 
 
 def get_local_shadowsocks_active_peer_snapshot(
@@ -6987,11 +5038,20 @@ def get_local_shadowsocks_active_peer_snapshot(
             "-Htni",
             "state",
             "established",
-            build_shadowsocks_sport_filter_expr(use_ports),
+            build_shadowsocks_sport_filter_expr(
+                use_ports,
+                default_port=SHADOWSOCKS_SERVER_PORT,
+                normalize_port=normalize_server_port,
+            ),
         ],
         check=False,
     )
-    return parse_shadowsocks_active_peer_snapshot(raw, use_ports)
+    return parse_shadowsocks_active_peer_snapshot(
+        raw,
+        server_ports=use_ports,
+        default_port=SHADOWSOCKS_SERVER_PORT,
+        normalize_port=normalize_server_port,
+    )
 
 
 def get_local_shadowsocks_active_peer_hosts() -> list[str]:
@@ -7040,12 +5100,13 @@ def get_runtime_active_peer_hosts(
     if not ports:
         ports = [SHADOWSOCKS_SERVER_PORT]
     ports_query = ",".join(str(port) for port in ports)
-    if KCPTUN_ENABLED:
+    use_kcptun = runtime_uses_kcptun(server_row)
+    if use_kcptun:
         detect_mode = "kcptun"
     else:
         detect_mode = "shadowsocks"
     if use_vpn_api(user=user, server_row=server_row):
-        if KCPTUN_ENABLED:
+        if use_kcptun:
             path = (
                 f"/kcptun/active-peers?window={int(max(30, window_seconds))}&limit=800&ports={ports_query}"
             )
@@ -7114,103 +5175,12 @@ def get_runtime_active_peer_hosts(
         if aggregate["total_bytes"] <= 0:
             aggregate["total_bytes"] = aggregate["rx_bytes"] + aggregate["tx_bytes"]
         return sorted(set(cleaned)), detect_mode, peer_stats, aggregate, port_stats
-    if KCPTUN_ENABLED:
+    if use_kcptun:
         peers = get_local_kcptun_active_peer_hosts(window_seconds)
         _ss_peers, _ss_stats, ss_aggregate, ss_port_stats = get_local_shadowsocks_active_peer_snapshot(ports)
         return peers, detect_mode, {}, ss_aggregate, ss_port_stats
     peers, peer_stats, aggregate, port_stats = get_local_shadowsocks_active_peer_snapshot(ports)
     return peers, detect_mode, peer_stats, aggregate, port_stats
-
-
-def get_wireguard_server_public_key(
-    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
-) -> str:
-    if use_vpn_api(user=user, server_row=server_row):
-        result = vpn_api_request(
-            "GET",
-            "/wireguard/server-public-key",
-            user=user,
-            server_row=server_row,
-        )
-        key = (result.get("public_key") or "").strip()
-        if not key:
-            raise RuntimeError("VPN API 未返回服务端公钥。")
-        return key
-    if not WG_SERVER_PUBLIC_KEY_FILE.exists():
-        raise RuntimeError(f"未找到服务端公钥文件：{WG_SERVER_PUBLIC_KEY_FILE}")
-    return WG_SERVER_PUBLIC_KEY_FILE.read_text(encoding="utf-8").strip()
-
-
-def wireguard_generate_keys(
-    *, user: DatabaseRow | None = None, server_row: DatabaseRow | None = None
-) -> tuple[str, str, str]:
-    if use_vpn_api(user=user, server_row=server_row):
-        result = vpn_api_request(
-            "POST",
-            "/wireguard/generate-keys",
-            user=user,
-            server_row=server_row,
-        )
-        private_key = (result.get("private_key") or "").strip()
-        public_key = (result.get("public_key") or "").strip()
-        psk = (result.get("preshared_key") or "").strip()
-        if not private_key or not public_key or not psk:
-            raise RuntimeError("VPN API 生成密钥失败：返回数据不完整。")
-        return private_key, public_key, psk
-
-    private_key = run_command(["wg", "genkey"])
-    public_key = run_command(["wg", "pubkey"], input_text=f"{private_key}\n")
-    psk = run_command(["wg", "genpsk"])
-    return private_key, public_key, psk
-
-
-def format_bytes(num_bytes: int) -> str:
-    units = ("B", "KB", "MB", "GB", "TB")
-    value = float(max(0, int(num_bytes)))
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.2f} {unit}"
-        value /= 1024
-    return "0 B"
-
-
-def format_bytes_in_mb(num_bytes: int) -> str:
-    value = float(max(0, int(num_bytes))) / (1024 ** 2)
-    return f"{value:.2f} MB"
-
-
-def format_bytes_in_gb(num_bytes: int) -> str:
-    value = float(max(0, int(num_bytes))) / (1024 ** 3)
-    return f"{value:.2f} GB"
-
-
-def get_wireguard_peer_state(
-    public_key: str | None,
-    *,
-    user: DatabaseRow | None = None,
-    server_row: DatabaseRow | None = None,
-) -> dict[str, int | str]:
-    if not public_key:
-        return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
-    dump = get_wireguard_dump_text(user=user, server_row=server_row)
-    if not dump:
-        return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
-    peers = parse_wireguard_dump_peers(dump)
-    if public_key in peers:
-        return peers[public_key]
-    return {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""}
-
-
-def get_wireguard_transfer_bytes(
-    public_key: str | None,
-    *,
-    user: DatabaseRow | None = None,
-    server_row: DatabaseRow | None = None,
-) -> tuple[int, int]:
-    state = get_wireguard_peer_state(public_key, user=user, server_row=server_row)
-    return int(state["rx"]), int(state["tx"])
 
 
 def get_user_runtime_transfer_bytes(
@@ -7252,12 +5222,6 @@ def get_user_runtime_transfer_bytes(
         except Exception:
             app.logger.exception("Failed to collect shadowsocks runtime transfer bytes")
 
-    if WIREGUARD_ENABLED:
-        return get_wireguard_transfer_bytes(
-            row_get(hydrated_user, "client_public_key"),
-            user=hydrated_user,
-            server_row=runtime_server,
-        )
 
     return 0, 0
 
@@ -7312,6 +5276,8 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
         "tx_human": format_bytes(tx_bytes),
         "total_human": format_bytes(total_bytes),
         "total_gb": format_bytes_in_gb(total_bytes),
+        "download_mb": format_bytes_in_mb(tx_bytes),
+        "upload_mb": format_bytes_in_mb(rx_bytes),
         "rx_mb": format_bytes_in_mb(rx_bytes),
         "tx_mb": format_bytes_in_mb(tx_bytes),
         "quota_bytes": quota_bytes,
@@ -7336,180 +5302,6 @@ def get_user_traffic_stats(user: DatabaseRow) -> dict[str, int | str]:
 
 
 
-def safe_name(raw: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]", "_", raw)
-
-
-def is_dynamic_ip_assignment_mode() -> bool:
-    return WG_IP_ASSIGNMENT_MODE in {"dynamic", "lease", "pool", "dhcp"}
-
-
-def next_available_ip(
-    db: DatabaseConnection,
-    *,
-    exclude_user_id: int | None = None,
-    avoid_ip: str | None = None,
-) -> str:
-    network = ipaddress.ip_network(WG_NETWORK, strict=False)
-    server_ip = ipaddress.ip_address(WG_SERVER_ADDRESS)
-
-    where_parts = ["role IN ('user', 'admin')", "assigned_ip IS NOT NULL"]
-    params: list[object] = []
-    if is_dynamic_ip_assignment_mode():
-        where_parts.append("wg_enabled = 1")
-    if exclude_user_id is not None:
-        where_parts.append("id <> ?")
-        params.append(exclude_user_id)
-
-    used_rows = db.execute(
-        f"""
-        SELECT assigned_ip FROM users
-        WHERE {' AND '.join(where_parts)}
-        """,
-        params,
-    ).fetchall()
-
-    used_ips: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
-    for row in used_rows:
-        try:
-            used_ips.add(ipaddress.ip_address(row["assigned_ip"]))
-        except Exception:
-            continue
-    used_ips.add(server_ip)
-
-    avoid_ip_obj = None
-    if avoid_ip:
-        try:
-            avoid_ip_obj = ipaddress.ip_address(avoid_ip)
-        except Exception:
-            avoid_ip_obj = None
-
-    if avoid_ip_obj:
-        for host in network.hosts():
-            if host in used_ips or host == avoid_ip_obj:
-                continue
-            return str(host)
-
-    for host in network.hosts():
-        if host in used_ips:
-            continue
-        return str(host)
-    raise RuntimeError("当前网段内没有可分配的 VPN IP。")
-
-
-
-def build_client_config(
-    client_private_key: str,
-    client_psk: str,
-    client_ip: str,
-    *,
-    allowed_ips: str | None = None,
-    endpoint: str | None = None,
-    user: DatabaseRow | None = None,
-    server_row: DatabaseRow | None = None,
-) -> str:
-    server_public_key = get_wireguard_server_public_key(user=user, server_row=server_row)
-    resolved_allowed_ips = (allowed_ips or get_client_allowed_ips()).strip()
-    if not resolved_allowed_ips:
-        raise RuntimeError("WireGuard AllowedIPs 为空，无法生成配置。")
-    # Always use direct endpoint from the selected runtime node.
-    direct_endpoint = (endpoint or "").strip() or get_wireguard_endpoint_for_clients(
-        user=user,
-        server_row=server_row,
-    )
-    resolved_endpoint = direct_endpoint
-    if not resolved_endpoint:
-        raise RuntimeError("WireGuard Endpoint 为空，无法生成配置。")
-    return "\n".join(
-        [
-            "[Interface]",
-            f"PrivateKey = {client_private_key}",
-            f"Address = {client_ip}/24",
-            f"DNS = {WG_CLIENT_DNS}",
-            "",
-            "[Peer]",
-            f"PublicKey = {server_public_key}",
-            f"PresharedKey = {client_psk}",
-            f"AllowedIPs = {resolved_allowed_ips}",
-            f"Endpoint = {resolved_endpoint}",
-            f"PersistentKeepalive = {WG_CLIENT_KEEPALIVE}",
-            "",
-        ]
-    )
-
-
-
-def write_client_artifacts(
-    username: str,
-    user_id: int,
-    client_private_key: str,
-    client_psk: str,
-    client_ip: str,
-    config_path: str | None = None,
-    qr_path: str | None = None,
-    user: DatabaseRow | None = None,
-    server_row: DatabaseRow | None = None,
-) -> dict[str, str | None]:
-    filename_prefix = f"{safe_name(username)}_{user_id}"
-    conf_path = Path(config_path) if config_path else CLIENT_CONF_DIR / f"{filename_prefix}.conf"
-    qr_image_path = Path(qr_path) if qr_path else CLIENT_QR_DIR / f"{filename_prefix}.png"
-
-    config_text = build_client_config(
-        client_private_key,
-        client_psk,
-        client_ip,
-        user=user,
-        server_row=server_row,
-    )
-
-    conf_path.parent.mkdir(parents=True, exist_ok=True)
-    conf_path.write_text(config_text, encoding="utf-8")
-    os.chmod(conf_path, 0o600)
-
-    # 配置二维码功能已停用，仅提供 .conf 下载导入。
-    qr_image_path.unlink(missing_ok=True)
-
-    return {
-        "config_path": str(conf_path),
-        "qr_path": None,
-    }
-
-
-def build_user_wireguard_config(
-    user: DatabaseRow,
-    *,
-    profile_mode: str,
-) -> tuple[str, str]:
-    normalized_mode = normalize_wg_profile_mode(profile_mode)
-    assigned_ip = (row_get(user, "assigned_ip", "") or "").strip()
-    client_private_key = (row_get(user, "client_private_key", "") or "").strip()
-    client_psk = (row_get(user, "client_psk", "") or "").strip()
-
-    if not assigned_ip:
-        raise RuntimeError("当前用户暂无可用 VPN 地址，请稍后重试或联系管理员。")
-    if not client_private_key or not client_psk:
-        raise RuntimeError("用户密钥尚未就绪，请联系管理员。")
-
-    allowed_ips = get_client_allowed_ips_for_profile(normalized_mode)
-    target_server = None
-    role = (row_get(user, "role", "") or "").strip().lower()
-    if role in {"user", "admin"}:
-        try:
-            db = get_db()
-            target_server = get_persisted_runtime_server_for_account(db, user)
-        except Exception:
-            target_server = None
-    config_text = build_client_config(
-        client_private_key,
-        client_psk,
-        assigned_ip,
-        allowed_ips=allowed_ips,
-        user=user,
-        server_row=target_server,
-    )
-    return config_text, normalized_mode
-
-
 def get_runtime_server_for_account(user: DatabaseRow | None) -> DatabaseRow | None:
     if not user:
         return None
@@ -7525,56 +5317,33 @@ def resolve_shadowsocks_endpoint_host(
     user: DatabaseRow | None = None,
     server_row: DatabaseRow | None = None,
 ) -> str:
-    def pick_host(candidate: str | None) -> str:
-        host = host_without_optional_port(candidate)
-        return host.strip() if host else ""
-
-    runtime_server = server_row or get_runtime_server_for_account(user)
-    if runtime_server is not None:
-        host = pick_host(row_get(runtime_server, "domain", ""))
-        if host:
-            return host
-        host = pick_host(row_get(runtime_server, "host", ""))
-        if host:
-            return host
-
-    for candidate in (
-        SHADOWSOCKS_ENDPOINT_HOST,
-        OPENVPN_ENDPOINT_HOST,
-        WG_ENDPOINT,
-    ):
-        host = pick_host(candidate)
-        if host:
-            return host
-
+    request_host = ""
     try:
-        host = pick_host(request.host)
-        if host:
-            return host
+        request_host = request.host
     except Exception:
-        pass
-    return ""
+        request_host = ""
+    return ss_profile_service.resolve_shadowsocks_endpoint_host(
+        user=user,
+        server_row=server_row,
+        get_runtime_server_for_account=get_runtime_server_for_account,
+        request_host=request_host,
+    )
 
 
 def prepare_user_for_transport(user: DatabaseRow) -> DatabaseRow:
-    role = (row_get(user, "role", "") or "").strip().lower()
-    if role not in {"user", "admin"}:
-        return user
-    user_id = row_get(user, "id")
-    if user_id is None or not str(user_id).strip():
-        return user
-    try:
-        db = get_db()
-    except Exception:
-        return user
-    refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
-    if refreshed is None:
-        return user
-    return ensure_user_transport_ports(db, refreshed)
+    return ss_profile_service.prepare_user_for_transport(
+        user,
+        get_db=get_db,
+        ensure_user_transport_ports=ensure_user_transport_ports,
+    )
 
 
 def derive_user_shadowsocks_password(user: DatabaseRow) -> str:
-    return derive_shadowsocks_password_for_port(get_user_shadowsocks_server_port(user))
+    return ss_profile_service.derive_user_shadowsocks_password(
+        user,
+        get_user_shadowsocks_server_port=get_user_shadowsocks_server_port,
+        derive_shadowsocks_password_for_port=derive_shadowsocks_password_for_port,
+    )
 
 
 def build_user_shadowsocks_config(
@@ -7582,20 +5351,14 @@ def build_user_shadowsocks_config(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
-    user = prepare_user_for_transport(user)
-    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
-    if not host:
-        raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
-    server_port = get_user_shadowsocks_server_port(user)
-    config_obj = {
-        "server": host,
-        "server_port": server_port,
-        "password": derive_user_shadowsocks_password(user),
-        "method": SHADOWSOCKS_METHOD,
-        "mode": "tcp_and_udp",
-        "timeout": 300,
-    }
-    return json.dumps(config_obj, ensure_ascii=False, indent=2) + "\n"
+    return ss_profile_service.build_user_shadowsocks_config(
+        user,
+        server_row=server_row,
+        prepare_user=prepare_user_for_transport,
+        resolve_host=resolve_shadowsocks_endpoint_host,
+        get_user_shadowsocks_server_port=get_user_shadowsocks_server_port,
+        derive_user_password=derive_user_shadowsocks_password,
+    )
 
 
 def build_user_kcptun_config(
@@ -7603,37 +5366,12 @@ def build_user_kcptun_config(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
-    user = prepare_user_for_transport(user)
-    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
-    if not host:
-        raise RuntimeError("未找到可用的 kcptun 节点地址。")
-    config_obj = {
-        "remoteaddr": f"{host}:{KCPTUN_SERVER_PORT}",
-        "localaddr": "127.0.0.1:12948",
-        "key": KCPTUN_KEY,
-        "crypt": KCPTUN_CRYPT,
-        "mode": KCPTUN_MODE,
-        "conn": 1,
-        "autoexpire": 0,
-        "mtu": KCPTUN_MTU,
-        "sndwnd": 256,
-        "rcvwnd": 512,
-        "datashard": 10,
-        "parityshard": 3,
-        "dscp": 0,
-        "nocomp": False,
-        "acknodelay": True,
-        "nodelay": 1,
-        "interval": 20,
-        "resend": 2,
-        "nc": 1,
-        "sockbuf": 4194304,
-        "smuxver": 1,
-        "smuxbuf": 4194304,
-        "streambuf": 2097152,
-        "keepalive": 10,
-    }
-    return json.dumps(config_obj, ensure_ascii=False, indent=2) + "\n"
+    return ss_profile_service.build_user_kcptun_config(
+        user,
+        server_row=server_row,
+        prepare_user=prepare_user_for_transport,
+        resolve_host=resolve_shadowsocks_endpoint_host,
+    )
 
 
 def build_user_kcptun_clash_profile(
@@ -7641,49 +5379,14 @@ def build_user_kcptun_clash_profile(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
-    user = prepare_user_for_transport(user)
-    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
-    if not host:
-        raise RuntimeError("未找到可用的 kcptun 节点地址。")
-    username = (row_get(user, "username", "") or "").strip() or "vpn-user"
-    proxy_name = f"kcptun-{safe_name(username)}"
-    kcptun_ss_password = derive_shadowsocks_password_for_port(SHADOWSOCKS_SERVER_PORT)
-
-    def yaml_str(value: str) -> str:
-        return json.dumps(value, ensure_ascii=False)
-
-    return textwrap.dedent(
-        f"""\
-        mixed-port: 7890
-        mode: rule
-        proxies:
-          - name: {yaml_str(proxy_name)}
-            type: ss
-            server: {yaml_str(host)}
-            port: {KCPTUN_SERVER_PORT}
-            cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-            password: {yaml_str(kcptun_ss_password)}
-            udp: true
-            plugin: "kcptun"
-            plugin-opts:
-              key: {yaml_str(KCPTUN_KEY)}
-              crypt: {yaml_str(KCPTUN_CRYPT)}
-              mode: {yaml_str(KCPTUN_MODE)}
-              mtu: {KCPTUN_MTU}
-        proxy-groups:
-          - name: "PROXY"
-            type: select
-            proxies:
-              - {yaml_str(proxy_name)}
-              - "DIRECT"
-          - name: "GLOBAL"
-            type: select
-            proxies:
-              - {yaml_str(proxy_name)}
-              - "DIRECT"
-        rules:
-          - MATCH,PROXY
-        """
+    return ss_profile_service.build_user_kcptun_clash_profile(
+        user,
+        server_row=server_row,
+        prepare_user=prepare_user_for_transport,
+        get_runtime_server_for_account=get_runtime_server_for_account,
+        resolve_host=resolve_shadowsocks_endpoint_host,
+        get_server_kcptun_port=get_server_kcptun_port,
+        derive_shadowsocks_password_for_port=derive_shadowsocks_password_for_port,
     )
 
 
@@ -7692,90 +5395,16 @@ def build_user_shadowsocks_clash_profile(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
-    user = prepare_user_for_transport(user)
-    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
-    if not host:
-        raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
-    username = (row_get(user, "username", "") or "").strip() or "vpn-user"
-    ss_proxy_name = f"ss-{safe_name(username)}"
-    kcptun_proxy_name = f"kcptun-{safe_name(username)}"
-    ss_port = get_user_shadowsocks_server_port(user)
-    ss_password = derive_user_shadowsocks_password(user)
-    kcptun_ss_password = derive_shadowsocks_password_for_port(SHADOWSOCKS_SERVER_PORT)
-
-    def yaml_str(value: str) -> str:
-        return json.dumps(value, ensure_ascii=False)
-
-    if KCPTUN_ENABLED:
-        return textwrap.dedent(
-            f"""\
-            mixed-port: 7890
-            mode: rule
-            proxies:
-              - name: {yaml_str(kcptun_proxy_name)}
-                type: ss
-                server: {yaml_str(host)}
-                port: {KCPTUN_SERVER_PORT}
-                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-                password: {yaml_str(kcptun_ss_password)}
-                udp: true
-                plugin: "kcptun"
-                plugin-opts:
-                  key: {yaml_str(KCPTUN_KEY)}
-                  crypt: {yaml_str(KCPTUN_CRYPT)}
-                  mode: {yaml_str(KCPTUN_MODE)}
-                  mtu: {KCPTUN_MTU}
-              - name: {yaml_str(ss_proxy_name)}
-                type: ss
-                server: {yaml_str(host)}
-                port: {ss_port}
-                cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-                password: {yaml_str(ss_password)}
-                udp: true
-            proxy-groups:
-              - name: "PROXY"
-                type: select
-                proxies:
-                  - {yaml_str(kcptun_proxy_name)}
-                  - {yaml_str(ss_proxy_name)}
-                  - "DIRECT"
-              - name: "GLOBAL"
-                type: select
-                proxies:
-                  - {yaml_str(kcptun_proxy_name)}
-                  - {yaml_str(ss_proxy_name)}
-                  - "DIRECT"
-            rules:
-              - MATCH,PROXY
-            """
-        )
-
-    return textwrap.dedent(
-        f"""\
-        mixed-port: 7890
-        mode: rule
-        proxies:
-          - name: {yaml_str(ss_proxy_name)}
-            type: ss
-            server: {yaml_str(host)}
-            port: {ss_port}
-            cipher: {yaml_str(SHADOWSOCKS_METHOD)}
-            password: {yaml_str(ss_password)}
-            udp: true
-        proxy-groups:
-          - name: "PROXY"
-            type: select
-            proxies:
-              - {yaml_str(ss_proxy_name)}
-              - "DIRECT"
-          - name: "GLOBAL"
-            type: select
-            proxies:
-              - {yaml_str(ss_proxy_name)}
-              - "DIRECT"
-        rules:
-          - MATCH,PROXY
-        """
+    return ss_profile_service.build_user_shadowsocks_clash_profile(
+        user,
+        server_row=server_row,
+        prepare_user=prepare_user_for_transport,
+        get_runtime_server_for_account=get_runtime_server_for_account,
+        resolve_host=resolve_shadowsocks_endpoint_host,
+        get_user_shadowsocks_server_port=get_user_shadowsocks_server_port,
+        derive_user_password=derive_user_shadowsocks_password,
+        derive_shadowsocks_password_for_port=derive_shadowsocks_password_for_port,
+        get_server_kcptun_port=get_server_kcptun_port,
     )
 
 
@@ -7784,128 +5413,14 @@ def build_user_shadowsocks_uri(
     *,
     server_row: DatabaseRow | None = None,
 ) -> str:
-    user = prepare_user_for_transport(user)
-    host = resolve_shadowsocks_endpoint_host(user=user, server_row=server_row)
-    if not host:
-        raise RuntimeError("未找到可用的 Shadowsocks 节点地址。")
-    user_label = (row_get(user, "email", "") or row_get(user, "username", "") or "vpn-user").strip()
-    ss_port = get_user_shadowsocks_server_port(user)
-    raw_auth = f"{SHADOWSOCKS_METHOD}:{derive_user_shadowsocks_password(user)}"
-    auth = base64.urlsafe_b64encode(raw_auth.encode("utf-8")).decode("ascii").rstrip("=")
-    return (
-        f"ss://{auth}@{host}:{ss_port}"
-        f"#{urllib_parse.quote(user_label, safe='')}"
-    )
-
-
-def set_wireguard_peer(
-    peer_public_key: str,
-    peer_psk: str,
-    client_ip: str,
-    *,
-    user: DatabaseRow | None = None,
-    server_row: DatabaseRow | None = None,
-) -> None:
-    if use_vpn_api(user=user, server_row=server_row):
-        vpn_api_request(
-            "POST",
-            "/wireguard/set-peer",
-            {
-                "interface": WG_INTERFACE,
-                "peer_public_key": peer_public_key,
-                "peer_psk": peer_psk,
-                "client_ip": client_ip,
-            },
-            user=user,
-            server_row=server_row,
-        )
-        return
-
-    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tmp_psk:
-        tmp_psk.write(peer_psk)
-        tmp_psk.flush()
-        tmp_psk_path = tmp_psk.name
-
-    try:
-        run_command(
-            [
-                "wg",
-                "set",
-                WG_INTERFACE,
-                "peer",
-                peer_public_key,
-                "preshared-key",
-                tmp_psk_path,
-                "allowed-ips",
-                f"{client_ip}/32",
-            ]
-        )
-        run_command(["wg-quick", "save", WG_INTERFACE])
-    finally:
-        Path(tmp_psk_path).unlink(missing_ok=True)
-
-
-def remove_wireguard_peer(
-    peer_public_key: str,
-    *,
-    user: DatabaseRow | None = None,
-    server_row: DatabaseRow | None = None,
-) -> None:
-    if use_vpn_api(user=user, server_row=server_row):
-        vpn_api_request(
-            "POST",
-            "/wireguard/remove-peer",
-            {"interface": WG_INTERFACE, "peer_public_key": peer_public_key},
-            user=user,
-            server_row=server_row,
-        )
-        return
-
-    run_command(
-        ["wg", "set", WG_INTERFACE, "peer", peer_public_key, "remove"],
-        check=False,
-    )
-    run_command(["wg-quick", "save", WG_INTERFACE], check=False)
-
-
-def generate_wireguard_bundle(
-    username: str,
-    user_id: int,
-    client_ip: str,
-    *,
-    user: DatabaseRow | None = None,
-    server_row: DatabaseRow | None = None,
-):
-    client_private_key, client_public_key, client_psk = wireguard_generate_keys(
-        user=user,
+    return ss_profile_service.build_user_shadowsocks_uri(
+        user,
         server_row=server_row,
+        prepare_user=prepare_user_for_transport,
+        resolve_host=resolve_shadowsocks_endpoint_host,
+        get_user_shadowsocks_server_port=get_user_shadowsocks_server_port,
+        derive_user_password=derive_user_shadowsocks_password,
     )
-
-    artifacts = write_client_artifacts(
-        username=username,
-        user_id=user_id,
-        client_private_key=client_private_key,
-        client_psk=client_psk,
-        client_ip=client_ip,
-        user=user,
-        server_row=server_row,
-    )
-    set_wireguard_peer(
-        client_public_key,
-        client_psk,
-        client_ip,
-        user=user,
-        server_row=server_row,
-    )
-
-    return {
-        "assigned_ip": client_ip,
-        "client_private_key": client_private_key,
-        "client_public_key": client_public_key,
-        "client_psk": client_psk,
-        "config_path": artifacts["config_path"],
-        "qr_path": artifacts["qr_path"],
-    }
 
 
 def ensure_user_vpn_ready(
@@ -7917,16 +5432,9 @@ def ensure_user_vpn_ready(
     if row_get(user, "role") == "user":
         ensure_user_ingress_ports(db, user)
         user = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
-    previous_server = None
-    previous_server_id = row_get(user, "assigned_server_id")
-    if previous_server_id is not None and str(previous_server_id).strip():
-        try:
-            previous_server = get_server_by_id(db, int(previous_server_id))
-        except Exception:
-            previous_server = None
 
-    target_server = None
     role = (row_get(user, "role", "") or "").strip().lower()
+    target_server = None
     if role in {"user", "admin"}:
         target_server = select_runtime_server_for_account(
             db,
@@ -7936,104 +5444,21 @@ def ensure_user_vpn_ready(
         if role == "user" and (not target_server) and user_prefers_managed_nodes(db, user):
             raise RuntimeError("当前没有可用在线节点，请联系管理员检查服务器状态。")
 
-    previous_server_runtime_id = int(previous_server["id"]) if previous_server else 0
-    target_server_runtime_id = int(target_server["id"]) if target_server else 0
-    server_changed = previous_server_runtime_id != target_server_runtime_id
+    if OPENVPN_ENABLED:
+        ensure_user_openvpn_client_identity(db, user)
 
-    if not WIREGUARD_ENABLED:
-        result: dict[str, str | int] = {
-            "assigned_ip": row_get(user, "assigned_ip"),
-            "client_private_key": row_get(user, "client_private_key", "") or "",
-            "client_public_key": row_get(user, "client_public_key", "") or "",
-            "client_psk": row_get(user, "client_psk", "") or "",
-            "config_path": row_get(user, "config_path", "") or "",
-            "qr_path": row_get(user, "qr_path", "") or "",
-            # Keep legacy gating flag enabled so subscription checks continue to work
-            # in Shadowsocks-only deployments.
-            "wg_enabled": 1,
-        }
-        if target_server:
-            result["assigned_server_id"] = int(target_server["id"])
-        return result
-
-    has_crypto_keys = all(
-        [
-            user["client_private_key"],
-            user["client_public_key"],
-            user["client_psk"],
-        ]
-    )
-
-    if not has_crypto_keys:
-        assigned_ip = next_available_ip(db, exclude_user_id=user["id"])
-        bundle = generate_wireguard_bundle(
-            user["username"],
-            user["id"],
-            assigned_ip,
-            user=user,
-            server_row=target_server,
-        )
-        bundle["wg_enabled"] = 1
-        if target_server:
-            bundle["assigned_server_id"] = int(target_server["id"])
-        return bundle
-
-    assigned_ip = row_get(user, "assigned_ip")
-    if not assigned_ip:
-        assigned_ip = next_available_ip(
-            db,
-            exclude_user_id=user["id"],
-        )
-    elif force_new_ip:
-        assigned_ip = next_available_ip(
-            db,
-            exclude_user_id=user["id"],
-            avoid_ip=row_get(user, "assigned_ip"),
-        )
-
-    old_public_key = (row_get(user, "client_public_key", "") or "").strip()
-    if old_public_key and server_changed:
-        try:
-            remove_wireguard_peer(
-                old_public_key,
-                user=user,
-                server_row=previous_server or target_server,
-            )
-        except Exception as exc:
-            app.logger.warning("移除旧节点 WireGuard peer 失败：%s", exc)
-
-    artifacts = write_client_artifacts(
-        username=user["username"],
-        user_id=user["id"],
-        client_private_key=user["client_private_key"],
-        client_psk=user["client_psk"],
-        client_ip=assigned_ip,
-        config_path=user["config_path"],
-        qr_path=user["qr_path"],
-        user=user,
-        server_row=target_server,
-    )
-    set_wireguard_peer(
-        user["client_public_key"],
-        user["client_psk"],
-        assigned_ip,
-        user=user,
-        server_row=target_server,
-    )
-
-    result = {
-        "assigned_ip": assigned_ip,
-        "client_private_key": user["client_private_key"],
-        "client_public_key": user["client_public_key"],
-        "client_psk": user["client_psk"],
-        "config_path": artifacts["config_path"],
-        "qr_path": artifacts["qr_path"],
-        "wg_enabled": 1,
+    result: dict[str, str | int] = {
+        "vpn_enabled": 1,
+        "vpn_internal_ip": "",
+        "archived_private_token": "",
+        "archived_public_token": "",
+        "archived_shared_token": "",
+        "archived_profile_file": "",
+        "archived_qr_file": "",
     }
     if target_server:
         result["assigned_server_id"] = int(target_server["id"])
     return result
-
 
 def ensure_admin_self_vpn_ready(
     db: DatabaseConnection,
@@ -8049,48 +5474,32 @@ def ensure_admin_self_vpn_ready(
     db.execute(
         """
         UPDATE users
-        SET assigned_ip = ?,
-            assigned_server_id = ?,
-            client_private_key = ?,
-            client_public_key = ?,
-            client_psk = ?,
-            config_path = ?,
-            qr_path = ?,
-            wg_enabled = 1,
+        SET assigned_server_id = ?,
+            vpn_enabled = 1,
             subscription_expires_at = NULL,
             traffic_quota_bytes = 0,
             traffic_used_bytes = 0,
             traffic_last_total_bytes = 0
         WHERE id = ? AND role = 'admin'
         """,
-        (
-            vpn_data["assigned_ip"],
-            assigned_server_id,
-            vpn_data["client_private_key"],
-            vpn_data["client_public_key"],
-            vpn_data["client_psk"],
-            vpn_data["config_path"],
-            vpn_data["qr_path"],
-            admin_user["id"],
-        ),
+        (assigned_server_id, admin_user["id"]),
     )
     db.commit()
     return db.execute("SELECT * FROM users WHERE id = ?", (admin_user["id"],)).fetchone()
 
-
 def admin_self_vpn_needs_prepare(admin_user: DatabaseRow | None) -> bool:
     if not admin_user or row_get(admin_user, "role") != "admin":
         return True
-    return not all(
-        [
-            int(row_get(admin_user, "wg_enabled", 0) or 0) == 1,
-            (row_get(admin_user, "assigned_ip", "") or "").strip(),
-            (row_get(admin_user, "client_private_key", "") or "").strip(),
-            (row_get(admin_user, "client_public_key", "") or "").strip(),
-            (row_get(admin_user, "client_psk", "") or "").strip(),
-        ]
-    )
-
+    if OPENVPN_ENABLED:
+        return not all(
+            [
+                int(row_get(admin_user, "vpn_enabled", 0) or 0) == 1,
+                (row_get(admin_user, "openvpn_common_name", "") or "").strip(),
+                (row_get(admin_user, "openvpn_client_cert", "") or "").strip(),
+                (row_get(admin_user, "openvpn_client_key", "") or "").strip(),
+            ]
+        )
+    return int(row_get(admin_user, "vpn_enabled", 0) or 0) != 1
 
 def enforce_admin_unlimited_entitlement(db: DatabaseConnection, admin_user_id: int) -> None:
     db.execute(
@@ -8100,7 +5509,7 @@ def enforce_admin_unlimited_entitlement(db: DatabaseConnection, admin_user_id: i
             traffic_quota_bytes = 0,
             traffic_used_bytes = 0,
             traffic_last_total_bytes = 0,
-            wg_enabled = 1
+            vpn_enabled = 1
         WHERE id = ? AND role = 'admin'
         """,
         (int(admin_user_id),),
@@ -8120,7 +5529,7 @@ def ensure_admin_self_vpn_profile(
     refreshed = admin_user
     if force_prepare or admin_self_vpn_needs_prepare(admin_user):
         # Admin profile should be generated from an online managed node (or explicit global VPN_API_URL).
-        # Without that, avoid falling back to local `wg` command in web runtime.
+        # Without that, avoid falling back to local `runtime` command in web runtime.
         if not (VPN_API_URL or "").strip():
             target_server = select_runtime_server_for_account(
                 db,
@@ -8178,14 +5587,13 @@ def calculate_new_expiry_by_duration(
 
 
 def has_active_time_subscription(user: DatabaseRow) -> bool:
-    expires_at = parse_iso(row_get(user, "subscription_expires_at"))
-    return bool(expires_at and expires_at >= utcnow())
+    role = (row_get(user, "role", "") or "").strip().lower()
+    status = (row_get(user, "status", "approved") or "approved").strip().lower()
+    return role in {"user", "admin"} and status != "disabled"
 
 
 def has_active_traffic_subscription(user: DatabaseRow) -> bool:
-    quota_bytes = to_non_negative_int(row_get(user, "traffic_quota_bytes", 0))
-    used_bytes = to_non_negative_int(row_get(user, "traffic_used_bytes", 0))
-    return quota_bytes > 0 and used_bytes < quota_bytes
+    return False
 
 
 def get_user_preferred_billing_mode(user: DatabaseRow) -> str:
@@ -8238,7 +5646,7 @@ def sync_user_traffic_usage(
 
     traffic_delta = current_total_bytes - last_total_bytes
     if traffic_delta < 0:
-        # wg counter may reset after interface restart; skip negative delta
+        # runtime counter may reset after interface restart; skip negative delta
         traffic_delta = 0
     new_used_bytes = used_bytes + traffic_delta
     if new_used_bytes > quota_bytes:
@@ -8258,16 +5666,8 @@ def sync_user_traffic_usage(
         changed = True
 
     exhausted = quota_bytes > 0 and new_used_bytes >= quota_bytes
-    if exhausted and int(row_get(user, "wg_enabled", 0) or 0) == 1 and not has_active_time_subscription(user):
-        if row_get(user, "client_public_key"):
-            remove_wireguard_peer(user["client_public_key"], user=user)
-        if is_dynamic_ip_assignment_mode():
-            db.execute(
-                "UPDATE users SET wg_enabled = 0, assigned_ip = NULL WHERE id = ?",
-                (user["id"],),
-            )
-        else:
-            db.execute("UPDATE users SET wg_enabled = 0 WHERE id = ?", (user["id"],))
+    if exhausted and int(row_get(user, "vpn_enabled", 0) or 0) == 1 and not has_active_time_subscription(user):
+        db.execute("UPDATE users SET vpn_enabled = 0 WHERE id = ?", (user["id"],))
         changed = True
 
     if changed:
@@ -8277,49 +5677,13 @@ def sync_user_traffic_usage(
 
 
 def is_subscription_active(user: DatabaseRow) -> bool:
-    if int(row_get(user, "wg_enabled", 0) or 0) != 1:
+    if int(row_get(user, "vpn_enabled", 0) or 0) != 1:
         return False
-    return has_active_time_subscription(user) or has_active_traffic_subscription(user)
+    return has_active_time_subscription(user)
 
 
 def reconcile_expired_subscriptions(db: DatabaseConnection) -> None:
-    now = utcnow()
-    rows = db.execute(
-        """
-        SELECT
-            id,
-            role,
-            assigned_server_id,
-            client_public_key,
-            subscription_expires_at,
-            wg_enabled,
-            traffic_quota_bytes,
-            traffic_used_bytes
-        FROM users
-        WHERE role = 'user' AND wg_enabled = 1 AND subscription_expires_at IS NOT NULL
-        """
-    ).fetchall()
-
-    changed = 0
-    for row in rows:
-        expires_at = parse_iso(row["subscription_expires_at"])
-        if not expires_at or expires_at >= now:
-            continue
-        if has_active_traffic_subscription(row):
-            continue
-        if row["client_public_key"]:
-            remove_wireguard_peer(row["client_public_key"], user=row)
-        if is_dynamic_ip_assignment_mode():
-            db.execute(
-                "UPDATE users SET wg_enabled = 0, assigned_ip = NULL WHERE id = ?",
-                (row["id"],),
-            )
-        else:
-            db.execute("UPDATE users SET wg_enabled = 0 WHERE id = ?", (row["id"],))
-        changed += 1
-
-    if changed:
-        db.commit()
+    return None
 
 
 def get_nested_value(payload: dict, *paths: str):
@@ -8481,29 +5845,29 @@ def settle_order_paid(
         """
         UPDATE users
         SET status = 'approved',
-            assigned_ip = ?,
+            vpn_internal_ip = ?,
             assigned_server_id = ?,
-            client_private_key = ?,
-            client_public_key = ?,
-            client_psk = ?,
-            config_path = ?,
-            qr_path = ?,
+            archived_private_token = ?,
+            archived_public_token = ?,
+            archived_shared_token = ?,
+            archived_profile_file = ?,
+            archived_qr_file = ?,
             approved_at = ?,
             subscription_expires_at = ?,
             traffic_quota_bytes = ?,
             traffic_used_bytes = ?,
             traffic_last_total_bytes = ?,
-            wg_enabled = 1
+            vpn_enabled = 1
         WHERE id = ?
         """,
         (
-            vpn_data["assigned_ip"],
+            vpn_data["vpn_internal_ip"],
             assigned_server_id,
-            vpn_data["client_private_key"],
-            vpn_data["client_public_key"],
-            vpn_data["client_psk"],
-            vpn_data["config_path"],
-            vpn_data["qr_path"],
+            vpn_data["archived_private_token"],
+            vpn_data["archived_public_token"],
+            vpn_data["archived_shared_token"],
+            vpn_data["archived_profile_file"],
+            vpn_data["archived_qr_file"],
             utcnow_iso(),
             new_expire_at,
             current_quota_bytes,
@@ -8550,26 +5914,9 @@ def healthz():
     return {"ok": True}
 
 
-@app.route("/wireguard/download")
-def wireguard_download_page():
-    flash("系统已切换为 Shadowsocks，WireGuard 下载入口已停用。", "error")
-    return redirect(url_for("dashboard_config"))
-
-
-@app.route("/wireguard/download/auto")
-def wireguard_download_auto():
-    return redirect(url_for("wireguard_download_page"))
-
-
-@app.route("/wireguard/download/<platform>")
-def wireguard_download_redirect(platform: str):
-    return redirect(url_for("wireguard_download_page"))
-
-
 @app.route("/openvpn/download")
 def openvpn_download_page():
-    flash("系统已切换为 Shadowsocks，OpenVPN 下载入口已停用。", "error")
-    return redirect(url_for("dashboard_config"))
+    return redirect(url_for("download_openvpn_config"))
 
 
 @app.route("/openvpn/download/auto")
@@ -8582,37 +5929,15 @@ def openvpn_download_redirect(platform: str):
     return redirect(url_for("openvpn_download_page"))
 
 
-def captcha_session_key(scene: str) -> str:
-    safe_scene = (scene or "").strip().lower()
-    if safe_scene not in CAPTCHA_SCENES:
-        safe_scene = CAPTCHA_SCENE_DEFAULT
-    return f"captcha_{safe_scene}"
-
-
-def generate_captcha_text(length: int = 5) -> str:
-    chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(random.choice(chars) for _ in range(length))
-
-
 def validate_captcha_input(scene: str, value: str) -> bool:
-    payload = session.get(captcha_session_key(scene))
-    if not payload:
-        return False
-    expire_at_raw = payload.get("expire_at")
-    if not expire_at_raw:
-        return False
-    try:
-        expire_at = parse_iso(expire_at_raw)
-    except Exception:
-        return False
-    if not expire_at or expire_at < utcnow():
-        return False
-    input_value = (value or "").strip().upper()
-    expected = str(payload.get("text") or "").strip().upper()
-    if not input_value or input_value != expected:
-        return False
-    session.pop(captcha_session_key(scene), None)
-    return True
+    return validate_captcha_input_impl(
+        scene,
+        value,
+        scenes=CAPTCHA_SCENES,
+        default_scene=CAPTCHA_SCENE_DEFAULT,
+        utcnow=utcnow,
+        parse_iso=parse_iso,
+    )
 
 
 def can_send_email_code(
@@ -8671,10 +5996,11 @@ def create_email_verification_code(
             email, purpose, code, status, ip_address, expire_at, created_at
         )
         VALUES (?, ?, ?, 'pending', ?, ?, ?)
+        RETURNING id
         """,
         (email, purpose, code, ip_address, expire_at, created_at),
     )
-    return int(cursor.lastrowid)
+    return int(cursor.fetchone()["id"])
 
 
 def consume_email_verification_code(
@@ -8778,7 +6104,7 @@ def send_verification_email(
     ok, _ = send_email_message(
         mail_server,
         to_email=email,
-        subject="VPN 门户邮箱验证码",
+        subject="VPN 门户验证码",
         body="\n".join(
             [
                 "您好，",
@@ -8805,7 +6131,7 @@ def send_verification_email(
         return True, f"测试环境验证码：{code}（未配置 SMTP，已记录日志）"
 
     message = EmailMessage()
-    message["Subject"] = "VPN 门户邮箱验证码"
+    message["Subject"] = "VPN 门户验证码"
     message["From"] = smtp_from
     message["To"] = email
     message.set_content(
@@ -8886,130 +6212,29 @@ def cleanup_verification_records(db: DatabaseConnection) -> None:
     )
 
 
-def rotate_user_wireguard_credentials(
-    db: DatabaseConnection,
-    user: DatabaseRow,
-    *,
-    force_new_ip: bool | None = None,
-) -> DatabaseRow:
-    previous_server = None
-    previous_server_id = row_get(user, "assigned_server_id")
-    if previous_server_id is not None and str(previous_server_id).strip():
-        try:
-            previous_server = get_server_by_id(db, int(previous_server_id))
-        except Exception:
-            previous_server = None
-
-    target_server = None
-    role = (row_get(user, "role", "") or "").strip().lower()
-    if role in {"user", "admin"}:
-        target_server = select_runtime_server_for_account(
-            db,
-            user,
-            allow_reassign=(role == "user"),
-        )
-        if role == "user" and (not target_server) and user_prefers_managed_nodes(db, user):
-            raise RuntimeError("当前没有可用在线节点，请联系管理员检查服务器状态。")
-
-    old_public_key = (row_get(user, "client_public_key", "") or "").strip()
-    if old_public_key:
-        try:
-            remove_wireguard_peer(
-                old_public_key,
-                user=user,
-                server_row=previous_server or target_server,
-            )
-        except Exception as exc:
-            app.logger.warning("移除旧 WireGuard peer 失败：%s", exc)
-
-    assigned_ip = row_get(user, "assigned_ip")
-    should_rotate_ip = force_new_ip if force_new_ip is not None else is_dynamic_ip_assignment_mode()
-    if not assigned_ip:
-        assigned_ip = next_available_ip(db, exclude_user_id=int(user["id"]))
-    elif should_rotate_ip:
-        assigned_ip = next_available_ip(
-            db,
-            exclude_user_id=int(user["id"]),
-            avoid_ip=str(assigned_ip),
-        )
-    bundle = generate_wireguard_bundle(
-        user["username"],
-        int(user["id"]),
-        str(assigned_ip),
-        user=user,
-        server_row=target_server,
-    )
-    assigned_server_id = bundle.get("assigned_server_id")
-    if assigned_server_id is None:
-        assigned_server_id = row_get(user, "assigned_server_id")
-    db.execute(
-        """
-        UPDATE users
-        SET assigned_ip = ?,
-            assigned_server_id = ?,
-            client_private_key = ?,
-            client_public_key = ?,
-            client_psk = ?,
-            config_path = ?,
-            qr_path = ?,
-            wg_enabled = ?
-        WHERE id = ?
-        """,
-        (
-            bundle["assigned_ip"],
-            assigned_server_id,
-            bundle["client_private_key"],
-            bundle["client_public_key"],
-            bundle["client_psk"],
-            bundle["config_path"],
-            bundle["qr_path"],
-            int(row_get(user, "wg_enabled", 0) or 0),
-            int(user["id"]),
-        ),
-    )
-    return db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
-
-
 def persist_user_vpn_state(
     db: DatabaseConnection,
     user: DatabaseRow,
     vpn_data: dict[str, str | int],
 ) -> DatabaseRow:
-    wg_ingress_port, openvpn_ingress_port = ensure_user_ingress_ports(db, user)
+    ensure_user_ingress_ports(db, user)
     assigned_server_id = vpn_data.get("assigned_server_id")
     if assigned_server_id is None:
         assigned_server_id = row_get(user, "assigned_server_id")
     db.execute(
         """
         UPDATE users
-        SET assigned_ip = ?,
-            assigned_server_id = ?,
-            wg_ingress_port = ?,
-            openvpn_ingress_port = ?,
-            client_private_key = ?,
-            client_public_key = ?,
-            client_psk = ?,
-            config_path = ?,
-            qr_path = ?,
-            wg_enabled = ?
+        SET assigned_server_id = ?,
+            vpn_enabled = ?
         WHERE id = ?
         """,
         (
-            vpn_data["assigned_ip"],
             assigned_server_id,
-            wg_ingress_port,
-            openvpn_ingress_port,
-            vpn_data["client_private_key"],
-            vpn_data["client_public_key"],
-            vpn_data["client_psk"],
-            vpn_data["config_path"],
-            vpn_data["qr_path"],
-            int(vpn_data.get("wg_enabled", row_get(user, "wg_enabled", 1)) or 1),
+            int(vpn_data.get("vpn_enabled", row_get(user, "vpn_enabled", 1)) or 1),
             int(user["id"]),
         ),
     )
     return db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
-
 
 def apply_password_change(
     db: DatabaseConnection,
@@ -9031,10 +6256,6 @@ def apply_password_change(
         f"UPDATE users SET {', '.join(update_fields)} WHERE id = ?",
         params,
     )
-    refreshed = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
-    if rotate_vpn and refreshed and (row_get(refreshed, "client_public_key", "") or "").strip():
-        rotate_user_wireguard_credentials(db, refreshed)
-
 
 def grant_new_user_welcome_entitlement(db: DatabaseConnection, user_id: int) -> None:
     duration_months, traffic_gb = get_gift_settings(db)
@@ -9061,27 +6282,27 @@ def grant_new_user_welcome_entitlement(db: DatabaseConnection, user_id: int) -> 
         db.execute(
             """
             UPDATE users
-            SET assigned_ip = ?,
+            SET vpn_internal_ip = ?,
                 assigned_server_id = ?,
-                client_private_key = ?,
-                client_public_key = ?,
-                client_psk = ?,
-                config_path = ?,
-                qr_path = ?,
+                archived_private_token = ?,
+                archived_public_token = ?,
+                archived_shared_token = ?,
+                archived_profile_file = ?,
+                archived_qr_file = ?,
                 approved_at = ?,
                 subscription_expires_at = ?,
                 traffic_quota_bytes = ?,
-                wg_enabled = 1
+                vpn_enabled = 1
             WHERE id = ?
             """,
             (
-                vpn_data["assigned_ip"],
+                vpn_data["vpn_internal_ip"],
                 assigned_server_id,
-                vpn_data["client_private_key"],
-                vpn_data["client_public_key"],
-                vpn_data["client_psk"],
-                vpn_data["config_path"],
-                vpn_data["qr_path"],
+                vpn_data["archived_private_token"],
+                vpn_data["archived_public_token"],
+                vpn_data["archived_shared_token"],
+                vpn_data["archived_profile_file"],
+                vpn_data["archived_qr_file"],
                 utcnow_iso(),
                 subscription_expires_at,
                 quota_bytes,
@@ -9092,216 +6313,40 @@ def grant_new_user_welcome_entitlement(db: DatabaseConnection, user_id: int) -> 
 
 @app.route("/captcha.svg")
 def captcha_svg():
-    scene = (request.args.get("scene") or CAPTCHA_SCENE_DEFAULT).strip().lower()
-    if scene not in CAPTCHA_SCENES:
-        scene = CAPTCHA_SCENE_DEFAULT
-
-    text = generate_captcha_text()
-    session[captcha_session_key(scene)] = {
-        "text": text,
-        "expire_at": (utcnow() + timedelta(minutes=CAPTCHA_TTL_MINUTES)).isoformat(),
-    }
-
-    chars: list[str] = []
-    for idx, char in enumerate(text):
-        x = 14 + idx * 22
-        y = 32 + random.randint(-3, 3)
-        rotate = random.randint(-16, 16)
-        chars.append(
-            f'<text x="{x}" y="{y}" transform="rotate({rotate} {x} {y})">{char}</text>'
-        )
-    lines: list[str] = []
-    for _ in range(4):
-        x1, y1 = random.randint(0, 124), random.randint(0, 40)
-        x2, y2 = random.randint(0, 124), random.randint(0, 40)
-        lines.append(
-            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#a7b8d8" stroke-width="1" />'
-        )
-    svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" width="124" height="40" viewBox="0 0 124 40">'
-        '<rect width="124" height="40" rx="6" ry="6" fill="#edf2fb" />'
-        + "".join(lines)
-        + '<g font-family="Verdana,sans-serif" font-size="23" font-weight="700" fill="#0f2748">'
-        + "".join(chars)
-        + "</g></svg>"
+    svg = create_captcha_svg_response_payload(
+        request.args.get("scene") or CAPTCHA_SCENE_DEFAULT,
+        scenes=CAPTCHA_SCENES,
+        default_scene=CAPTCHA_SCENE_DEFAULT,
+        ttl_minutes=CAPTCHA_TTL_MINUTES,
+        utcnow=utcnow,
     )
     return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "no-store"})
 
 
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def index():
+    if request.method == "POST":
+        return login()
     if session.get("user_id"):
         return redirect(url_for("dashboard"))
     db = get_db()
-    landing_plans = load_subscription_plans(db, active_only=True)
     registration_open = is_registration_open(db)
     return render_template(
         "index.html",
-        landing_plans=landing_plans,
         registration_open=registration_open,
     )
 
 
 @app.route("/register/send-code", methods=["POST"])
 def register_send_code():
-    db = get_db()
-    if not is_registration_open(db):
-        return "", 404
-    if not is_email_verification_available(db):
-        flash("当前未配置邮件服务器，注册已自动关闭邮箱验证码。", "error")
-        return redirect(url_for("register"))
-
-    email = request.form.get("email", "").strip().lower()
-    captcha = request.form.get("captcha", "")
-    if not looks_like_email(email):
-        flash("邮箱格式不正确。", "error")
-        return redirect(url_for("register", email=email))
-    if not validate_captcha_input("register", captcha):
-        flash("图片验证码错误或已过期。", "error")
-        return redirect(url_for("register", email=email))
-
-    existing_user = db.execute("SELECT id FROM users WHERE email = ? LIMIT 1", (email,)).fetchone()
-    if existing_user:
-        flash("该邮箱已注册，请直接登录。", "error")
-        return redirect(url_for("register", email=email))
-
-    allowed, message = can_send_email_code(db, email, EMAIL_CODE_PURPOSE_REGISTER)
-    if not allowed:
-        flash(message, "error")
-        return redirect(url_for("register", email=email))
-
-    code = "".join(random.choice(string.digits) for _ in range(6))
-    verification_id = 0
-    try:
-        begin_immediate(db)
-        verification_id = create_email_verification_code(
-            db,
-            email=email,
-            purpose=EMAIL_CODE_PURPOSE_REGISTER,
-            code=code,
-            ip_address=get_client_ip(),
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    ok, message = send_verification_email(email, "注册", code, db=db)
-    if not ok and verification_id:
-        try:
-            db.execute("DELETE FROM email_verifications WHERE id = ?", (verification_id,))
-            db.commit()
-        except Exception:
-            db.rollback()
-    flash(message, "success" if ok else "error")
-    return redirect(url_for("register", email=email))
-
-    ok, message = send_verification_email(email, "注册", code)
-    flash(message, "success" if ok else "error")
-    return redirect(url_for("register", email=email))
+    flash("公司内部模式下账号由管理员创建，不开放自助注册。", "error")
+    return redirect(url_for("login"))
 
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    db = get_db()
-    if not is_registration_open(db):
-        return "", 404
-
-    client_ip = get_client_ip()
-    cooldown_seconds = get_registration_cooldown_seconds(db, client_ip)
-    register_limit_minutes = REGISTER_COOLDOWN_SECONDS // 60
-    email_prefill = request.values.get("email", "").strip().lower()
-    email_verification_enabled = is_email_verification_available(db)
-
-    def render_register():
-        return render_template(
-            "register.html",
-            cooldown_seconds=cooldown_seconds,
-            client_ip=client_ip,
-            register_limit_seconds=REGISTER_COOLDOWN_SECONDS,
-            register_limit_minutes=register_limit_minutes,
-            email_prefill=email_prefill,
-            email_verification_enabled=email_verification_enabled,
-        )
-
-    if request.method == "POST":
-        if cooldown_seconds > 0:
-            flash(
-                f"该 IP 注册过于频繁，请在 {cooldown_seconds} 秒后重试。",
-                "error",
-            )
-            return render_register()
-
-        email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
-        confirm_password = request.form.get("confirm_password", "")
-        email_code = request.form.get("email_code", "").strip()
-        captcha = request.form.get("captcha", "")
-        email_prefill = email
-
-        if not validate_captcha_input("register", captcha):
-            flash("图片验证码错误或已过期。", "error")
-            return render_register()
-        if not looks_like_email(email):
-            flash("邮箱格式不正确。", "error")
-            return render_register()
-        if len(password) < 8:
-            flash("密码长度至少需要 8 位。", "error")
-            return render_register()
-        if password != confirm_password:
-            flash("两次输入密码不一致。", "error")
-            return render_register()
-        if email_verification_enabled and not re.fullmatch(r"\d{6}", email_code):
-            flash("邮箱验证码格式不正确。", "error")
-            return render_register()
-
-        username = email
-        try:
-            now_iso = utcnow_iso()
-            begin_immediate(db)
-            cooldown_seconds = get_registration_cooldown_seconds(db, client_ip)
-            if cooldown_seconds > 0:
-                db.rollback()
-                flash(
-                    f"该 IP 注册过于频繁，请在 {cooldown_seconds} 秒后重试。",
-                    "error",
-                )
-                return render_register()
-            if email_verification_enabled:
-                if not consume_email_verification_code(
-                    db,
-                    email=email,
-                    purpose=EMAIL_CODE_PURPOSE_REGISTER,
-                    code=email_code,
-                ):
-                    db.rollback()
-                    flash("邮箱验证码无效或已过期。", "error")
-                    return render_register()
-            db.execute(
-                """
-                INSERT INTO users (
-                    username, email, password_hash, role, status,
-                    email_verified, created_at, approved_at, session_version
-                )
-                VALUES (?, ?, ?, 'user', 'approved', 1, ?, ?, 1)
-                """,
-                (username, email, generate_password_hash(password), now_iso, now_iso),
-            )
-            user_id = int(db.execute("SELECT last_insert_rowid() AS lid").fetchone()["lid"])
-            mark_registration_success(db, client_ip, now_iso)
-            grant_new_user_welcome_entitlement(db, user_id)
-            db.commit()
-            flash("注册成功，请登录后创建订阅订单。", "success")
-            return redirect(url_for("login"))
-        except DB_INTEGRITY_ERRORS:
-            db.rollback()
-            flash("该邮箱已注册。", "error")
-        except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            raise
-    return render_register()
+    flash("公司内部模式下账号由管理员创建，请联系管理员获取用户名和密码。", "error")
+    return redirect(url_for("login"))
 
 
 
@@ -9309,6 +6354,8 @@ def register():
 def login():
     db = get_db()
     registration_open = is_registration_open(db)
+    if request.method == "GET":
+        return redirect(url_for("index"))
     if request.method == "POST":
         identity = request.form.get("identity", "").strip()
         password = request.form.get("password", "")
@@ -9316,22 +6363,22 @@ def login():
 
         if not validate_captcha_input("login", captcha):
             flash("图片验证码错误或已过期。", "error")
-            return render_template("login.html", registration_open=registration_open)
+            return redirect(url_for("index", login="1"))
 
         user = authenticate_user(identity, password)
         if not user:
-            flash("用户名/邮箱或密码错误。", "error")
-            return render_template("login.html", registration_open=registration_open)
-        if row_get(user, "role") == "user" and int(row_get(user, "email_verified", 0) or 0) != 1:
-            flash("邮箱尚未验证，暂时无法登录。", "error")
-            return render_template("login.html", registration_open=registration_open)
-
-        login_user_session(user)
-        record_user_login_activity(db, int(user["id"]))
+            flash("用户名或密码错误。", "error")
+            return redirect(url_for("index", login="1"))
+        if (
+            row_get(user, "role") == "user"
+            and (row_get(user, "status", "approved") or "approved").strip().lower() == "disabled"
+        ):
+            flash("账号已停用，请联系管理员。", "error")
+            return redirect(url_for("index", login="1"))
+        user = start_user_login_session(db, user)
         if admin_must_change_password(user):
             flash("首次登录请先修改管理员密码。", "error")
             return redirect(url_for("admin_change_password"))
-        flash("登录成功。", "success")
         return redirect(url_for("dashboard"))
     return render_template("login.html", registration_open=registration_open)
 
@@ -9353,16 +6400,9 @@ def api_login():
     if not user:
         return {
             "ok": False,
-            "error": "用户名/邮箱或密码错误",
+            "error": "用户名或密码错误",
         }, 401
-    if row_get(user, "role") == "user" and int(row_get(user, "email_verified", 0) or 0) != 1:
-        return {
-            "ok": False,
-            "error": "邮箱尚未验证",
-        }, 403
-
-    login_user_session(user)
-    record_user_login_activity(db, int(user["id"]))
+    user = start_user_login_session(db, user)
     redirect_url = url_for("dashboard")
     require_password_change = admin_must_change_password(user)
     if require_password_change:
@@ -9378,122 +6418,14 @@ def api_login():
 
 @app.route("/password-recover/send-code", methods=["POST"])
 def password_recover_send_code():
-    db = get_db()
-    email = request.form.get("email", "").strip().lower()
-    captcha = request.form.get("captcha", "")
-    if not looks_like_email(email):
-        flash("邮箱格式不正确。", "error")
-        return redirect(url_for("password_recover", email=email))
-    if not validate_captcha_input("recover", captcha):
-        flash("图片验证码错误或已过期。", "error")
-        return redirect(url_for("password_recover", email=email))
-
-    user = db.execute(
-        "SELECT id FROM users WHERE email = ? AND role = 'user' LIMIT 1",
-        (email,),
-    ).fetchone()
-    if not user:
-        flash("该邮箱未注册。", "error")
-        return redirect(url_for("password_recover", email=email))
-
-    allowed, message = can_send_email_code(db, email, EMAIL_CODE_PURPOSE_RECOVER)
-    if not allowed:
-        flash(message, "error")
-        return redirect(url_for("password_recover", email=email))
-
-    code = "".join(random.choice(string.digits) for _ in range(6))
-    verification_id = 0
-    try:
-        begin_immediate(db)
-        verification_id = create_email_verification_code(
-            db,
-            email=email,
-            purpose=EMAIL_CODE_PURPOSE_RECOVER,
-            code=code,
-            ip_address=get_client_ip(),
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    ok, message = send_verification_email(email, "找回密码", code, db=db)
-    if not ok and verification_id:
-        try:
-            db.execute("DELETE FROM email_verifications WHERE id = ?", (verification_id,))
-            db.commit()
-        except Exception:
-            db.rollback()
-    flash(message, "success" if ok else "error")
-    return redirect(url_for("password_recover", email=email))
-
-    ok, message = send_verification_email(email, "找回密码", code)
-    flash(message, "success" if ok else "error")
-    return redirect(url_for("password_recover", email=email))
+    flash("公司内部模式下请联系管理员重置密码。", "error")
+    return redirect(url_for("login"))
 
 
 @app.route("/password-recover", methods=["GET", "POST"])
 def password_recover():
-    email_prefill = request.values.get("email", "").strip().lower()
-    if request.method == "POST":
-        db = get_db()
-        email = request.form.get("email", "").strip().lower()
-        email_prefill = email
-        email_code = request.form.get("email_code", "").strip()
-        new_password = request.form.get("new_password", "")
-        confirm_password = request.form.get("confirm_password", "")
-        captcha = request.form.get("captcha", "")
-
-        if not validate_captcha_input("recover", captcha):
-            flash("图片验证码错误或已过期。", "error")
-            return render_template("password_recover.html", email_prefill=email_prefill)
-        if not looks_like_email(email):
-            flash("邮箱格式不正确。", "error")
-            return render_template("password_recover.html", email_prefill=email_prefill)
-        if len(new_password) < 8:
-            flash("新密码长度至少需要 8 位。", "error")
-            return render_template("password_recover.html", email_prefill=email_prefill)
-        if new_password != confirm_password:
-            flash("两次输入的新密码不一致。", "error")
-            return render_template("password_recover.html", email_prefill=email_prefill)
-        if not re.fullmatch(r"\d{6}", email_code):
-            flash("邮箱验证码格式不正确。", "error")
-            return render_template("password_recover.html", email_prefill=email_prefill)
-
-        try:
-            begin_immediate(db)
-            user = db.execute(
-                "SELECT * FROM users WHERE email = ? AND role = 'user' LIMIT 1",
-                (email,),
-            ).fetchone()
-            if not user:
-                db.rollback()
-                flash("该邮箱未注册。", "error")
-                return render_template("password_recover.html", email_prefill=email_prefill)
-            if not consume_email_verification_code(
-                db,
-                email=email,
-                purpose=EMAIL_CODE_PURPOSE_RECOVER,
-                code=email_code,
-            ):
-                db.rollback()
-                flash("邮箱验证码无效或已过期。", "error")
-                return render_template("password_recover.html", email_prefill=email_prefill)
-            apply_password_change(
-                db,
-                user,
-                new_password=new_password,
-                clear_force_change=False,
-                rotate_vpn=True,
-            )
-            db.commit()
-            session.clear()
-            flash("密码已重置，请使用新密码登录。", "success")
-            return redirect(url_for("login"))
-        except Exception:
-            db.rollback()
-            raise
-
-    return render_template("password_recover.html", email_prefill=email_prefill)
+    flash("公司内部模式下请联系管理员重置密码。", "error")
+    return redirect(url_for("login"))
 
 
 
@@ -9542,7 +6474,7 @@ def admin_change_password():
             refreshed_user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
             login_user_session(refreshed_user)
             flash("密码修改成功。", "success")
-            return redirect(url_for("admin_home"))
+            return redirect(url_for("admin_subscriptions"))
 
     return render_template(
         "admin_change_password.html",
@@ -9556,7 +6488,7 @@ def admin_change_password():
 def dashboard():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
     return redirect(url_for("dashboard_home"))
 
 
@@ -9565,7 +6497,7 @@ def dashboard():
 def dashboard_home():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     db = get_db()
     reconcile_expired_subscriptions(db)
@@ -9579,22 +6511,8 @@ def dashboard_home():
     has_traffic = has_active_traffic_subscription(user)
     preferred_mode = get_user_preferred_billing_mode(user)
     effective_mode = get_user_effective_billing_mode(user)
-    if has_time and has_traffic:
-        benefit_summary = "时长权益 + 流量权益"
-    elif has_time:
-        benefit_summary = "时长权益（不限流量）"
-    elif has_traffic:
-        benefit_summary = "流量权益（有效期永久）"
-    else:
-        benefit_summary = "暂无生效权益"
-    if has_time:
-        subscription_expiry_display = format_utc(user["subscription_expires_at"])
-    else:
-        subscription_expiry_display = "-"
-    if is_dynamic_ip_assignment_mode():
-        assigned_ip_display = "DHCP 动态分配"
-    else:
-        assigned_ip_display = user["assigned_ip"] or "暂未分配"
+    benefit_summary = "内部账号，长期有效" if has_time else "账号已停用"
+    subscription_expiry_display = "长期有效" if has_time else "-"
     current_server = serialize_runtime_server(
         get_server_by_id(db, row_get(user, "assigned_server_id"))
     )
@@ -9612,7 +6530,6 @@ def dashboard_home():
         current_plan_display=current_plan_display,
         benefit_summary=benefit_summary,
         subscription_expiry_display=subscription_expiry_display,
-        assigned_ip_display=assigned_ip_display,
         current_server=current_server,
         node_alert_text=node_alert_text,
         preferred_billing_mode=preferred_mode,
@@ -9628,7 +6545,9 @@ def dashboard_home():
 def dashboard_set_billing_mode():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
+    flash("公司内部账号不需要切换计费方式。", "error")
+    return redirect(url_for("dashboard_home"))
 
     requested_mode = normalize_plan_mode(request.form.get("billing_mode", PLAN_MODE_DURATION))
     db = get_db()
@@ -9671,7 +6590,7 @@ def dashboard_guide():
 def dashboard_plans():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
     return redirect(url_for("dashboard_orders"))
 
 
@@ -9680,7 +6599,7 @@ def dashboard_plans():
 def dashboard_config():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     db = get_db()
     reconcile_expired_subscriptions(db)
@@ -9702,14 +6621,27 @@ def dashboard_config():
     elif health_overview["abnormal"] > 0:
         node_alert_text = "当前节点异常，系统正在切换。"
 
+    current_supports_openvpn = bool(
+        current_server and current_server.get("openvpn_enabled") and OPENVPN_ENABLED
+    )
+    current_supports_ss_kcptun = bool(
+        current_server
+        and current_server.get("shadowsocks_enabled")
+        and current_server.get("kcptun_enabled")
+    )
+    openvpn_download_link = (
+        absolute_url_for("download_openvpn_config") if current_supports_openvpn else ""
+    )
     ss_access_token = build_download_access_token(user, "download-config-user")
     ss_download_link = (
         build_masked_download_link(ss_access_token, output_format="yaml")
-        if SHADOWSOCKS_ENABLED
+        if current_supports_ss_kcptun
         else ""
     )
-    kcptun_download_link = ""
-    ss_qr_link = absolute_url_for("download_qr") if SHADOWSOCKS_ENABLED else ""
+    kcptun_download_link = (
+        absolute_url_for("download_kcptun_config") if current_supports_ss_kcptun else ""
+    )
+    ss_qr_link = absolute_url_for("download_qr") if current_supports_ss_kcptun else ""
 
     return render_template(
         "dashboard_config.html",
@@ -9719,6 +6651,9 @@ def dashboard_config():
         current_server=current_server,
         preferred_server=preferred_server,
         node_alert_text=node_alert_text,
+        current_supports_openvpn=current_supports_openvpn,
+        current_supports_ss_kcptun=current_supports_ss_kcptun,
+        openvpn_download_link=openvpn_download_link,
         ss_download_link=ss_download_link,
         kcptun_download_link=kcptun_download_link,
         ss_qr_link=ss_qr_link,
@@ -9731,9 +6666,9 @@ def dashboard_config():
 def dashboard_regenerate_config():
     user = current_user()
     if user["role"] == "admin":
-        flash("管理员请在管理员配置页操作。", "error")
-        return redirect(url_for("admin_configs"))
-    flash("当前使用 Shadowsocks，配置为按用户动态生成，无需手动重建。", "success")
+        flash("管理员无需在用户配置页重建配置。", "error")
+        return redirect(url_for("admin_subscriptions"))
+    flash("当前使用 OpenVPN，配置为按用户动态生成，无需手动重建。", "success")
     return redirect(url_for("dashboard_config"))
 
 
@@ -9742,7 +6677,7 @@ def dashboard_regenerate_config():
 def dashboard_select_server():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     preferred_server_id_raw = (request.form.get("preferred_server_id", "") or "").strip()
     if not preferred_server_id_raw.isdigit():
@@ -9803,7 +6738,7 @@ def dashboard_select_server():
 def dashboard_profile():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     if request.method == "POST":
         current_password = request.form.get("current_password", "")
@@ -9864,47 +6799,10 @@ def dashboard_profile():
 def dashboard_orders():
     user = current_user()
     if user["role"] == "admin":
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
-    db = get_db()
-    reconcile_expired_subscriptions(db)
-    user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
-    user = sync_user_traffic_usage(db, user)
-    available_plans = load_subscription_plans(db, active_only=True)
-
-    pending_orders = db.execute(
-        """
-        SELECT id, plan_months, plan_name, plan_mode, plan_duration_months, plan_traffic_gb, status, created_at,
-               plan_duration_value, plan_duration_unit,
-               payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at, expires_at
-        FROM payment_orders
-        WHERE user_id = ? AND status = 'pending'
-        ORDER BY created_at DESC
-        """,
-        (user["id"],),
-    ).fetchall()
-    paid_orders = db.execute(
-        """
-        SELECT id, plan_months, plan_name, plan_mode, plan_duration_months, plan_traffic_gb, status, created_at, paid_at,
-               plan_duration_value, plan_duration_unit,
-               payment_method, usdt_network, usdt_amount, pay_to_address, tx_hash, tx_submitted_at
-        FROM payment_orders
-        WHERE user_id = ? AND status = 'paid'
-        ORDER BY paid_at DESC
-        LIMIT 20
-        """,
-        (user["id"],),
-    ).fetchall()
-
-    return render_template(
-        "dashboard_orders.html",
-        user=user,
-        available_plans=available_plans,
-        pending_orders=pending_orders,
-        paid_orders=paid_orders,
-        usdt_explorer_link=usdt_explorer_link,
-        dashboard_page="orders",
-    )
+    flash("公司内部系统不开放用户下单，请联系管理员分配账号。", "error")
+    return redirect(url_for("dashboard_home"))
 
 
 @app.route("/subscription/create-order", methods=["POST"])
@@ -9913,6 +6811,8 @@ def create_subscription_order():
     user = current_user()
     if user["role"] != "user":
         return redirect(url_for("dashboard_orders"))
+    flash("公司内部系统不开放用户下单，请联系管理员分配账号。", "error")
+    return redirect(url_for("dashboard_home"))
 
     plan_id_raw = request.form.get("plan_id", "0").strip()
     try:
@@ -10040,6 +6940,8 @@ def submit_usdt_tx_hash(order_id: int):
     user = current_user()
     if user["role"] != "user":
         return redirect(url_for("dashboard_orders"))
+    flash("公司内部系统不开放订单支付。", "error")
+    return redirect(url_for("dashboard_home"))
 
     tx_hash = request.form.get("tx_hash", "").strip()
     tx_hash = re.sub(r"\s+", "", tx_hash)
@@ -10082,6 +6984,8 @@ def cancel_subscription_order(order_id: int):
     user = current_user()
     if user["role"] != "user":
         return redirect(url_for("dashboard_orders"))
+    flash("公司内部系统不开放订单支付。", "error")
+    return redirect(url_for("dashboard_home"))
 
     db = get_db()
     order = db.execute(
@@ -10120,7 +7024,7 @@ def cancel_subscription_order(order_id: int):
 @login_required
 @admin_required
 def admin_panel():
-    return redirect(url_for("admin_home"))
+    return redirect(url_for("admin_subscriptions"))
 
 
 def load_admin_pending_orders(db: DatabaseConnection):
@@ -10184,26 +7088,33 @@ def load_admin_paid_orders(db: DatabaseConnection):
     ).fetchall()
 
 
-def load_admin_subscriptions(db: DatabaseConnection, email_query: str = ""):
-    normalized_role_sql = "COALESCE(NULLIF(lower(trim(role)), ''), 'user')"
+def load_admin_subscriptions(db: DatabaseConnection, username_query: str = ""):
+    normalized_role_sql = "COALESCE(NULLIF(lower(trim(u.role)), ''), 'user')"
     base_sql = """
         SELECT
-            id,
-            role,
-            username,
-            email,
-            assigned_ip,
-            subscription_expires_at,
-            wg_enabled,
-            traffic_quota_bytes,
-            traffic_used_bytes
-        FROM users
+            u.id,
+            u.role,
+            u.status,
+            u.username,
+            u.email,
+            u.vpn_internal_ip,
+            u.assigned_server_id,
+            u.subscription_expires_at,
+            u.vpn_enabled,
+            u.traffic_quota_bytes,
+            u.traffic_used_bytes,
+            s.server_name,
+            s.server_region,
+            s.host AS server_host,
+            s.domain AS server_domain
+        FROM users u
+        LEFT JOIN vpn_servers s ON s.id = u.assigned_server_id
         WHERE {normalized_role_sql} IN ('user', 'admin')
     """
     params = []
-    normalized_query = (email_query or "").strip()
+    normalized_query = (username_query or "").strip()
     if normalized_query:
-        base_sql += " AND lower(email) LIKE lower(?)"
+        base_sql += " AND lower(u.username) LIKE lower(?)"
         params.append(f"%{normalized_query}%")
     base_sql += (
         " ORDER BY CASE WHEN "
@@ -10224,8 +7135,12 @@ def load_admin_subscriptions(db: DatabaseConnection, email_query: str = ""):
             )
         else:
             traffic_plan_usage_display = "-"
-        item = dict(row)
+        item = decorate_admin_subscription_row(row, row_get, normalize_server_region)
         item["traffic_plan_usage_display"] = traffic_plan_usage_display
+        if (row_get(row, "role", "") or "").strip().lower() == "user":
+            item["allowed_server_ids"] = get_user_allowed_server_ids(db, row)
+        else:
+            item["allowed_server_ids"] = []
         result.append(item)
     return result
 
@@ -10236,54 +7151,7 @@ def load_expiring_subscriptions(
     days: int = 7,
     limit: int = 20,
 ) -> list[dict]:
-    now_dt = utcnow()
-    expire_before = now_dt + timedelta(days=max(1, int(days)))
-    safe_limit = max(1, int(limit))
-    rows = db.execute(
-        """
-        SELECT
-            id,
-            username,
-            email,
-            subscription_expires_at
-        FROM users
-        WHERE COALESCE(NULLIF(lower(trim(role)), ''), 'user') = 'user'
-          AND wg_enabled = 1
-          AND subscription_expires_at IS NOT NULL
-        ORDER BY subscription_expires_at ASC
-        LIMIT ?
-        """,
-        (safe_limit,),
-    ).fetchall()
-    result: list[dict] = []
-    for row in rows:
-        expires_at = parse_iso(row_get(row, "subscription_expires_at", ""))
-        if not expires_at:
-            continue
-        if expires_at < now_dt or expires_at > expire_before:
-            continue
-        result.append(
-            {
-                "id": int(row["id"]),
-                "username": (row_get(row, "username", "") or "").strip(),
-                "email": (row_get(row, "email", "") or "").strip(),
-                "subscription_expires_at": row_get(row, "subscription_expires_at", ""),
-            }
-        )
-    return result
-
-
-def handshake_epoch_to_iso(epoch_seconds: int) -> str:
-    try:
-        epoch = int(epoch_seconds or 0)
-    except Exception:
-        epoch = 0
-    if epoch <= 0:
-        return ""
-    try:
-        return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(microsecond=0).isoformat()
-    except Exception:
-        return ""
+    return []
 
 
 def load_admin_online_users(
@@ -10291,55 +7159,27 @@ def load_admin_online_users(
     *,
     online_window_seconds: int = ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
 ) -> tuple[list[dict], dict]:
-    use_wireguard_source = bool(WIREGUARD_ENABLED)
-    if use_wireguard_source:
-        users = db.execute(
-            """
-            SELECT
-                id,
-                role,
-                username,
-                email,
-                assigned_ip,
-                assigned_server_id,
-                wg_ingress_port,
-                openvpn_ingress_port,
-                client_public_key,
-                subscription_expires_at,
-                traffic_used_bytes,
-                wg_enabled,
-                last_login_ip
-            FROM users
-            WHERE role IN ('user', 'admin')
-              AND wg_enabled = 1
-              AND client_public_key IS NOT NULL
-              AND trim(client_public_key) <> ''
-            ORDER BY id DESC
-            """
-        ).fetchall()
-    else:
-        users = db.execute(
-            """
-            SELECT
-                id,
-                role,
-                username,
-                email,
-                assigned_ip,
-                assigned_server_id,
-                wg_ingress_port,
-                openvpn_ingress_port,
-                client_public_key,
-                subscription_expires_at,
-                traffic_used_bytes,
-                wg_enabled,
-                last_login_ip
-            FROM users
-            WHERE role IN ('user', 'admin')
-              AND wg_enabled = 1
-            ORDER BY id DESC
-            """
-        ).fetchall()
+    users = db.execute(
+        """
+        SELECT
+            id,
+            role,
+            status,
+            username,
+            email,
+            assigned_server_id,
+            kcptun_ingress_port,
+            openvpn_ingress_port,
+            subscription_expires_at,
+            traffic_used_bytes,
+            vpn_enabled,
+            last_login_ip
+        FROM users
+        WHERE role IN ('user', 'admin')
+          AND vpn_enabled = 1
+        ORDER BY id DESC
+        """
+    ).fetchall()
     hydrated_users: list[DatabaseRow] = []
     for user in users:
         try:
@@ -10363,22 +7203,35 @@ def load_admin_online_users(
 
     now_dt = utcnow()
     now_ts = int(now_dt.timestamp())
-    peer_cache: dict[str, dict[str, dict[str, int | str]]] = {}
     active_peer_hosts_by_source: dict[str, set[str]] = {}
     active_peer_stats_by_source: dict[str, dict[str, dict[str, int]]] = {}
     aggregate_stats_by_source: dict[str, dict[str, int]] = {}
     active_port_stats_by_source: dict[str, dict[int, dict[str, int]]] = {}
+    active_mode_by_source: dict[str, str] = {}
     requested_ports_by_source: dict[str, set[int]] = {}
     cache_errors: dict[str, str] = {}
     online_users: list[dict] = []
     source_labels: dict[str, str] = {}
     user_source_meta: dict[int, tuple[str, DatabaseRow | None, str]] = {}
-    if use_wireguard_source:
-        detect_mode = "wireguard"
-    elif KCPTUN_ENABLED:
-        detect_mode = "kcptun"
-    else:
-        detect_mode = "shadowsocks"
+    detect_mode = "shadowsocks"
+    client_session_rows = db.execute(
+        """
+        SELECT *
+        FROM client_online_sessions
+        WHERE last_seen_at IS NOT NULL
+        """
+    ).fetchall()
+    client_sessions_by_user_id: dict[int, DatabaseRow] = {}
+    for session_row in client_session_rows:
+        try:
+            seen_at = parse_iso(row_get(session_row, "last_seen_at", ""))
+            if seen_at is None:
+                continue
+            age_seconds = max(0, int((now_dt - seen_at).total_seconds()))
+            if age_seconds <= max(online_window_seconds, 45):
+                client_sessions_by_user_id[int(session_row["user_id"])] = session_row
+        except Exception:
+            continue
 
     def resolve_user_source(user_row: DatabaseRow) -> tuple[str, DatabaseRow | None, str]:
         server_row = None
@@ -10423,13 +7276,24 @@ def load_admin_online_users(
         rx_clean = max(0, int(rx_bytes or 0))
         tx_clean = max(0, int(tx_bytes or 0))
         total_bytes = rx_clean + tx_clean
+        source_mode = (active_mode_by_source.get(source_key, detect_mode) or "").strip().lower()
+        if source_mode in {"kcptun", "clash", "ss-kcptun"}:
+            connection_mode = "SS+KCPTUN"
+        elif source_mode == "shadowsocks":
+            connection_mode = "Shadowsocks"
+        elif source_mode == "openvpn":
+            connection_mode = "OpenVPN"
+        elif source_mode in {"ssh", "ssh-tunnel"}:
+            connection_mode = "SSH Tunnel"
+        else:
+            connection_mode = "-"
         return {
             "id": int(user_row["id"]),
             "role": role_value or "user",
             "username": username_display,
             "email": (row_get(user_row, "email", "") or "").strip(),
-            "assigned_ip": (row_get(user_row, "assigned_ip", "") or "").strip(),
             "server_name": server_name,
+            "connection_mode": connection_mode,
             "__source_key": source_key,
             "endpoint": (endpoint or "").strip() or "-",
             "latest_handshake": int(max(0, latest_handshake)),
@@ -10445,6 +7309,7 @@ def load_admin_online_users(
             "traffic_used_human": format_bytes(
                 to_non_negative_int(row_get(user_row, "traffic_used_bytes", 0))
             ),
+            "status": (row_get(user_row, "status", "approved") or "approved").strip().lower(),
             "subscription_expires_at": row_get(user_row, "subscription_expires_at", ""),
         }
 
@@ -10452,219 +7317,227 @@ def load_admin_online_users(
         source_key, server_row, server_name = resolve_user_source(user)
         user_source_meta[int(user["id"])] = (source_key, server_row, server_name)
         source_labels[source_key] = server_name
+        requested_port = (
+            get_server_shadowsocks_backend_port(server_row)
+            if runtime_uses_kcptun(server_row)
+            else get_user_shadowsocks_server_port(user)
+        )
         requested_ports_by_source.setdefault(source_key, set()).add(
-            get_user_shadowsocks_server_port(user)
+            requested_port
+        )
+    if any(runtime_uses_kcptun(server_row) for _key, server_row, _name in user_source_meta.values()):
+        detect_mode = "kcptun"
+
+    for user in users:
+        source_key, server_row, _ = user_source_meta[int(user["id"])]
+        if source_key in active_peer_hosts_by_source:
+            continue
+        try:
+            peers, source_mode, peer_stats, aggregate_stats, port_stats = get_runtime_active_peer_hosts(
+                user=user,
+                server_row=server_row,
+                window_seconds=online_window_seconds,
+                requested_ports=sorted(requested_ports_by_source.get(source_key, set())),
+            )
+            active_peer_hosts_by_source[source_key] = set(peers)
+            active_peer_stats_by_source[source_key] = peer_stats or {}
+            active_mode_by_source[source_key] = source_mode or detect_mode
+            aggregate_stats_by_source[source_key] = aggregate_stats or {
+                "rx_bytes": 0,
+                "tx_bytes": 0,
+                "total_bytes": 0,
+            }
+            active_port_stats_by_source[source_key] = port_stats or {}
+            detect_mode = source_mode or detect_mode
+        except Exception as exc:
+            active_peer_hosts_by_source[source_key] = set()
+            active_peer_stats_by_source[source_key] = {}
+            active_mode_by_source[source_key] = detect_mode
+            aggregate_stats_by_source[source_key] = {
+                "rx_bytes": 0,
+                "tx_bytes": 0,
+                "total_bytes": 0,
+            }
+            active_port_stats_by_source[source_key] = {}
+            cache_errors[source_key] = str(exc)
+
+    matched_user_ids: set[int] = set()
+    matched_peer_by_source: dict[str, set[str]] = {
+        key: set() for key in active_peer_hosts_by_source
+    }
+
+    for user in users:
+        user_id = int(user["id"])
+        session_row = client_sessions_by_user_id.get(user_id)
+        if not session_row:
+            continue
+        source_key, _, fallback_server_name = user_source_meta[user_id]
+        server_name = (
+            (row_get(session_row, "server_host", "") or "").strip()
+            or fallback_server_name
+        )
+        profile_type = (row_get(session_row, "profile_type", "") or "").strip().lower()
+        active_mode_by_source[source_key] = profile_type or active_mode_by_source.get(source_key, detect_mode)
+        try:
+            latest_handshake = int(parse_iso(row_get(session_row, "last_seen_at", "")).timestamp())
+        except Exception:
+            latest_handshake = now_ts
+        endpoint = (
+            normalize_public_client_ip(row_get(session_row, "endpoint", ""))
+            or (row_get(session_row, "endpoint", "") or "").strip()
+            or "-"
+        )
+        matched_user_ids.add(user_id)
+        if endpoint and endpoint != "-":
+            matched_peer_by_source.setdefault(source_key, set()).add(endpoint)
+        online_users.append(
+            build_online_row(
+                user,
+                server_name=server_name,
+                source_key=source_key,
+                endpoint=endpoint,
+                latest_handshake=latest_handshake,
+                rx_bytes=to_non_negative_int(row_get(session_row, "rx_bytes", 0)),
+                tx_bytes=to_non_negative_int(row_get(session_row, "tx_bytes", 0)),
+            )
         )
 
-    if use_wireguard_source:
-        for user in users:
-            public_key = (row_get(user, "client_public_key", "") or "").strip()
-            if not public_key:
-                continue
-
-            source_key, server_row, server_name = user_source_meta[int(user["id"])]
-
-            if source_key not in peer_cache:
-                try:
-                    if server_row is not None:
-                        if use_vpn_api(server_row=server_row):
-                            dump_text = get_wireguard_dump_text(server_row=server_row)
-                        else:
-                            dump_text = ""
-                    else:
-                        dump_text = get_wireguard_dump_text()
-                    peer_cache[source_key] = parse_wireguard_dump_peers(dump_text)
-                except Exception as exc:
-                    peer_cache[source_key] = {}
-                    cache_errors[source_key] = str(exc)
-
-            peer_state = peer_cache[source_key].get(
-                public_key,
-                {"rx": 0, "tx": 0, "latest_handshake": 0, "endpoint": ""},
-            )
-            rx_bytes = max(0, int(peer_state.get("rx", 0) or 0))
-            tx_bytes = max(0, int(peer_state.get("tx", 0) or 0))
-            latest_handshake = max(0, int(peer_state.get("latest_handshake", 0) or 0))
-            handshake_age_seconds = (
-                now_ts - latest_handshake if latest_handshake > 0 else 10**9
-            )
-            is_online = (
-                latest_handshake > 0 and handshake_age_seconds <= online_window_seconds
-            )
-            if not is_online:
-                continue
-            online_users.append(
-                build_online_row(
-                    user,
-                    server_name=server_name,
-                    source_key=source_key,
-                    endpoint=(peer_state.get("endpoint", "") or "").strip(),
-                    latest_handshake=latest_handshake,
-                    rx_bytes=rx_bytes,
-                    tx_bytes=tx_bytes,
-                )
-            )
-    else:
-        for user in users:
-            source_key, server_row, _ = user_source_meta[int(user["id"])]
-            if source_key in active_peer_hosts_by_source:
-                continue
-            try:
-                peers, source_mode, peer_stats, aggregate_stats, port_stats = get_runtime_active_peer_hosts(
-                    user=user,
-                    server_row=server_row,
-                    window_seconds=online_window_seconds,
-                    requested_ports=sorted(requested_ports_by_source.get(source_key, set())),
-                )
-                active_peer_hosts_by_source[source_key] = set(peers)
-                active_peer_stats_by_source[source_key] = peer_stats or {}
-                aggregate_stats_by_source[source_key] = aggregate_stats or {
-                    "rx_bytes": 0,
-                    "tx_bytes": 0,
-                    "total_bytes": 0,
-                }
-                active_port_stats_by_source[source_key] = port_stats or {}
-                detect_mode = source_mode or detect_mode
-            except Exception as exc:
-                active_peer_hosts_by_source[source_key] = set()
-                active_peer_stats_by_source[source_key] = {}
-                aggregate_stats_by_source[source_key] = {
-                    "rx_bytes": 0,
-                    "tx_bytes": 0,
-                    "total_bytes": 0,
-                }
-                active_port_stats_by_source[source_key] = {}
-                cache_errors[source_key] = str(exc)
-
-        matched_user_ids: set[int] = set()
-        matched_peer_by_source: dict[str, set[str]] = {
-            key: set() for key in active_peer_hosts_by_source
-        }
-
-        for user in users:
-            user_id = int(user["id"])
-            source_key, _, server_name = user_source_meta[user_id]
-            peers = active_peer_hosts_by_source.get(source_key, set())
-            if not peers:
-                continue
-            login_ip = normalize_public_client_ip(row_get(user, "last_login_ip", ""))
-            if not login_ip or login_ip not in peers:
-                continue
-            matched_user_ids.add(user_id)
-            matched_peer_by_source.setdefault(source_key, set()).add(login_ip)
-            peer_state = active_peer_stats_by_source.get(source_key, {}).get(login_ip, {})
-            user_ss_port = get_user_shadowsocks_server_port(user)
-            port_state = active_port_stats_by_source.get(source_key, {}).get(user_ss_port, {})
-            rx_bytes = to_non_negative_int(peer_state.get("rx_bytes", 0))
-            tx_bytes = to_non_negative_int(peer_state.get("tx_bytes", 0))
-            if rx_bytes <= 0 and tx_bytes <= 0:
-                rx_bytes = to_non_negative_int(port_state.get("rx_bytes", 0))
-                tx_bytes = to_non_negative_int(port_state.get("tx_bytes", 0))
-            online_users.append(
-                build_online_row(
-                    user,
-                    server_name=server_name,
-                    source_key=source_key,
-                    endpoint=login_ip,
-                    latest_handshake=now_ts,
-                    rx_bytes=rx_bytes,
-                    tx_bytes=tx_bytes,
-                )
-            )
-
-        for user in users:
-            user_id = int(user["id"])
-            if user_id in matched_user_ids:
-                continue
-            source_key, _, server_name = user_source_meta[user_id]
-            user_ss_port = get_user_shadowsocks_server_port(user)
-            port_state = active_port_stats_by_source.get(source_key, {}).get(user_ss_port, {})
+    for user in users:
+        user_id = int(user["id"])
+        if user_id in matched_user_ids:
+            continue
+        source_key, _, server_name = user_source_meta[user_id]
+        peers = active_peer_hosts_by_source.get(source_key, set())
+        if not peers:
+            continue
+        login_ip = normalize_public_client_ip(row_get(user, "last_login_ip", ""))
+        if not login_ip or login_ip not in peers:
+            continue
+        matched_user_ids.add(user_id)
+        matched_peer_by_source.setdefault(source_key, set()).add(login_ip)
+        peer_state = active_peer_stats_by_source.get(source_key, {}).get(login_ip, {})
+        user_ss_port = get_user_shadowsocks_server_port(user)
+        port_state = active_port_stats_by_source.get(source_key, {}).get(user_ss_port, {})
+        rx_bytes = to_non_negative_int(peer_state.get("rx_bytes", 0))
+        tx_bytes = to_non_negative_int(peer_state.get("tx_bytes", 0))
+        if rx_bytes <= 0 and tx_bytes <= 0:
             rx_bytes = to_non_negative_int(port_state.get("rx_bytes", 0))
             tx_bytes = to_non_negative_int(port_state.get("tx_bytes", 0))
-            if rx_bytes <= 0 and tx_bytes <= 0:
-                continue
-            matched_user_ids.add(user_id)
-            login_ip = normalize_public_client_ip(row_get(user, "last_login_ip", ""))
-            endpoint = login_ip or f"port:{user_ss_port}"
+        online_users.append(
+            build_online_row(
+                user,
+                server_name=server_name,
+                source_key=source_key,
+                endpoint=login_ip,
+                latest_handshake=now_ts,
+                rx_bytes=rx_bytes,
+                tx_bytes=tx_bytes,
+            )
+        )
+
+    for user in users:
+        user_id = int(user["id"])
+        if user_id in matched_user_ids:
+            continue
+        source_key, _, server_name = user_source_meta[user_id]
+        user_ss_port = get_user_shadowsocks_server_port(user)
+        port_state = active_port_stats_by_source.get(source_key, {}).get(user_ss_port, {})
+        rx_bytes = to_non_negative_int(port_state.get("rx_bytes", 0))
+        tx_bytes = to_non_negative_int(port_state.get("tx_bytes", 0))
+        if rx_bytes <= 0 and tx_bytes <= 0:
+            continue
+        matched_user_ids.add(user_id)
+        login_ip = normalize_public_client_ip(row_get(user, "last_login_ip", ""))
+        endpoint = login_ip or f"port:{user_ss_port}"
+        online_users.append(
+            build_online_row(
+                user,
+                server_name=server_name,
+                source_key=source_key,
+                endpoint=endpoint,
+                latest_handshake=now_ts,
+                rx_bytes=rx_bytes,
+                tx_bytes=tx_bytes,
+            )
+        )
+
+    unknown_counter = 0
+    for source_key, peers in active_peer_hosts_by_source.items():
+        if not peers:
+            continue
+        unmatched_peers = [p for p in sorted(peers) if p not in matched_peer_by_source.get(source_key, set())]
+        if not unmatched_peers:
+            continue
+        candidate_users = [
+            user
+            for user in users
+            if int(user["id"]) not in matched_user_ids
+            and user_source_meta[int(user["id"])][0] == source_key
+        ]
+        if len(candidate_users) == 1 and len(unmatched_peers) == 1:
+            user = candidate_users[0]
+            matched_user_ids.add(int(user["id"]))
+            guessed_peer_state = (
+                active_peer_stats_by_source.get(source_key, {})
+                .get(unmatched_peers[0], {})
+            )
+            guessed_rx = to_non_negative_int(guessed_peer_state.get("rx_bytes", 0))
+            guessed_tx = to_non_negative_int(guessed_peer_state.get("tx_bytes", 0))
+            if guessed_rx <= 0 and guessed_tx <= 0:
+                guessed_port_state = active_port_stats_by_source.get(source_key, {}).get(
+                    get_user_shadowsocks_server_port(user),
+                    {},
+                )
+                guessed_rx = to_non_negative_int(guessed_port_state.get("rx_bytes", 0))
+                guessed_tx = to_non_negative_int(guessed_port_state.get("tx_bytes", 0))
             online_users.append(
                 build_online_row(
                     user,
-                    server_name=server_name,
+                    server_name=source_labels.get(source_key, "-"),
                     source_key=source_key,
-                    endpoint=endpoint,
+                    endpoint=unmatched_peers[0],
                     latest_handshake=now_ts,
-                    rx_bytes=rx_bytes,
-                    tx_bytes=tx_bytes,
+                    rx_bytes=guessed_rx,
+                    tx_bytes=guessed_tx,
                 )
             )
-
-        unknown_counter = 0
-        for source_key, peers in active_peer_hosts_by_source.items():
-            if not peers:
-                continue
-            unmatched_peers = [p for p in sorted(peers) if p not in matched_peer_by_source.get(source_key, set())]
-            if not unmatched_peers:
-                continue
-            candidate_users = [
-                user
-                for user in users
-                if int(user["id"]) not in matched_user_ids
-                and user_source_meta[int(user["id"])][0] == source_key
-            ]
-            if len(candidate_users) == 1 and len(unmatched_peers) == 1:
-                user = candidate_users[0]
-                matched_user_ids.add(int(user["id"]))
-                guessed_peer_state = (
-                    active_peer_stats_by_source.get(source_key, {})
-                    .get(unmatched_peers[0], {})
-                )
-                guessed_rx = to_non_negative_int(guessed_peer_state.get("rx_bytes", 0))
-                guessed_tx = to_non_negative_int(guessed_peer_state.get("tx_bytes", 0))
-                if guessed_rx <= 0 and guessed_tx <= 0:
-                    guessed_port_state = active_port_stats_by_source.get(source_key, {}).get(
-                        get_user_shadowsocks_server_port(user),
-                        {},
-                    )
-                    guessed_rx = to_non_negative_int(guessed_port_state.get("rx_bytes", 0))
-                    guessed_tx = to_non_negative_int(guessed_port_state.get("tx_bytes", 0))
-                online_users.append(
-                    build_online_row(
-                        user,
-                        server_name=source_labels.get(source_key, "-"),
-                        source_key=source_key,
-                        endpoint=unmatched_peers[0],
-                        latest_handshake=now_ts,
-                        rx_bytes=guessed_rx,
-                        tx_bytes=guessed_tx,
-                    )
-                )
-                continue
-            for peer_host in unmatched_peers:
-                unknown_counter += 1
-                online_users.append(
-                    {
-                        "id": -100000 - unknown_counter,
-                        "role": "unknown",
-                        "username": "未知来源（无法映射到具体用户）",
-                        "email": "-",
-                        "assigned_ip": "-",
-                        "server_name": source_labels.get(source_key, "-"),
-                        "__source_key": source_key,
-                        "endpoint": peer_host,
-                        "latest_handshake": now_ts,
-                        "latest_handshake_at": handshake_epoch_to_iso(now_ts),
-                        "handshake_age_seconds": 0,
-                        "rx_bytes": 0,
-                        "tx_bytes": 0,
-                        "total_bytes": 0,
-                        "rx_human": "0 B",
-                        "tx_human": "0 B",
-                        "total_human": "0 B",
-                        "traffic_used_bytes": 0,
-                        "traffic_used_human": "0 B",
-                        "subscription_expires_at": "",
-                    }
-                )
+            continue
+        for peer_host in unmatched_peers:
+            unknown_counter += 1
+            online_users.append(
+                {
+                    "id": -100000 - unknown_counter,
+                    "role": "unknown",
+                    "status": "unknown",
+                    "username": "未知来源（无法映射到具体用户）",
+                    "email": "-",
+                    "vpn_internal_ip": "-",
+                    "server_name": source_labels.get(source_key, "-"),
+                    "connection_mode": (
+                        "SS+KCPTUN"
+                        if (active_mode_by_source.get(source_key, detect_mode) == "kcptun")
+                        else (
+                            "Shadowsocks"
+                            if (active_mode_by_source.get(source_key, detect_mode) == "shadowsocks")
+                            else "-"
+                        )
+                    ),
+                    "__source_key": source_key,
+                    "endpoint": peer_host,
+                    "latest_handshake": now_ts,
+                    "latest_handshake_at": handshake_epoch_to_iso(now_ts),
+                    "handshake_age_seconds": 0,
+                    "rx_bytes": 0,
+                    "tx_bytes": 0,
+                    "total_bytes": 0,
+                    "rx_human": "0 B",
+                    "tx_human": "0 B",
+                    "total_human": "0 B",
+                    "traffic_used_bytes": 0,
+                    "traffic_used_human": "0 B",
+                    "subscription_expires_at": "",
+                }
+            )
 
         # kcptun traffic usually appears as loopback shadowsocks sockets.
         # When one mapped user is online on a source, apply aggregate socket bytes to that user row.
@@ -10708,8 +7581,8 @@ def load_admin_online_users(
     summary = {
         "tracked_users": len(users),
         "online_users": len(online_users),
-        "total_download_bytes": sum(int(item["rx_bytes"]) for item in online_users),
-        "total_upload_bytes": sum(int(item["tx_bytes"]) for item in online_users),
+        "total_download_bytes": sum(int(item["tx_bytes"]) for item in online_users),
+        "total_upload_bytes": sum(int(item["rx_bytes"]) for item in online_users),
         "total_traffic_bytes": sum(int(item["total_bytes"]) for item in online_users),
         "source_errors": len(cache_errors),
         "source_errors_text": " | ".join(
@@ -10727,35 +7600,9 @@ def load_admin_online_users(
 
 
 def get_user_current_plan_display(db: DatabaseConnection, user: DatabaseRow) -> str:
-    row = db.execute(
-        """
-        SELECT
-            plan_name,
-            plan_mode,
-            plan_duration_months,
-            plan_duration_value,
-            plan_duration_unit,
-            plan_traffic_gb,
-            plan_months
-        FROM payment_orders
-        WHERE user_id = ? AND status = 'paid'
-        ORDER BY COALESCE(paid_at, created_at) DESC, id DESC
-        LIMIT 1
-        """,
-        (int(user["id"]),),
-    ).fetchone()
-    if row:
-        return format_order_plan(row)
-
-    has_time = has_active_time_subscription(user)
-    has_traffic = has_active_traffic_subscription(user)
-    if has_time and has_traffic:
-        return "赠送权益（时长 + 流量）"
-    if has_time:
-        return "赠送时长权益（不限流量）"
-    if has_traffic:
-        return "赠送流量权益（有效期永久）"
-    return "暂无生效套餐"
+    if has_active_time_subscription(user):
+        return "内部账号（不限时长）"
+    return "账号已停用"
 
 
 def load_first_plan_for_onboarding(db: DatabaseConnection) -> dict:
@@ -10945,10 +7792,14 @@ def create_server_record(
     password: str,
     ssh_private_key: str = "",
     domain: str,
-    wg_port: int,
+    kcptun_port: int,
     openvpn_port: int,
     dns_port: int,
     vpn_api_token: str,
+    openvpn_enabled: bool = True,
+    shadowsocks_enabled: bool = False,
+    kcptun_enabled: bool = False,
+    ssh_tunnel_enabled: bool = True,
     status: str = "pending",
 ) -> int:
     now_iso = utcnow_iso()
@@ -10956,10 +7807,11 @@ def create_server_record(
         """
         INSERT INTO vpn_servers (
             server_name, server_region, host, port, username, password, ssh_private_key, domain, vpn_api_token,
-            wg_port, openvpn_port, dns_port, status,
+            kcptun_port, openvpn_port, dns_port, openvpn_enabled, shadowsocks_enabled, kcptun_enabled, ssh_tunnel_enabled, status,
             created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
         """,
         (
             server_name,
@@ -10971,15 +7823,111 @@ def create_server_record(
             (ssh_private_key or "").strip(),
             domain,
             vpn_api_token,
-            wg_port,
+            kcptun_port,
             openvpn_port,
             dns_port,
+            1 if openvpn_enabled else 0,
+            1 if shadowsocks_enabled else 0,
+            1 if kcptun_enabled else 0,
+            1 if ssh_tunnel_enabled else 0,
             status,
             now_iso,
             now_iso,
         ),
     )
-    return int(cursor.lastrowid)
+    return int(cursor.fetchone()["id"])
+
+
+def parse_server_backend_selection(form) -> tuple[bool, bool, bool]:
+    return False, False, False
+
+
+def ensure_default_runtime_server(db: DatabaseConnection) -> None:
+    if not OPENVPN_ENABLED:
+        return
+    host = host_without_optional_port(OPENVPN_ENDPOINT_HOST)
+    if not host and VPN_API_URL:
+        try:
+            parsed = urllib_parse.urlparse(VPN_API_URL)
+            host = host_without_optional_port(parsed.hostname or "")
+        except Exception:
+            host = ""
+    if not host:
+        return
+
+    default_password = (
+        os.environ.get("LOCAL_SERVER_PASSWORD")
+        or os.environ.get("PORTAL_DEFAULT_SERVER_PASSWORD")
+        or ""
+    )
+    default_private_key = os.environ.get("LOCAL_SERVER_SSH_PRIVATE_KEY") or ""
+    existing = db.execute(
+        """
+        SELECT id, password, ssh_private_key
+        FROM vpn_servers
+        WHERE host = ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (host,),
+    ).fetchone()
+    if existing:
+        if (
+            (default_password or default_private_key)
+            and not (row_get(existing, "password", "") or "").strip()
+            and not (row_get(existing, "ssh_private_key", "") or "").strip()
+        ):
+            db.execute(
+                """
+                UPDATE vpn_servers
+                SET password = ?,
+                    ssh_private_key = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    default_password,
+                    default_private_key.strip(),
+                    utcnow_iso(),
+                    int(row_get(existing, "id")),
+                ),
+            )
+        return
+
+    existing_any = db.execute("SELECT id FROM vpn_servers LIMIT 1").fetchone()
+    if existing_any:
+        return
+
+    now_iso = utcnow_iso()
+    db.execute(
+        """
+        INSERT INTO vpn_servers (
+            server_name, server_region, host, port, username, password,
+            ssh_private_key, domain, vpn_api_token, kcptun_port, openvpn_port,
+            dns_port, status, last_test_at, last_test_ok, last_test_message,
+            last_deploy_at, last_deploy_ok, last_deploy_message,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, 22, 'root', ?, ?, '', ?, ?, ?, ?, 'online', ?, 1, ?, ?, 1, ?, ?, ?)
+        """,
+        (
+            "本机 OpenVPN 节点",
+            "默认",
+            host,
+            default_password,
+            default_private_key.strip(),
+            VPN_API_TOKEN,
+            SERVER_DEPLOY_DEFAULT_KCPTUN_PORT,
+            OPENVPN_ENDPOINT_PORT,
+            SERVER_DEPLOY_DEFAULT_DNS_PORT,
+            now_iso,
+            "默认部署自动登记本机节点。",
+            now_iso,
+            "OpenVPN 已由默认部署启用。",
+            now_iso,
+            now_iso,
+        ),
+    )
 
 
 def update_server_test_result(
@@ -11120,9 +8068,12 @@ def run_server_deploy_task(server_id: int) -> None:
                 username=row["username"],
                 password=row["password"],
                 private_key_text=row_get(row, "ssh_private_key", ""),
-                wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+                kcptun_port=SERVER_DEPLOY_DEFAULT_KCPTUN_PORT,
                 shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
                 dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+                openvpn_enabled=int(row_get(row, "openvpn_enabled", 1) or 0) == 1,
+                shadowsocks_enabled=int(row_get(row, "shadowsocks_enabled", 0) or 0) == 1,
+                kcptun_enabled=int(row_get(row, "kcptun_enabled", 0) or 0) == 1,
                 vpn_api_token=row_get(row, "vpn_api_token", ""),
             )
         except Exception as exc:
@@ -11156,9 +8107,9 @@ def launch_server_deploy_task(server_id: int) -> None:
 def redirect_admin_onboarding_modal(step: int | None = None):
     if step is not None and 1 <= step <= 4:
         return redirect(
-            url_for("admin_home", onboarding_open="1", onboarding_step=str(step))
+            url_for("admin_subscriptions", onboarding_open="1", onboarding_step=str(step))
         )
-    return redirect(url_for("admin_home", onboarding_open="1"))
+    return redirect(url_for("admin_subscriptions", onboarding_open="1"))
 
 
 def render_onboarding_deploy_log_page(
@@ -11180,7 +8131,7 @@ def admin_onboarding_step_plan():
     db = get_db()
     if is_admin_onboarding_completed(db):
         flash("初始化已完成。", "success")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     plan_name = request.form.get("plan_name", "").strip()
     plan_mode = normalize_plan_mode(request.form.get("plan_mode", PLAN_MODE_DURATION))
@@ -11237,7 +8188,7 @@ def admin_onboarding_step_payment():
     db = get_db()
     if is_admin_onboarding_completed(db):
         flash("初始化已完成。", "success")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     payment_network = request.form.get("payment_network", "TRC20").strip().upper()
     payment_address = request.form.get("payment_address", "").strip()
@@ -11277,7 +8228,7 @@ def admin_onboarding_step_cloudflare():
     db = get_db()
     if is_admin_onboarding_completed(db):
         flash("初始化已完成。", "success")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     cloudflare_account = request.form.get("cloudflare_account", "").strip()
     cloudflare_password = request.form.get("cloudflare_password", "").strip()
@@ -11322,7 +8273,7 @@ def admin_onboarding_step_server():
     db = get_db()
     if is_admin_onboarding_completed(db):
         flash("初始化已完成。", "success")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     action = (request.form.get("action", "save_draft") or "").strip().lower()
     show_deploy_log_window = (
@@ -11425,8 +8376,8 @@ def admin_onboarding_step_server():
         password=server_password,
         ssh_private_key=server_private_key,
         domain="",
-        wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-        shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+        kcptun_port=SERVER_DEPLOY_DEFAULT_KCPTUN_PORT,
+        openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
         dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
         vpn_api_token=deploy_token,
         status="deploying",
@@ -11444,9 +8395,12 @@ def admin_onboarding_step_server():
         username=server_username,
         password=server_password,
         private_key_text=server_private_key,
-        wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+        kcptun_port=SERVER_DEPLOY_DEFAULT_KCPTUN_PORT,
         shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
         dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+        openvpn_enabled=True,
+        shadowsocks_enabled=False,
+        kcptun_enabled=False,
         vpn_api_token=deploy_token,
     )
     update_server_deploy_result(
@@ -11499,7 +8453,7 @@ def admin_onboarding_step_server():
         flash("初始化完成，VPN 服务端部署成功。", "success")
         if domain_message:
             flash(domain_message, "success" if domain_ok else "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     db.commit()
     if show_deploy_log_window:
@@ -11522,7 +8476,7 @@ def admin_onboarding():
     settings = load_onboarding_settings(db)
     if settings["setup_completed"]:
         flash("初始化已完成。", "success")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     first_plan = load_first_plan_for_onboarding(db)
     payment_settings = load_payment_settings(db)
@@ -11719,8 +8673,8 @@ def admin_onboarding():
             password=server_password,
             ssh_private_key="",
             domain="",
-            wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
-            shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
+            kcptun_port=SERVER_DEPLOY_DEFAULT_KCPTUN_PORT,
+            openvpn_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
             dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
             vpn_api_token=deploy_token,
             status="deploying",
@@ -11737,9 +8691,12 @@ def admin_onboarding():
             port=server_port,
             username=server_username,
             password=server_password,
-            wg_port=SERVER_DEPLOY_DEFAULT_WG_PORT,
+            kcptun_port=SERVER_DEPLOY_DEFAULT_KCPTUN_PORT,
             shadowsocks_port=SERVER_DEPLOY_DEFAULT_OPENVPN_PORT,
             dns_port=SERVER_DEPLOY_DEFAULT_DNS_PORT,
+            openvpn_enabled=True,
+            shadowsocks_enabled=False,
+            kcptun_enabled=False,
             vpn_api_token=deploy_token,
         )
         update_server_deploy_result(
@@ -11757,7 +8714,7 @@ def admin_onboarding():
             upsert_app_setting(db, ONBOARDING_SETTING_LAST_SERVER_ID, str(server_id))
             db.commit()
             flash("初始化完成，VPN 服务端部署成功。", "success")
-            return redirect(url_for("admin_home"))
+            return redirect(url_for("admin_subscriptions"))
 
         db.commit()
         flash(f"初始化信息已保存，但服务端部署失败：{deploy_message}", "error")
@@ -11785,6 +8742,7 @@ def admin_onboarding():
 @admin_required
 def admin_servers():
     db = get_db()
+    refresh_missing_server_regions(db)
     refresh_server_health_status(db, force=True)
     db.commit()
     servers = load_admin_servers(db)
@@ -11824,20 +8782,26 @@ def admin_create_server():
     if request.method == "GET":
         return redirect(url_for("admin_servers"))
     db = get_db()
-    server_region = normalize_server_region(request.form.get("server_region", ""))
     host = normalize_remote_host(request.form.get("host", ""))
+    server_region = detect_server_region(host)
+    domain = normalize_domain_host(request.form.get("domain", ""))
     port = normalize_server_port(request.form.get("port", "22"), 22)
     username = (request.form.get("username", "") or "").strip()
     password = request.form.get("password", "") or ""
     ssh_private_key = request.form.get("ssh_private_key", "") or ""
-    wg_port = SERVER_DEPLOY_DEFAULT_WG_PORT
+    kcptun_port = SERVER_DEPLOY_DEFAULT_KCPTUN_PORT
     openvpn_port = SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
     dns_port = SERVER_DEPLOY_DEFAULT_DNS_PORT
+    openvpn_enabled, shadowsocks_enabled, kcptun_enabled = parse_server_backend_selection(
+        request.form
+    )
 
     if not host or not username or (not password and not (ssh_private_key or "").strip()):
         flash("请完整填写服务器地址、账号，并提供密码或私钥。", "error")
         return redirect(url_for("admin_servers"))
-
+    if not domain:
+        flash("请填写客户端连接域名。", "error")
+        return redirect(url_for("admin_servers"))
     server_name = host
     deploy_token = hashlib.sha256(os.urandom(24)).hexdigest()[:48]
     server_id = create_server_record(
@@ -11849,10 +8813,14 @@ def admin_create_server():
         username=username,
         password=password,
         ssh_private_key=ssh_private_key,
-        domain="",
-        wg_port=wg_port,
-        shadowsocks_port=openvpn_port,
+        domain=domain,
+        kcptun_port=kcptun_port,
+        openvpn_port=openvpn_port,
         dns_port=dns_port,
+        openvpn_enabled=openvpn_enabled,
+        shadowsocks_enabled=shadowsocks_enabled,
+        kcptun_enabled=kcptun_enabled,
+        ssh_tunnel_enabled=True,
         vpn_api_token=deploy_token,
         status="deploying",
     )
@@ -11903,6 +8871,7 @@ def admin_toggle_server_ipv6(server_id: int, action: str):
 
     enable = normalized_action == "enable"
     ok, message = set_server_ipv6_state(
+        server_row=row,
         host=row_get(row, "host", ""),
         port=normalize_server_port(row_get(row, "port", 22), 22),
         username=row_get(row, "username", ""),
@@ -11980,18 +8949,25 @@ def admin_update_saved_server(server_id: int):
         flash("服务器不存在。", "error")
         return redirect(url_for("admin_servers"))
 
-    server_region = normalize_server_region(request.form.get("server_region", ""))
     host = normalize_remote_host(request.form.get("host", ""))
+    server_region = detect_server_region(host, row_get(row, "server_region", ""))
+    domain = normalize_domain_host(request.form.get("domain", ""))
     port = normalize_server_port(request.form.get("port", "22"), 22)
     username = (request.form.get("username", "") or "").strip()
     password_raw = request.form.get("password", "") or ""
     private_key_raw = request.form.get("ssh_private_key", "") or ""
-    wg_port = SERVER_DEPLOY_DEFAULT_WG_PORT
+    kcptun_port = SERVER_DEPLOY_DEFAULT_KCPTUN_PORT
     openvpn_port = SERVER_DEPLOY_DEFAULT_OPENVPN_PORT
     dns_port = SERVER_DEPLOY_DEFAULT_DNS_PORT
+    openvpn_enabled, shadowsocks_enabled, kcptun_enabled = parse_server_backend_selection(
+        request.form
+    )
 
     if not host or not username:
         flash("服务器地址和账号不能为空。", "error")
+        return redirect(url_for("admin_servers"))
+    if not domain:
+        flash("请填写客户端连接域名。", "error")
         return redirect(url_for("admin_servers"))
     server_name = host
 
@@ -12001,7 +8977,12 @@ def admin_update_saved_server(server_id: int):
         if private_key_raw.strip()
         else (row_get(row, "ssh_private_key", "") or "")
     )
-
+    previous_status = (row_get(row, "status", "") or "").strip().lower()
+    should_redeploy = (
+        previous_status in {"online", "deploying"}
+        or int(row_get(row, "last_deploy_ok", 0) or 0) == 1
+        or bool((row_get(row, "last_deploy_at", "") or "").strip())
+    )
     db.execute(
         """
         UPDATE vpn_servers
@@ -12012,9 +8993,14 @@ def admin_update_saved_server(server_id: int):
             username = ?,
             password = ?,
             ssh_private_key = ?,
-            wg_port = ?,
+            domain = ?,
+            kcptun_port = ?,
             openvpn_port = ?,
             dns_port = ?,
+            openvpn_enabled = ?,
+            shadowsocks_enabled = ?,
+            kcptun_enabled = ?,
+            ssh_tunnel_enabled = 1,
             updated_at = ?
         WHERE id = ?
         """,
@@ -12026,16 +9012,26 @@ def admin_update_saved_server(server_id: int):
             username,
             password_to_save,
             private_key_to_save,
-            wg_port,
+            domain,
+            kcptun_port,
             openvpn_port,
             dns_port,
+            1 if openvpn_enabled else 0,
+            1 if shadowsocks_enabled else 0,
+            1 if kcptun_enabled else 0,
             utcnow_iso(),
             server_id,
         ),
     )
 
-    db.commit()
-    flash("服务器信息已更新。", "success")
+    if should_redeploy:
+        mark_server_deploying(db, server_id)
+        db.commit()
+        launch_server_deploy_task(server_id)
+        flash("服务器信息已更新；该服务器已部署过，远端服务变更已自动重新部署。", "success")
+    else:
+        db.commit()
+        flash("服务器信息已保存；该服务器尚未部署，请需要时点击“部署”。", "success")
     return redirect(url_for("admin_servers"))
 
 
@@ -12076,6 +9072,9 @@ def admin_deploy_saved_server(server_id: int):
     if not row:
         flash("服务器不存在。", "error")
         return redirect(url_for("admin_servers"))
+    if (row_get(row, "status", "") or "").strip().lower() == "online":
+        flash("服务器已部署完成，如需更新请使用升级。", "error")
+        return redirect(url_for("admin_servers"))
 
     mark_server_deploying(db, server_id)
     db.commit()
@@ -12104,7 +9103,7 @@ def admin_upgrade_saved_server(server_id: int):
         row_get(row, "host", "") or ""
     ).strip()
     flash(
-        f"服务器 {server_label} 升级任务已启动，会在原主机拉取 GitHub 最新代码并重启 vpnserver 本地服务。",
+        f"服务器 {server_label} 升级任务已启动，会按当前部署类型重新应用远端服务配置。",
         "success",
     )
     return redirect(url_for("admin_servers"))
@@ -12118,7 +9117,7 @@ def admin_upgrade_system():
     state = load_system_upgrade_state_with_timeout_unlock(db)
     if (state.get("status") or "").strip().lower() == "running":
         flash("系统升级任务正在运行中，请稍后刷新查看结果。", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     started_at = utcnow_iso()
     save_system_upgrade_state(
@@ -12138,11 +9137,11 @@ def admin_upgrade_system():
             finished_at=utcnow_iso(),
         )
         flash(f"系统升级任务派发失败：{message}", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     append_system_upgrade_log(message)
     flash("系统升级任务已派发到宿主机，Web 会在新版本构建完成后自动重启。", "success")
-    return redirect(url_for("admin_home"))
+    return redirect(url_for("admin_subscriptions"))
 
 
 @app.route("/admin/system/upgrade/log")
@@ -12184,50 +9183,14 @@ def admin_system_upgrade_log():
         "log_text": log_text,
     }, 200
 
-@app.route("/admin/home")
-@login_required
-@admin_required
-def admin_home():
-    db = get_db()
-    reconcile_expired_subscriptions(db)
-    pending_count = db.execute(
-        "SELECT COUNT(*) AS cnt FROM payment_orders WHERE status = 'pending'"
-    ).fetchone()["cnt"]
-    total_users = db.execute(
-        "SELECT COUNT(*) AS cnt FROM users WHERE COALESCE(NULLIF(lower(trim(role)), ''), 'user')='user'"
-    ).fetchone()["cnt"]
-    server_overview = refresh_server_health_status(db)
-    expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=50)
-    _, online_summary = load_admin_online_users(db)
-    system_upgrade = load_system_upgrade_state_with_timeout_unlock(db)
-    system_upgrade_log = read_system_upgrade_log_text()
-    if not system_upgrade_log:
-        status = (system_upgrade.get("status") or "").strip().lower()
-        if status == "running":
-            system_upgrade_log = "系统升级任务进行中，日志正在生成，请稍后刷新。"
-        elif status in {"success", "failed"}:
-            system_upgrade_log = "暂无系统升级日志，请确认数据卷映射与权限是否正常。"
-        else:
-            system_upgrade_log = "尚未触发系统升级。"
-    db.commit()
-
-    return render_template(
-        "admin_home.html",
-        pending_count=pending_count,
-        total_users=total_users,
-        online_user_count=int(online_summary.get("online_users", 0) or 0),
-        abnormal_server_count=server_overview["abnormal"],
-        expiring_count=len(expiring_subscriptions),
-        system_upgrade=system_upgrade,
-        system_upgrade_log=system_upgrade_log,
-        admin_page="home",
-    )
-
-
 @app.route("/admin/configs")
 @login_required
 @admin_required
 def admin_configs():
+    return redirect(url_for("admin_subscriptions"))
+
+
+def _legacy_admin_configs():
     db = get_db()
     admin = db.execute(
         "SELECT * FROM users WHERE id = ? AND role = 'admin'",
@@ -12235,14 +9198,33 @@ def admin_configs():
     ).fetchone()
     if not admin:
         flash("管理员账户不存在。", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
-    admin_vpn_ready = bool(SHADOWSOCKS_ENABLED)
-    admin_vpn_status_text = "已就绪（Shadowsocks）" if SHADOWSOCKS_ENABLED else "未启用"
     admin_vpn_error = ""
     endpoint_display = "-"
 
     target_server = choose_runtime_server_for_admin(db, admin)
+    target_server_serialized = serialize_runtime_server(target_server)
+    admin_openvpn_ready = bool(
+        target_server_serialized
+        and target_server_serialized.get("openvpn_enabled")
+        and OPENVPN_ENABLED
+        and is_openvpn_open(db)
+    )
+    admin_ss_kcptun_ready = bool(
+        target_server_serialized
+        and target_server_serialized.get("shadowsocks_enabled")
+        and target_server_serialized.get("kcptun_enabled")
+    )
+    admin_vpn_ready = bool(admin_openvpn_ready or admin_ss_kcptun_ready)
+    if admin_openvpn_ready and admin_ss_kcptun_ready:
+        admin_vpn_status_text = "已就绪（OpenVPN + SS+kcptun）"
+    elif admin_openvpn_ready:
+        admin_vpn_status_text = "已就绪（OpenVPN）"
+    elif admin_ss_kcptun_ready:
+        admin_vpn_status_text = "已就绪（SS+kcptun）"
+    else:
+        admin_vpn_status_text = "未启用"
     target_server_name = "-"
     target_server_host = "-"
     if target_server is not None:
@@ -12252,30 +9234,24 @@ def admin_configs():
             or "-"
         )
         target_server_host = (row_get(target_server, "host", "") or "").strip() or "-"
-        if admin_vpn_ready:
+        if admin_openvpn_ready:
             endpoint_display = (
-                resolve_shadowsocks_endpoint_host(user=admin, server_row=target_server) or "-"
+                get_openvpn_endpoint_host(user=admin, server_row=target_server) or "-"
             ).strip() or "-"
 
-    available_servers = load_user_selectable_servers(db, admin)
-    selected_default_server_id = 0
-    assigned_server_id = row_get(admin, "assigned_server_id")
-    if assigned_server_id is not None and str(assigned_server_id).strip():
-        try:
-            selected_default_server_id = int(assigned_server_id)
-        except Exception:
-            selected_default_server_id = 0
-    if selected_default_server_id <= 0 and target_server is not None:
-        selected_default_server_id = int(row_get(target_server, "id", 0) or 0)
-
+    admin_openvpn_download_link = (
+        absolute_url_for("admin_download_openvpn_config") if admin_openvpn_ready else ""
+    )
     admin_ss_access_token = build_download_access_token(admin, "download-config-admin")
     admin_ss_download_link = (
         build_masked_download_link(admin_ss_access_token, output_format="yaml")
-        if SHADOWSOCKS_ENABLED
+        if admin_ss_kcptun_ready
         else ""
     )
-    admin_kcptun_download_link = ""
-    admin_ss_qr_link = absolute_url_for("admin_download_qr") if SHADOWSOCKS_ENABLED else ""
+    admin_kcptun_download_link = (
+        absolute_url_for("admin_download_kcptun_config") if admin_ss_kcptun_ready else ""
+    )
+    admin_ss_qr_link = absolute_url_for("admin_download_qr") if admin_ss_kcptun_ready else ""
 
     db.commit()
 
@@ -12283,13 +9259,14 @@ def admin_configs():
         "admin_configs.html",
         admin_user=admin,
         admin_vpn_ready=admin_vpn_ready,
+        admin_openvpn_ready=admin_openvpn_ready,
+        admin_ss_kcptun_ready=admin_ss_kcptun_ready,
         admin_vpn_status_text=admin_vpn_status_text,
         admin_vpn_error=admin_vpn_error,
         target_server_name=target_server_name,
         target_server_host=target_server_host,
         endpoint_display=endpoint_display,
-        available_servers=available_servers,
-        selected_default_server_id=selected_default_server_id,
+        admin_openvpn_download_link=admin_openvpn_download_link,
         admin_ss_download_link=admin_ss_download_link,
         admin_kcptun_download_link=admin_kcptun_download_link,
         admin_ss_qr_link=admin_ss_qr_link,
@@ -12308,18 +9285,22 @@ def admin_set_default_server():
     ).fetchone()
     if not admin:
         flash("管理员账户不存在。", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     server_id_raw = (request.form.get("server_id", "") or "").strip()
+    redirect_to = (request.form.get("redirect_to", "") or "").strip()
+    redirect_target = (
+        "admin_subscriptions" if redirect_to == "admin_subscriptions" else "admin_subscriptions"
+    )
     if not server_id_raw.isdigit():
         flash("请选择有效的默认节点。", "error")
-        return redirect(url_for("admin_configs"))
+        return redirect(url_for(redirect_target))
 
     server_id = int(server_id_raw)
     target_server = get_server_by_id(db, server_id)
     if not is_runtime_server_ready(target_server):
         flash("所选节点不可用，请选择在线节点。", "error")
-        return redirect(url_for("admin_configs"))
+        return redirect(url_for(redirect_target))
 
     db.execute(
         """
@@ -12338,8 +9319,8 @@ def admin_set_default_server():
         row_get(target_server, "host", "") or ""
     ).strip()
     label = f"{region} / {name}" if region else name
-    flash(f"管理员默认节点已更新为：{label}（Shadowsocks/kcptun 配置已按新节点生效）", "success")
-    return redirect(url_for("admin_configs"))
+    flash(f"管理员默认节点已更新为：{label}（OpenVPN 配置已按新节点生效）", "success")
+    return redirect(url_for(redirect_target))
 
 
 @app.route("/admin/settings")
@@ -12472,6 +9453,7 @@ def admin_create_mail_server():
             updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
         """,
         (
             payload["server_name"],
@@ -12488,7 +9470,7 @@ def admin_create_mail_server():
             now_iso,
         ),
     )
-    mail_server_id = int(cursor.lastrowid)
+    mail_server_id = int(cursor.fetchone()["id"])
     if int(payload["is_active"] or 0) == 1:
         set_active_mail_server(db, mail_server_id)
     db.commit()
@@ -12609,34 +9591,16 @@ def admin_delete_mail_server(mail_server_id: int):
 @login_required
 @admin_required
 def admin_payment_settings():
-    db = get_db()
-    reconcile_expired_subscriptions(db)
-    plans = load_subscription_plans(db, active_only=False)
-    pending_orders = load_admin_pending_orders(db)
-    payment_settings = load_payment_settings(db)
-    payment_methods = load_payment_methods(db, active_only=False)
-    return render_template(
-        "admin_payment.html",
-        plans=plans,
-        pending_orders=pending_orders,
-        payment_settings=payment_settings,
-        payment_methods=payment_methods,
-        usdt_explorer_link=usdt_explorer_link,
-        admin_page="payment",
-    )
+    flash("公司内部模式已取消套餐与收款配置，请在用户管理中创建账号。", "error")
+    return redirect(url_for("admin_subscriptions"))
 
 
 @app.route("/admin/payment-methods")
 @login_required
 @admin_required
 def admin_payment_methods():
-    db = get_db()
-    payment_methods = load_payment_methods(db, active_only=False)
-    return render_template(
-        "admin_payment_methods.html",
-        payment_methods=payment_methods,
-        admin_page="payment_methods",
-    )
+    flash("公司内部模式已取消付款方式配置，请在用户管理中创建账号。", "error")
+    return redirect(url_for("admin_subscriptions"))
 
 
 @app.route("/admin/cloudflare-accounts")
@@ -13108,29 +10072,16 @@ def admin_delete_domain(domain_id: int):
 @login_required
 @admin_required
 def admin_pending_orders():
-    db = get_db()
-    reconcile_expired_subscriptions(db)
-    pending_orders = load_admin_pending_orders(db)
-    return render_template(
-        "admin_pending_orders.html",
-        pending_orders=pending_orders,
-        usdt_explorer_link=usdt_explorer_link,
-        admin_page="pending_orders",
-    )
+    flash("公司内部模式已取消订单支付，请在用户管理中创建账号。", "error")
+    return redirect(url_for("admin_subscriptions"))
 
 
 @app.route("/admin/orders/paid")
 @login_required
 @admin_required
 def admin_paid_orders():
-    db = get_db()
-    paid_orders = load_admin_paid_orders(db)
-    return render_template(
-        "admin_paid_orders.html",
-        paid_orders=paid_orders,
-        usdt_explorer_link=usdt_explorer_link,
-        admin_page="paid_orders",
-    )
+    flash("公司内部模式已取消订单支付，请在用户管理中创建账号。", "error")
+    return redirect(url_for("admin_subscriptions"))
 
 
 @app.route("/admin/subscriptions")
@@ -13139,14 +10090,44 @@ def admin_paid_orders():
 def admin_subscriptions():
     db = get_db()
     reconcile_expired_subscriptions(db)
-    search_email = request.args.get("q", "").strip()
-    subscriptions = load_admin_subscriptions(db, search_email)
+    db.execute(
+        """
+        UPDATE users
+        SET vpn_enabled = CASE
+                WHEN COALESCE(NULLIF(lower(trim(status)), ''), 'approved') = 'disabled'
+                THEN 0 ELSE 1
+            END
+        WHERE COALESCE(NULLIF(lower(trim(role)), ''), 'user') = 'user'
+          AND vpn_enabled <> CASE
+                WHEN COALESCE(NULLIF(lower(trim(status)), ''), 'approved') = 'disabled'
+                THEN 0 ELSE 1
+            END
+        """
+    )
+    db.commit()
+    search_username = request.args.get("q", "").strip()
+    subscriptions = load_admin_subscriptions(db, search_username)
     expiring_subscriptions = load_expiring_subscriptions(db, days=7, limit=20)
+    online_rows, online_summary = load_admin_online_users(db)
+    online_by_user_id: dict[int, dict] = {}
+    for row in online_rows:
+        try:
+            online_by_user_id[int(row.get("id"))] = row
+        except Exception:
+            continue
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    available_servers = load_user_selectable_servers(db, admin) if admin else []
     return render_template(
         "admin_subscriptions.html",
         subscriptions=subscriptions,
         expiring_subscriptions=expiring_subscriptions,
-        search_email=search_email,
+        search_username=search_username,
+        online_by_user_id=online_by_user_id,
+        online_summary=online_summary,
+        available_servers=available_servers,
         admin_ui_tz_name=ADMIN_UI_TZ_NAME,
         admin_page="subscriptions",
     )
@@ -13156,20 +10137,7 @@ def admin_subscriptions():
 @login_required
 @admin_required
 def admin_online_users():
-    db = get_db()
-    reconcile_expired_subscriptions(db)
-    rows, summary = load_admin_online_users(db)
-    db.commit()
-    return render_template(
-        "admin_online_users.html",
-        online_users=rows,
-        summary=summary,
-        sampled_at=utcnow_iso(),
-        sampled_at_epoch=int(utcnow().timestamp()),
-        refresh_seconds=ADMIN_ONLINE_REFRESH_SECONDS,
-        online_window_seconds=ADMIN_ONLINE_HANDSHAKE_WINDOW_SECONDS,
-        admin_page="online_users",
-    )
+    return redirect(url_for("admin_subscriptions"))
 
 
 @app.route("/admin/online-users/data")
@@ -13193,9 +10161,9 @@ def admin_online_users_data():
 
 
 def redirect_admin_subscriptions():
-    search_email = request.values.get("q", "").strip()
-    if search_email:
-        return redirect(url_for("admin_subscriptions", q=search_email))
+    search_username = request.values.get("q", "").strip()
+    if search_username:
+        return redirect(url_for("admin_subscriptions", q=search_username))
     return redirect(url_for("admin_subscriptions"))
 
 
@@ -13224,12 +10192,11 @@ def redirect_admin_payment_method_page(default_page: str = "payment_methods"):
 @admin_required
 def admin_update_system_settings():
     db = get_db()
-    registration_open = request.form.get("registration_open", "1").strip() == "1"
-    order_expire_hours_raw = request.form.get("order_expire_hours", "").strip()
-    gift_duration_raw = request.form.get("gift_duration_months", "").strip()
-    gift_traffic_raw = request.form.get("gift_traffic_gb", "").strip()
+    registration_open = False
+    order_expire_hours_raw = request.form.get("order_expire_hours", "24").strip() or "24"
+    gift_duration_raw = request.form.get("gift_duration_months", "0").strip() or "0"
+    gift_traffic_raw = request.form.get("gift_traffic_gb", "0").strip() or "0"
     telegram_contact = request.form.get("telegram_contact", "").strip()
-    site_title = request.form.get("site_title", "").strip()
 
     try:
         order_expire_hours = parse_int_setting(order_expire_hours_raw, 24, min_value=1)
@@ -13237,25 +10204,24 @@ def admin_update_system_settings():
         gift_traffic_gb = parse_int_setting(gift_traffic_raw, 0, min_value=0)
     except Exception:
         flash("系统设置参数无效。", "error")
-        return redirect(url_for("admin_settings"))
+        return redirect(url_for("admin_subscriptions"))
 
-    if not site_title:
-        flash("站点标题不能为空。", "error")
-        return redirect(url_for("admin_settings"))
     if order_expire_hours <= 0:
         flash("订单过期小时数必须大于 0。", "error")
-        return redirect(url_for("admin_settings"))
+        return redirect(url_for("admin_subscriptions"))
 
     upsert_app_setting(db, SETTING_REGISTRATION_OPEN, "1" if registration_open else "0")
     upsert_app_setting(db, SETTING_ORDER_EXPIRE_HOURS, str(order_expire_hours))
     upsert_app_setting(db, SETTING_GIFT_DURATION_MONTHS, str(gift_duration_months))
     upsert_app_setting(db, SETTING_GIFT_TRAFFIC_GB, str(gift_traffic_gb))
     upsert_app_setting(db, SETTING_TELEGRAM_CONTACT, telegram_contact[:160])
-    upsert_app_setting(db, SETTING_SITE_TITLE, site_title[:120])
-    upsert_app_setting(db, SETTING_WIREGUARD_OPEN, "0")
-    upsert_app_setting(db, SETTING_OPENVPN_OPEN, "0")
+    upsert_app_setting(db, SETTING_LEGACY_VPN_OPEN, "0")
+    upsert_app_setting(db, SETTING_OPENVPN_OPEN, "1")
     db.commit()
     flash("系统设置已更新。", "success")
+    redirect_to = (request.form.get("redirect_to", "") or "").strip()
+    if redirect_to == "admin_subscriptions":
+        return redirect(url_for("admin_subscriptions"))
     return redirect(url_for("admin_settings"))
 
 
@@ -13263,6 +10229,9 @@ def admin_update_system_settings():
 @login_required
 @admin_required
 def admin_update_payment_settings():
+    flash("公司内部模式已取消支付设置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     receive_address = request.form.get("usdt_receive_address", "").strip()
     network = request.form.get("usdt_default_network", "TRC20").strip().upper()
@@ -13285,6 +10254,9 @@ def admin_update_payment_settings():
 @login_required
 @admin_required
 def admin_create_payment_method():
+    flash("公司内部模式已取消付款方式配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     method_code = normalize_payment_method(request.form.get("method_code", PAYMENT_METHOD_USDT))
     method_name = request.form.get("method_name", "").strip()
@@ -13372,6 +10344,9 @@ def admin_create_payment_method():
 @login_required
 @admin_required
 def admin_save_payment_method():
+    flash("公司内部模式已取消付款方式配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     method_id_raw = (request.form.get("method_id", "") or "").strip()
     method_id: int | None = None
@@ -13504,6 +10479,9 @@ def admin_save_payment_method():
 @login_required
 @admin_required
 def admin_toggle_payment_method(method_id: int):
+    flash("公司内部模式已取消付款方式配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     method = db.execute(
         """
@@ -13541,6 +10519,9 @@ def admin_toggle_payment_method(method_id: int):
 @login_required
 @admin_required
 def admin_update_payment_method(method_id: int):
+    flash("公司内部模式已取消付款方式配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     method = db.execute(
         """
@@ -13610,6 +10591,9 @@ def admin_update_payment_method(method_id: int):
 @login_required
 @admin_required
 def admin_delete_payment_method(method_id: int):
+    flash("公司内部模式已取消付款方式配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     method = db.execute(
         """
@@ -13635,6 +10619,9 @@ def admin_delete_payment_method(method_id: int):
 @login_required
 @admin_required
 def admin_create_plan():
+    flash("公司内部模式已取消套餐配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     plan_name = request.form.get("plan_name", "").strip()
     billing_mode = normalize_plan_mode(request.form.get("billing_mode", "duration"))
@@ -13727,6 +10714,9 @@ def admin_create_plan():
 @login_required
 @admin_required
 def admin_update_plan(plan_id: int):
+    flash("公司内部模式已取消套餐配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     existing_plan = db.execute(
         """
@@ -13839,6 +10829,9 @@ def admin_update_plan(plan_id: int):
 @login_required
 @admin_required
 def admin_toggle_plan(plan_id: int):
+    flash("公司内部模式已取消套餐配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     plan = db.execute(
         "SELECT id, plan_name, is_active FROM subscription_plans WHERE id = ?",
@@ -13870,6 +10863,9 @@ def admin_toggle_plan(plan_id: int):
 @login_required
 @admin_required
 def admin_delete_plan(plan_id: int):
+    flash("公司内部模式已取消套餐配置。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     plan = db.execute(
         """
@@ -13890,10 +10886,118 @@ def admin_delete_plan(plan_id: int):
     return redirect(url_for("admin_payment_settings"))
 
 
+@app.route("/admin/users/create", methods=["POST"])
+@login_required
+@admin_required
+def admin_create_user():
+    username = (request.form.get("username", "") or "").strip()
+    password = (request.form.get("password", "") or "").strip()
+    allowed_server_ids_raw = request.form.getlist("allowed_server_ids")
+
+    if not looks_like_internal_username(username):
+        flash("用户名格式不正确：请使用 3-32 位字母、数字、下划线、点或短横线。", "error")
+        return redirect_admin_subscriptions()
+    if len(password) < 8:
+        flash("请设置至少 8 位客户端登录密码。", "error")
+        return redirect_admin_subscriptions()
+    allowed_server_ids = [int(item) for item in allowed_server_ids_raw if str(item).isdigit()]
+    if not allowed_server_ids:
+        flash("请至少选择一台可连接服务器。", "error")
+        return redirect_admin_subscriptions()
+
+    db = get_db()
+    try:
+        now_iso = utcnow_iso()
+        begin_immediate(db)
+        for allowed_server_id in allowed_server_ids:
+            server = get_server_by_id(db, allowed_server_id)
+            if not server or not is_runtime_server_ready(server):
+                db.rollback()
+                flash("请选择在线可用服务器。", "error")
+                return redirect_admin_subscriptions()
+            if not normalize_domain_host(row_get(server, "domain", "")):
+                db.rollback()
+                flash("所选服务器未配置客户端连接域名。", "error")
+                return redirect_admin_subscriptions()
+        cursor = db.execute(
+            """
+            INSERT INTO users (
+                username, email, password_hash, role, status,
+                email_verified, preferred_server_id, assigned_server_id,
+                created_at, approved_at, subscription_expires_at,
+                vpn_enabled, preferred_billing_mode, traffic_quota_bytes,
+                traffic_used_bytes, traffic_last_total_bytes,
+                force_password_change, session_version, client_config_token
+            )
+            VALUES (?, ?, ?, 'user', 'approved', 1, ?, ?, ?, ?, NULL, 0, 'duration', 0, 0, 0, 0, 1, ?)
+            RETURNING id
+            """,
+            (
+                username,
+                username,
+                generate_password_hash(password),
+                None,
+                None,
+                now_iso,
+                now_iso,
+                generate_client_config_token(),
+            ),
+        )
+        user_id = int(cursor.fetchone()["id"])
+        save_user_server_permissions(db, user_id, allowed_server_ids)
+        db.execute(
+            """
+            UPDATE users
+            SET approved_at = ?,
+                vpn_enabled = 1,
+                status = 'approved'
+            WHERE id = ?
+            """,
+            (now_iso, user_id),
+        )
+        db.commit()
+        flash(f"内部账号 {username} 已创建并启用。", "success")
+    except DB_INTEGRITY_ERRORS:
+        db.rollback()
+        flash("该用户名已存在。", "error")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        flash(f"创建用户失败：{exc}", "error")
+    return redirect_admin_subscriptions()
+
+
+@app.route("/admin/users/<int:user_id>/servers", methods=["POST"])
+@login_required
+@admin_required
+def admin_update_user_server_permissions(user_id: int):
+    db = get_db()
+    user = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+        (int(user_id),),
+    ).fetchone()
+    if not user:
+        flash("用户不存在。", "error")
+        return redirect_admin_subscriptions()
+    server_ids = [int(item) for item in request.form.getlist("allowed_server_ids") if str(item).isdigit()]
+    if not server_ids:
+        flash("请至少选择一台服务器。", "error")
+        return redirect_admin_subscriptions()
+    save_user_server_permissions(db, int(user_id), server_ids)
+    db.commit()
+    flash(f"已更新 {user['username']} 的服务器权限。", "success")
+    return redirect_admin_subscriptions()
+
+
 @app.route("/admin/users/<int:user_id>/set-expiry", methods=["POST"])
 @login_required
 @admin_required
 def admin_set_user_expiry(user_id: int):
+    flash("公司内部模式已取消账号有效期，请使用启用/停用控制账号。", "error")
+    return redirect_admin_subscriptions()
+
     expires_raw = request.form.get("expires_at_local", "").strip()
     if not expires_raw:
         flash("请选择到期时间。", "error")
@@ -13911,7 +11015,7 @@ def admin_set_user_expiry(user_id: int):
         """
         SELECT *
         FROM users
-        WHERE id = ? AND role = 'user'
+        WHERE id = ? AND role IN ('user', 'admin')
         LIMIT 1
         """,
         (user_id,),
@@ -13931,26 +11035,26 @@ def admin_set_user_expiry(user_id: int):
             db.execute(
                 """
                 UPDATE users
-                SET assigned_ip = ?,
+                SET vpn_internal_ip = ?,
                     assigned_server_id = ?,
-                    client_private_key = ?,
-                    client_public_key = ?,
-                    client_psk = ?,
-                    config_path = ?,
-                    qr_path = ?,
+                    archived_private_token = ?,
+                    archived_public_token = ?,
+                    archived_shared_token = ?,
+                    archived_profile_file = ?,
+                    archived_qr_file = ?,
                     approved_at = ?,
                     subscription_expires_at = ?,
-                    wg_enabled = 1
+                    vpn_enabled = 1
                 WHERE id = ?
                 """,
                 (
-                    vpn_data["assigned_ip"],
+                    vpn_data["vpn_internal_ip"],
                     assigned_server_id,
-                    vpn_data["client_private_key"],
-                    vpn_data["client_public_key"],
-                    vpn_data["client_psk"],
-                    vpn_data["config_path"],
-                    vpn_data["qr_path"],
+                    vpn_data["archived_private_token"],
+                    vpn_data["archived_public_token"],
+                    vpn_data["archived_shared_token"],
+                    vpn_data["archived_profile_file"],
+                    vpn_data["archived_qr_file"],
                     utcnow_iso(),
                     expires_iso,
                     user_id,
@@ -13963,15 +11067,15 @@ def admin_set_user_expiry(user_id: int):
             )
             return redirect_admin_subscriptions()
 
-        if user["client_public_key"]:
-            remove_wireguard_peer(user["client_public_key"], user=user)
+        if user["archived_public_token"]:
+            remove_legacy_peer(user["archived_public_token"], user=user)
         if is_dynamic_ip_assignment_mode():
             db.execute(
                 """
                 UPDATE users
                 SET subscription_expires_at = ?,
-                    wg_enabled = 0,
-                    assigned_ip = NULL
+                    vpn_enabled = 0,
+                    vpn_internal_ip = NULL
                 WHERE id = ?
                 """,
                 (expires_iso, user_id),
@@ -13981,7 +11085,7 @@ def admin_set_user_expiry(user_id: int):
                 """
                 UPDATE users
                 SET subscription_expires_at = ?,
-                    wg_enabled = 0
+                    vpn_enabled = 0
                 WHERE id = ?
                 """,
                 (expires_iso, user_id),
@@ -14007,7 +11111,7 @@ def admin_delete_user(user_id: int):
     db = get_db()
     user = db.execute(
         """
-        SELECT id, username, email, role, assigned_server_id, client_public_key, config_path, qr_path
+        SELECT id, username, email, role, assigned_server_id, archived_public_token, archived_profile_file, archived_qr_file
         FROM users
         WHERE id = ? AND role = 'user'
         LIMIT 1
@@ -14017,23 +11121,23 @@ def admin_delete_user(user_id: int):
     if not user:
         flash("用户不存在。", "error")
         return redirect_admin_subscriptions()
-    confirm_email = (request.form.get("confirm_email", "") or "").strip().lower()
-    expected_email = ((user["email"] or "").strip()).lower()
-    if not confirm_email or confirm_email != expected_email:
-        flash("删除失败：请输入用户邮箱进行二次确认。", "error")
+    confirm_username = (request.form.get("confirm_username", "") or "").strip()
+    expected_username = ((user["username"] or "").strip())
+    if not confirm_username or confirm_username != expected_username:
+        flash("删除失败：请输入用户名进行二次确认。", "error")
         return redirect_admin_subscriptions()
 
     try:
-        if user["client_public_key"]:
-            remove_wireguard_peer(user["client_public_key"], user=user)
+        if user["archived_public_token"]:
+            remove_legacy_peer(user["archived_public_token"], user=user)
 
-        config_path = (user["config_path"] or "").strip()
-        if config_path:
-            Path(config_path).unlink(missing_ok=True)
+        archived_profile_file = (user["archived_profile_file"] or "").strip()
+        if archived_profile_file:
+            Path(archived_profile_file).unlink(missing_ok=True)
 
-        qr_path = (user["qr_path"] or "").strip()
-        if qr_path:
-            Path(qr_path).unlink(missing_ok=True)
+        archived_qr_file = (user["archived_qr_file"] or "").strip()
+        if archived_qr_file:
+            Path(archived_qr_file).unlink(missing_ok=True)
 
         db.execute("DELETE FROM payment_orders WHERE user_id = ?", (user_id,))
         db.execute("DELETE FROM email_verifications WHERE email = ?", (user["email"],))
@@ -14060,9 +11164,10 @@ def admin_disable_user(user_id: int):
             id,
             username,
             role,
+            status,
             assigned_server_id,
-            client_public_key,
-            wg_enabled,
+            archived_public_token,
+            vpn_enabled,
             subscription_expires_at,
             preferred_billing_mode,
             traffic_quota_bytes,
@@ -14079,20 +11184,17 @@ def admin_disable_user(user_id: int):
         return redirect_admin_subscriptions()
 
     user = sync_user_traffic_usage(db, user)
-    if has_active_traffic_subscription(user):
-        flash(f"用户 {user['username']} 仍有未用完的流量套餐，不能停用。", "error")
-        return redirect_admin_subscriptions()
-
     try:
-        if user["client_public_key"]:
-            remove_wireguard_peer(user["client_public_key"], user=user)
+        if user["archived_public_token"]:
+            remove_legacy_peer(user["archived_public_token"], user=user)
 
         if is_dynamic_ip_assignment_mode():
             db.execute(
                 """
                 UPDATE users
-                SET wg_enabled = 0,
-                    assigned_ip = NULL
+                SET status = 'disabled',
+                    vpn_enabled = 0,
+                    vpn_internal_ip = NULL
                 WHERE id = ? AND role = 'user'
                 """,
                 (user_id,),
@@ -14101,14 +11203,15 @@ def admin_disable_user(user_id: int):
             db.execute(
                 """
                 UPDATE users
-                SET wg_enabled = 0
+                SET status = 'disabled',
+                    vpn_enabled = 0
                 WHERE id = ? AND role = 'user'
                 """,
                 (user_id,),
             )
         db.commit()
 
-        if int(user["wg_enabled"] or 0) == 0:
+        if (row_get(user, "status", "approved") or "approved").strip().lower() == "disabled":
             flash(f"用户 {user['username']} 已是停用状态。", "success")
         else:
             flash(f"用户 {user['username']} 已停用。", "success")
@@ -14140,10 +11243,6 @@ def admin_enable_user(user_id: int):
         return redirect_admin_subscriptions()
 
     user = sync_user_traffic_usage(db, user)
-    if not (has_active_time_subscription(user) or has_active_traffic_subscription(user)):
-        flash(f"用户 {user['username']} 没有可用的时长或流量权益，无法启用。", "error")
-        return redirect_admin_subscriptions()
-
     try:
         vpn_data = ensure_user_vpn_ready(db, user)
         assigned_server_id = vpn_data.get("assigned_server_id")
@@ -14152,25 +11251,27 @@ def admin_enable_user(user_id: int):
         db.execute(
             """
             UPDATE users
-            SET assigned_ip = ?,
+            SET vpn_internal_ip = ?,
                 assigned_server_id = ?,
-                client_private_key = ?,
-                client_public_key = ?,
-                client_psk = ?,
-                config_path = ?,
-                qr_path = ?,
+                archived_private_token = ?,
+                archived_public_token = ?,
+                archived_shared_token = ?,
+                archived_profile_file = ?,
+                archived_qr_file = ?,
                 approved_at = ?,
-                wg_enabled = 1
+                subscription_expires_at = NULL,
+                status = 'approved',
+                vpn_enabled = 1
             WHERE id = ?
             """,
             (
-                vpn_data["assigned_ip"],
+                vpn_data["vpn_internal_ip"],
                 assigned_server_id,
-                vpn_data["client_private_key"],
-                vpn_data["client_public_key"],
-                vpn_data["client_psk"],
-                vpn_data["config_path"],
-                vpn_data["qr_path"],
+                vpn_data["archived_private_token"],
+                vpn_data["archived_public_token"],
+                vpn_data["archived_shared_token"],
+                vpn_data["archived_profile_file"],
+                vpn_data["archived_qr_file"],
                 utcnow_iso(),
                 user_id,
             ),
@@ -14183,6 +11284,43 @@ def admin_enable_user(user_id: int):
         except Exception:
             pass
         flash(f"启用用户失败：{exc}", "error")
+    return redirect_admin_subscriptions()
+
+
+@app.route("/admin/users/<int:user_id>/server", methods=["POST"])
+@login_required
+@admin_required
+def admin_set_user_server(user_id: int):
+    server_id_raw = (request.form.get("server_id", "") or "").strip()
+    if not server_id_raw.isdigit():
+        flash("请选择有效的服务器。", "error")
+        return redirect_admin_subscriptions()
+
+    db = get_db()
+    try:
+        begin_immediate(db)
+        ok, message = apply_user_server_switch(
+            db,
+            user_id=user_id,
+            server_id=int(server_id_raw),
+            row_get=row_get,
+            get_server_by_id=get_server_by_id,
+            is_runtime_server_ready=is_runtime_server_ready,
+            ensure_user_vpn_ready=ensure_user_vpn_ready,
+            utcnow_iso=utcnow_iso,
+        )
+        if not ok:
+            db.rollback()
+            flash(message, "error")
+            return redirect_admin_subscriptions()
+        db.commit()
+        flash(message, "success")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        flash(f"切换服务器失败：{exc}", "error")
     return redirect_admin_subscriptions()
 
 
@@ -14212,7 +11350,7 @@ def admin_reset_user_password(user_id: int):
     try:
         begin_immediate(db)
         latest_user = db.execute(
-            "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+            "SELECT * FROM users WHERE id = ? AND role IN ('user', 'admin') LIMIT 1",
             (user_id,),
         ).fetchone()
         if not latest_user:
@@ -14227,7 +11365,10 @@ def admin_reset_user_password(user_id: int):
             rotate_vpn=True,
         )
         db.commit()
-        flash(f"已重置用户 {latest_user['username']} 的密码，并断开其旧 VPN 会话。", "success")
+        if row_get(latest_user, "role") == "admin":
+            flash(f"已修改管理员 {latest_user['username']} 的密码。", "success")
+        else:
+            flash(f"已重置用户 {latest_user['username']} 的密码，并断开其旧 VPN 会话。", "success")
     except Exception as exc:
         try:
             db.rollback()
@@ -14241,6 +11382,9 @@ def admin_reset_user_password(user_id: int):
 @login_required
 @admin_required
 def admin_cancel_pending_order(order_id: int):
+    flash("公司内部模式已取消订单支付。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     order = db.execute(
         """
@@ -14278,6 +11422,9 @@ def admin_cancel_pending_order(order_id: int):
 @login_required
 @admin_required
 def admin_mark_order_paid(order_id: int):
+    flash("公司内部模式已取消订单支付。", "error")
+    return redirect(url_for("admin_subscriptions"))
+
     db = get_db()
     try:
         result = settle_order_paid(
@@ -14307,6 +11454,8 @@ def admin_mark_order_paid(order_id: int):
 
 @app.route("/webhook/usdt", methods=["POST"])
 def usdt_payment_webhook():
+    return {"ok": False, "error": "payment_disabled"}, 404
+
     raw_body = request.get_data(cache=True) or b""
     signature = request.headers.get("X-Webhook-Signature", "") or request.headers.get(
         "X-Signature", ""
@@ -14416,6 +11565,1174 @@ def usdt_payment_webhook():
         return {"ok": False, "error": f"内部错误：{exc}"}, 500
 
 
+def generate_client_config_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def ensure_user_client_config_token(db: DatabaseConnection, user: DatabaseRow) -> str:
+    existing = (row_get(user, "client_config_token", "") or "").strip()
+    if existing:
+        return existing
+    token = generate_client_config_token()
+    db.execute(
+        "UPDATE users SET client_config_token = ? WHERE id = ?",
+        (token, int(user["id"])),
+    )
+    db.commit()
+    return token
+
+
+def extract_client_config_token() -> str:
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    return (request.args.get("token") or "").strip()
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    clean = (value or "").strip()
+    return base64.urlsafe_b64decode(clean + "=" * ((4 - len(clean) % 4) % 4))
+
+
+def _client_auth_message(method: str, path: str, timestamp: str) -> bytes:
+    return f"{method.upper()}\n{path}\n{timestamp}".encode("utf-8")
+
+
+CLIENT_GLOBAL_CRYPTO_KEY_DEFAULT = "company-vpn-global-client-key-v1-20260621"
+CLIENT_GLOBAL_CRYPTO_KEY = (
+    os.environ.get("COMPANYVPN_CLIENT_GLOBAL_KEY", CLIENT_GLOBAL_CRYPTO_KEY_DEFAULT).strip()
+    or CLIENT_GLOBAL_CRYPTO_KEY_DEFAULT
+)
+CLIENT_LOGIN_WINDOW_SECONDS = 60
+
+
+def _client_global_key_bytes() -> bytes:
+    return hashlib.sha256(CLIENT_GLOBAL_CRYPTO_KEY.encode("utf-8")).digest()
+
+
+def _client_login_slug_for_window(window_index: int) -> str:
+    digest = hmac.new(
+        CLIENT_GLOBAL_CRYPTO_KEY.encode("utf-8"),
+        f"login:{int(window_index)}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    return _b64url_encode(digest)[:32]
+
+
+def is_valid_client_login_slug(slug: str) -> bool:
+    clean = (slug or "").strip()
+    if not clean:
+        return False
+    now_window = int(utcnow().timestamp()) // CLIENT_LOGIN_WINDOW_SECONDS
+    for offset in (-1, 0, 1):
+        if hmac.compare_digest(clean, _client_login_slug_for_window(now_window + offset)):
+            return True
+    return False
+
+
+def _verify_client_signed_auth(token: str) -> bool:
+    clean_token = (token or "").strip()
+    timestamp = (request.headers.get("X-CompanyVPN-Auth-Time") or "").strip()
+    signature = (request.headers.get("X-CompanyVPN-Auth-Signature") or "").strip()
+    if not clean_token or not timestamp or not signature:
+        return False
+    try:
+        auth_time = int(timestamp)
+    except ValueError:
+        return False
+    now = int(utcnow().timestamp())
+    if abs(now - auth_time) > 300:
+        return False
+    expected = hmac.new(
+        clean_token.encode("utf-8"),
+        _client_auth_message(request.method, request.path, timestamp),
+        hashlib.sha256,
+    ).digest()
+    try:
+        supplied = _b64url_decode(signature)
+    except Exception:
+        return False
+    return hmac.compare_digest(expected, supplied)
+
+
+def encrypt_client_api_payload(payload: dict, token: str) -> dict:
+    if (request.headers.get("X-CompanyVPN-Encrypted") or "").strip().lower() != "v1":
+        return payload
+    key = _client_global_key_bytes()
+    nonce = secrets.token_bytes(12)
+    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+    return {
+        "ok": True,
+        "encrypted": "v1",
+        "nonce": _b64url_encode(nonce),
+        "payload": _b64url_encode(ciphertext),
+    }
+
+
+def encrypt_login_api_payload(payload: dict) -> dict:
+    key = _client_global_key_bytes()
+    nonce = secrets.token_bytes(12)
+    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+    return {
+        "ok": True,
+        "encrypted": "login-v1",
+        "nonce": _b64url_encode(nonce),
+        "payload": _b64url_encode(ciphertext),
+    }
+
+
+def resolve_client_config_user(db: DatabaseConnection, username: str, token: str):
+    clean_username = (username or "").strip()
+    clean_token = (token or "").strip()
+    if not clean_username:
+        return None
+    user = db.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE username = ? AND role = 'user'
+        LIMIT 1
+        """,
+        (clean_username,),
+    ).fetchone()
+    if not user:
+        return None
+    stored_token = (row_get(user, "client_config_token", "") or "").strip()
+    if not stored_token:
+        return None
+    if clean_token and hmac.compare_digest(stored_token, clean_token):
+        return user
+    if not clean_token and _verify_client_signed_auth(stored_token):
+        return user
+    return None
+
+
+def generate_ssh_cleanup_token(server_id: int, temp_username: str, username: str) -> str:
+    payload = {
+        "server_id": int(server_id),
+        "temp_username": (temp_username or "").strip(),
+        "username": (username or "").strip(),
+        "exp": int(utcnow().timestamp()) + 3600,
+    }
+    body = _b64url_encode(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    secret = str(app.config.get("SECRET_KEY") or PORTAL_SECRET_KEY).encode("utf-8")
+    signature = _b64url_encode(hmac.new(secret, body.encode("utf-8"), hashlib.sha256).digest())
+    return f"{body}.{signature}"
+
+
+def verify_ssh_cleanup_token(token: str) -> dict | None:
+    clean = (token or "").strip()
+    if "." not in clean:
+        return None
+    body, signature = clean.rsplit(".", 1)
+    secret = str(app.config.get("SECRET_KEY") or PORTAL_SECRET_KEY).encode("utf-8")
+    expected = _b64url_encode(hmac.new(secret, body.encode("utf-8"), hashlib.sha256).digest())
+    if not hmac.compare_digest(expected, signature):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    except Exception:
+        return None
+    if int(payload.get("exp") or 0) < int(utcnow().timestamp()):
+        return None
+    temp_username = (payload.get("temp_username") or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,30}", temp_username or ""):
+        return None
+    return payload
+
+
+def build_client_bootstrap_payload(user: DatabaseRow, token: str) -> dict:
+    username = row_get(user, "username", "")
+    profiles = []
+    try:
+        db = get_db()
+        target_servers = load_user_allowed_runtime_servers(db, user)
+    except Exception:
+        target_servers = []
+    if not target_servers:
+        target_servers = [None]
+    for target_server in target_servers:
+        server_info = serialize_runtime_server(target_server)
+        server_id = int(row_get(target_server, "id", 0) or 0) if target_server else 0
+        server_label = (
+            row_get(target_server, "domain", "")
+            or row_get(target_server, "host", "")
+            or row_get(target_server, "server_name", "")
+            or "服务器"
+        )
+        server_query = {"server_id": server_id} if server_id else {}
+        if server_supports_ssh_tunnel(target_server):
+            profiles.append(
+                {
+                    "id": f"server-{server_id}-ssh-tunnel" if server_id else "ssh-tunnel",
+                    "name": f"{server_label} / SSH Tunnel",
+                    "type": "ssh-tunnel",
+                    "update_url": url_for(
+                        "client_profile_config",
+                        username=username,
+                        profile_type="ssh-tunnel",
+                        _external=True,
+                        **server_query,
+                    ),
+                    "online_url": url_for(
+                        "client_online_heartbeat",
+                        username=username,
+                        _external=True,
+                    ),
+                    "update_token": token,
+                    "server": server_info,
+                }
+            )
+    server_info = serialize_runtime_server(target_servers[0] if target_servers else None)
+    return {
+        "schema": "company-vpn-client.v1",
+        "name": f"company-user-{username}",
+        "account": username,
+        "bootstrap_update_url": url_for(
+            "client_bootstrap_config",
+            username=username,
+            _external=True,
+        ),
+        "update_token": token,
+        "server": server_info,
+        "profiles": profiles,
+    }
+
+
+def generate_ssh_tunnel_key_pair(username: str) -> tuple[str, str]:
+    key = ed25519.Ed25519PrivateKey.generate()
+    private_key = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+    public_key = key.public_key().public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    ).decode("utf-8")
+    comment = safe_name(username or "user")[:24] or "user"
+    return private_key, f"{public_key} companyvpn-{comment}"
+
+
+def build_ssh_tunnel_install_script(temp_username: str, public_key: str) -> str:
+    user_q = shlex.quote(temp_username)
+    pub_q = shlex.quote(public_key)
+    return textwrap.dedent(
+	        f"""\
+	        set -euo pipefail
+	        if command -v flock >/dev/null 2>&1; then
+	          exec 9>/run/companyvpn-ssh-user.lock
+	          flock -w 45 9
+	        fi
+	        tunnel_user={user_q}
+	        public_key={pub_q}
+	        home_dir="/home/${{tunnel_user}}"
+        if ! id "${{tunnel_user}}" >/dev/null 2>&1; then
+          useradd -m -s /bin/sh "${{tunnel_user}}"
+        fi
+        install -d -m 700 -o "${{tunnel_user}}" -g "${{tunnel_user}}" "${{home_dir}}/.ssh"
+        auth_file="${{home_dir}}/.ssh/authorized_keys"
+        touch "${{auth_file}}"
+        chmod 600 "${{auth_file}}"
+        chown "${{tunnel_user}}:${{tunnel_user}}" "${{auth_file}}"
+        key_line="no-pty,no-agent-forwarding,no-X11-forwarding ${{public_key}}"
+        if ! grep -qxF "${{key_line}}" "${{auth_file}}"; then
+          printf '%s\\n' "${{key_line}}" >> "${{auth_file}}"
+        fi
+        chown "${{tunnel_user}}:${{tunnel_user}}" "${{auth_file}}"
+        if command -v systemd-run >/dev/null 2>&1; then
+          unit_name="companyvpn-clean-${{tunnel_user}}"
+          systemd-run --quiet --unit="${{unit_name}}" --on-active=1h /usr/sbin/userdel -f -r "${{tunnel_user}}" >/dev/null 2>&1 || true
+        else
+          nohup sh -c "sleep 3600; /usr/sbin/userdel -f -r {user_q} >/dev/null 2>&1 || true" >/dev/null 2>&1 &
+        fi
+        printf 'ready:%s\\n' "${{tunnel_user}}"
+        """
+    ).strip()
+
+
+def build_ssh_tunnel_cleanup_script(temp_username: str) -> str:
+    user_q = shlex.quote(temp_username)
+    return textwrap.dedent(
+	        f"""\
+	        set -euo pipefail
+	        if command -v flock >/dev/null 2>&1; then
+	          exec 9>/run/companyvpn-ssh-user.lock
+	          flock -w 45 9
+	        fi
+	        tunnel_user={user_q}
+	        if id "${{tunnel_user}}" >/dev/null 2>&1; then
+          home_dir="$(getent passwd "${{tunnel_user}}" | cut -d: -f6 || true)"
+          if [ -n "${{home_dir}}" ]; then
+            rm -f "${{home_dir}}/.ssh/authorized_keys" >/dev/null 2>&1 || true
+          fi
+          passwd -l "${{tunnel_user}}" >/dev/null 2>&1 || true
+          usermod -L -s /usr/sbin/nologin "${{tunnel_user}}" >/dev/null 2>&1 || true
+          /usr/sbin/userdel -f -r "${{tunnel_user}}" >/dev/null 2>&1 || true
+          if id "${{tunnel_user}}" >/dev/null 2>&1; then
+            nohup sh -c "sleep 1800; /usr/sbin/userdel -f -r {user_q} >/dev/null 2>&1 || true" >/dev/null 2>&1 &
+          fi
+        fi
+        printf 'cleaned:%s\\n' "${{tunnel_user}}"
+        """
+    ).strip()
+
+
+def build_user_ssh_tunnel_config(
+    db: DatabaseConnection,
+    user: DatabaseRow,
+    server_row: DatabaseRow,
+) -> str:
+    if not server_supports_ssh_tunnel(server_row):
+        raise RuntimeError("SSH Tunnel is disabled for this server")
+    admin_host = normalize_remote_host(row_get(server_row, "host", ""))
+    admin_port = normalize_server_port(row_get(server_row, "port", 22), 22)
+    admin_username = (row_get(server_row, "username", "") or "").strip()
+    admin_password = row_get(server_row, "password", "") or ""
+    admin_private_key = (row_get(server_row, "ssh_private_key", "") or "").strip()
+    if not admin_host or not admin_username or (not admin_password and not admin_private_key):
+        raise RuntimeError("服务器连接信息不完整，无法创建 SSH Tunnel 临时用户。")
+
+    user_id = int(row_get(user, "id", 0) or 0)
+    temp_username = f"cvpn{user_id}{secrets.token_hex(4)}"[:31]
+    private_key, public_key = generate_ssh_tunnel_key_pair(row_get(user, "username", ""))
+    ok, message = run_remote_ssh_script(
+        host=admin_host,
+        port=admin_port,
+        username=admin_username,
+        password=admin_password,
+        private_key_text=admin_private_key,
+        script=build_ssh_tunnel_install_script(temp_username, public_key),
+        timeout=30,
+    )
+    if not ok:
+        raise RuntimeError(message)
+
+    endpoint_host = host_without_optional_port(row_get(server_row, "domain", "")) or admin_host
+    server_id = int(row_get(server_row, "id", 0) or 0)
+    config_obj = {
+        "host": endpoint_host,
+        "port": admin_port,
+        "username": temp_username,
+        "private_key": private_key,
+        "local_socks": "127.0.0.1:7890",
+        "expires_in_seconds": 3600,
+        "cleanup_url": url_for("client_ssh_tunnel_cleanup", _external=True),
+        "cleanup_token": generate_ssh_cleanup_token(
+            server_id,
+            temp_username,
+            row_get(user, "username", ""),
+        ),
+    }
+    return json.dumps(config_obj, ensure_ascii=False, indent=2) + "\n"
+
+
+@app.route("/client-api/login", methods=["POST"])
+def client_password_login_legacy_blocked():
+    return {"ok": False, "error": "not found"}, 404
+
+
+@app.route("/client-api/time")
+def client_api_time():
+    nonce = secrets.token_urlsafe(12)
+    now_ts = int(utcnow().timestamp())
+    signature = _b64url_encode(
+        hmac.new(
+            CLIENT_GLOBAL_CRYPTO_KEY.encode("utf-8"),
+            f"time:{now_ts}:{nonce}".encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    )
+    return {
+        "ok": True,
+        "server_time": now_ts,
+        "nonce": nonce,
+        "signature": signature,
+    }
+
+
+@app.route("/client-api/session/<login_slug>", methods=["POST"])
+def client_password_login(login_slug: str):
+    if not is_valid_client_login_slug(login_slug):
+        return {"ok": False, "error": "not found"}, 404
+    payload = request.get_json(silent=True) or request.form
+    username = (payload.get("username", "") or "").strip()
+    password = (payload.get("password", "") or "").strip()
+    if not username or not password:
+        return {"ok": False, "error": "username and password required"}, 400
+
+    db = get_db()
+    user = db.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE username = ? AND role = 'user'
+        LIMIT 1
+        """,
+        (username,),
+    ).fetchone()
+    if not user or not check_password_hash(row_get(user, "password_hash", "") or "", password):
+        return {"ok": False, "error": "用户名或密码错误"}, 401
+    if (row_get(user, "status", "approved") or "approved").strip().lower() == "disabled":
+        return {"ok": False, "error": "账号已停用"}, 403
+    if int(row_get(user, "vpn_enabled", 0) or 0) != 1:
+        return {"ok": False, "error": "VPN 未启用"}, 403
+
+    token = ensure_user_client_config_token(db, user)
+    client_ip = normalize_public_client_ip(get_client_ip())
+    db.execute(
+        """
+        UPDATE users
+        SET last_login_ip = ?,
+            last_login_at = ?
+        WHERE id = ?
+        """,
+        (client_ip, utcnow_iso(), int(user["id"])),
+    )
+    db.commit()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+    bootstrap_payload = build_client_bootstrap_payload(user, token)
+    return encrypt_login_api_payload(bootstrap_payload)
+
+
+@app.route("/client-api/bootstrap/<username>")
+def client_bootstrap_config(username: str):
+    db = get_db()
+    user = resolve_client_config_user(db, username, extract_client_config_token())
+    if not user:
+        return {"ok": False, "error": "invalid token"}, 401
+    client_token = (row_get(user, "client_config_token", "") or "").strip()
+    if (row_get(user, "status", "approved") or "approved").strip().lower() == "disabled":
+        return encrypt_client_api_payload({"ok": False, "error": "account disabled"}, client_token), 403
+    if int(row_get(user, "vpn_enabled", 0) or 0) != 1:
+        return encrypt_client_api_payload({"ok": False, "error": "vpn disabled"}, client_token), 403
+    reconcile_expired_subscriptions(db)
+    user = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+    client_token = (row_get(user, "client_config_token", "") or "").strip() if user else client_token
+    if not user:
+        return encrypt_client_api_payload({"ok": False, "error": "account disabled"}, client_token), 403
+    return encrypt_client_api_payload(build_client_bootstrap_payload(user, client_token), client_token)
+
+
+@app.route("/client-api/online/<username>", methods=["POST"])
+def client_online_heartbeat(username: str):
+    db = get_db()
+    user = resolve_client_config_user(db, username, extract_client_config_token())
+    if not user:
+        return {"ok": False, "error": "invalid token"}, 401
+    if (row_get(user, "status", "approved") or "approved").strip().lower() == "disabled":
+        return {"ok": False, "error": "account disabled"}, 403
+    if int(row_get(user, "vpn_enabled", 0) or 0) != 1:
+        return {"ok": False, "error": "vpn disabled"}, 403
+
+    payload = request.get_json(silent=True) or request.form
+    status = (payload.get("status", "online") or "online").strip().lower()
+    user_id = int(user["id"])
+    if status in {"offline", "disconnect", "disconnected"}:
+        db.execute("DELETE FROM client_online_sessions WHERE user_id = ?", (user_id,))
+        db.commit()
+        return {"ok": True}
+
+    profile_type = (payload.get("profile_type", "") or "").strip().lower() or "unknown"
+    profile_id = (payload.get("profile_id", "") or "").strip()
+    profile_name = (payload.get("profile_name", "") or "").strip()
+    server_host = (payload.get("server_host", "") or "").strip()
+    endpoint = normalize_public_client_ip(get_client_ip()) or (row_get(user, "last_login_ip", "") or "").strip()
+    try:
+        server_id = int(payload.get("server_id") or 0) or None
+    except Exception:
+        server_id = None
+    rx_bytes = to_non_negative_int(payload.get("rx_bytes", 0))
+    tx_bytes = to_non_negative_int(payload.get("tx_bytes", 0))
+    now = utcnow_iso()
+    db.execute(
+        """
+        INSERT INTO client_online_sessions (
+            user_id, username, server_id, server_host, profile_type, profile_id,
+            profile_name, endpoint, rx_bytes, tx_bytes, last_seen_at, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET
+            username = EXCLUDED.username,
+            server_id = EXCLUDED.server_id,
+            server_host = EXCLUDED.server_host,
+            profile_type = EXCLUDED.profile_type,
+            profile_id = EXCLUDED.profile_id,
+            profile_name = EXCLUDED.profile_name,
+            endpoint = EXCLUDED.endpoint,
+            rx_bytes = EXCLUDED.rx_bytes,
+            tx_bytes = EXCLUDED.tx_bytes,
+            last_seen_at = EXCLUDED.last_seen_at
+        """,
+        (
+            user_id,
+            row_get(user, "username", ""),
+            server_id,
+            server_host,
+            profile_type,
+            profile_id,
+            profile_name,
+            endpoint,
+            rx_bytes,
+            tx_bytes,
+            now,
+            now,
+        ),
+    )
+    if endpoint:
+        db.execute(
+            "UPDATE users SET last_login_ip = ?, last_login_at = ? WHERE id = ?",
+            (endpoint, now, user_id),
+        )
+    db.commit()
+    return {"ok": True}
+
+
+@app.route("/admin/users/<int:user_id>/client-bootstrap")
+@login_required
+@admin_required
+def admin_download_client_bootstrap(user_id: int):
+    db = get_db()
+    user = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+        (int(user_id),),
+    ).fetchone()
+    if not user:
+        flash("用户不存在。", "error")
+        return redirect_admin_subscriptions()
+    token = ensure_user_client_config_token(db, user)
+    payload = build_client_bootstrap_payload(user, token)
+    filename = f"company-vpn-{safe_name(user['username'])}.json"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return Response(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        headers=headers,
+        mimetype="application/json; charset=utf-8",
+    )
+
+
+CLIENT_BUILD_LOG_FILE = DATA_DIR / "client-build.log"
+CLIENT_BUILD_STATE_FILE = DATA_DIR / "client-build-state.json"
+CLIENT_BUILD_LOCK = threading.Lock()
+
+
+def append_client_build_log(message: str) -> None:
+    CLIENT_BUILD_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    text = (message or "").rstrip()
+    with CLIENT_BUILD_LOG_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(f"{timestamp}  {text}\n")
+
+
+def read_client_build_log() -> str:
+    if not CLIENT_BUILD_LOG_FILE.exists():
+        return ""
+    data = CLIENT_BUILD_LOG_FILE.read_text(encoding="utf-8", errors="replace")
+    return data[-60000:]
+
+
+def save_client_build_state(state: dict) -> None:
+    CLIENT_BUILD_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CLIENT_BUILD_STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def read_client_build_state() -> dict:
+    if not CLIENT_BUILD_STATE_FILE.exists():
+        return {"running": False, "ok": None, "message": "", "started_at": "", "finished_at": ""}
+    try:
+        state = json.loads(CLIENT_BUILD_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"running": False, "ok": None, "message": "", "started_at": "", "finished_at": ""}
+    if not isinstance(state, dict):
+        return {"running": False, "ok": None, "message": "", "started_at": "", "finished_at": ""}
+    state.setdefault("running", False)
+    state.setdefault("ok", None)
+    state.setdefault("message", "")
+    state.setdefault("started_at", "")
+    state.setdefault("finished_at", "")
+    return state
+
+
+def run_logged_process(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict | None = None,
+    log_callback=None,
+) -> tuple[int, str]:
+    if log_callback:
+        log_callback("$ " + " ".join(shlex.quote(str(part)) for part in cmd))
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    output_lines: list[str] = []
+    if process.stdout:
+        for line in process.stdout:
+            text = line.rstrip()
+            output_lines.append(text)
+            if log_callback and text:
+                log_callback(text)
+    return_code = process.wait()
+    if log_callback:
+        log_callback(f"命令结束: exit={return_code}")
+    return return_code, "\n".join(output_lines[-300:])
+
+
+def write_client_package_file(archive: zipfile.ZipFile, path: Path, arcname: str) -> None:
+    if path.name.lower().startswith("readme"):
+        return
+    stored_suffixes = {
+        ".msi",
+        ".zip",
+        ".7z",
+        ".gz",
+        ".xz",
+        ".rar",
+    }
+    compression = (
+        zipfile.ZIP_STORED
+        if path.suffix.lower() in stored_suffixes
+        else zipfile.ZIP_DEFLATED
+    )
+    if compression == zipfile.ZIP_DEFLATED:
+        archive.write(path, arcname, compress_type=compression, compresslevel=9)
+    else:
+        archive.write(path, arcname, compress_type=compression)
+
+
+def ensure_go_toolchain(log_callback=None) -> tuple[bool, str, str]:
+    go_bin = shutil.which("go")
+    if go_bin:
+        if log_callback:
+            log_callback(f"Go 工具链已安装: {go_bin}")
+        return True, go_bin, "Go 工具链已安装。"
+
+    apt_get = shutil.which("apt-get")
+    if not apt_get:
+        return False, "", "服务器未安装 Go，且当前系统没有 apt-get，无法自动安装 Go 工具链。"
+
+    logs: list[str] = ["服务器未安装 Go，开始自动安装 Go 工具链..."]
+    if log_callback:
+        log_callback(logs[-1])
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    for cmd in ([apt_get, "update"], [apt_get, "install", "-y", "golang-go"]):
+        return_code, output_tail = run_logged_process(cmd, env=env, log_callback=log_callback)
+        logs.append(f"{' '.join(cmd)}: exit={return_code}")
+        if output_tail:
+            logs.append(output_tail[-3000:])
+        if return_code != 0:
+            return False, "", "\n".join(logs)
+
+    go_bin = shutil.which("go") or "/usr/bin/go"
+    if not Path(go_bin).exists():
+        return False, "", "\n".join(logs + ["Go 安装完成后仍未找到 go 命令。"])
+    logs.append(f"Go 工具链安装完成: {go_bin}")
+    return True, go_bin, "\n".join(logs)
+
+
+def parse_client_package_version(name: str) -> str:
+    raw = Path(name).name
+    if raw.startswith("client-") and raw.endswith(".zip"):
+        return raw[len("client-") : -len(".zip")]
+    return ""
+
+
+def normalize_client_package_version_for_sort(version: str) -> str:
+    name = parse_client_package_version(version)
+    if not name:
+        name = (version or "").strip()
+
+    parts = name.split("-")
+
+    # New format: YYYY-MMDD-HHMM-SSMM (e.g. 2026-0622-1430-1211)
+    if len(parts) == 4:
+        year, month_day, hm, ssms = (part.strip() for part in parts)
+        if len(year) == 4 and len(month_day) == 4 and len(hm) == 4:
+            return f"{year}{month_day}{hm}{ssms.zfill(4)[:4]}"
+
+    # Transitional format: YYYY-MMDD-HHMM-SS-MM
+    if len(parts) == 5:
+        year, month_day, hm, sec, ms = (part.strip() for part in parts)
+        if (
+            len(year) == 4
+            and len(month_day) == 4
+            and len(hm) == 4
+            and sec
+            and ms
+        ):
+            return f"{year}{month_day}{hm}{sec.zfill(2)[:2]}{ms.zfill(2)[:2]}"
+
+    # Legacy format: YYYYMMDD-HHMMSS-SS
+    if len(parts) == 3:
+        date_part = parts[0].strip()
+        time_part = parts[1].strip()
+        ms_part = parts[2].strip()
+        if len(date_part) == 8 and len(time_part) >= 4:
+            year = date_part[:4]
+            month_day = date_part[4:8]
+            hm = time_part[:4]
+            sec = time_part[4:6] if len(time_part) >= 6 else "00"
+            ms = ms_part.zfill(2)[:2]
+            return f"{year}{month_day}{hm}{sec}{ms}"
+
+    return ""
+
+
+def sort_client_packages_by_version(paths) -> list[Path]:
+    def _key(path: Path):
+        version = parse_client_package_version(path.name)
+        sort_version = normalize_client_package_version_for_sort(version)
+        return (1 if sort_version else 0, sort_version, version, path.stat().st_mtime)
+
+    return sorted(list(paths), key=_key, reverse=True)
+
+
+def build_client_packages_on_server(web_url: str, log_callback=None) -> tuple[bool, str]:
+    go_ok, go_bin, go_message = ensure_go_toolchain(log_callback=log_callback)
+    if not go_ok:
+        return False, go_message
+    client_go_dir = BASE_DIR / "client-go"
+    if not client_go_dir.exists():
+        return False, "服务器缺少 client-go 源码目录。"
+    package_root = BASE_DIR / "client" / "package"
+    dist_dir = BASE_DIR / "client" / "dist"
+    package_root.mkdir(parents=True, exist_ok=True)
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    amd_dir = package_root / "windows-amd64"
+    amd_dir.mkdir(parents=True, exist_ok=True)
+    amd_installer_dir = amd_dir / "installers"
+    amd_installer_dir.mkdir(parents=True, exist_ok=True)
+    for removable_dir in (amd_dir / "cores", amd_installer_dir):
+        if removable_dir.exists():
+            shutil.rmtree(removable_dir, ignore_errors=True)
+            if log_callback:
+                log_callback(f"已移除不再需要的客户端组件目录: {removable_dir.relative_to(amd_dir)}")
+    amd_installer_dir.mkdir(parents=True, exist_ok=True)
+    for wrong_installer in amd_installer_dir.glob("*arm64*.msi"):
+        try:
+            wrong_installer.unlink()
+            if log_callback:
+                log_callback(f"已移除 x86_64 包中的 ARM 安装器: {wrong_installer.name}")
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"移除 ARM 安装器失败: {wrong_installer.name} - {exc}")
+    for stale_readme in amd_dir.glob("README*"):
+        try:
+            stale_readme.unlink()
+            if log_callback:
+                log_callback(f"已移除客户端包 README: {stale_readme.name}")
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"移除客户端包 README 失败: {stale_readme.name} - {exc}")
+    clean_url = (web_url or "").strip().rstrip("/")
+    if not clean_url:
+        return False, "Web 地址为空，无法内置。"
+
+    if log_callback:
+        log_callback(f"内置 Web 地址: {clean_url}")
+    now = datetime.now()
+    build_version = (
+        f"{now.strftime('%Y-%m%d-%H%M')}"
+        f"-{now.strftime('%S')}{now.microsecond // 10000:02d}"
+    )
+    if log_callback:
+        log_callback(f"客户端版本号: {build_version}")
+    key = CLIENT_GLOBAL_CRYPTO_KEY
+    ldflags = " ".join(
+        [
+            "-H windowsgui",
+            "-s",
+            "-w",
+            f"-X main.embeddedDefaultWebURL={shlex.quote(clean_url)}",
+            f"-X main.embeddedClientCryptoKey={shlex.quote(key)}",
+            f"-X main.embeddedClientVersion={shlex.quote(build_version)}",
+        ]
+    )
+    logs: list[str] = [go_message, f"内置 Web 地址: {clean_url}", f"客户端版本号: {build_version}"]
+    env_base = os.environ.copy()
+    if log_callback:
+        log_callback("开始编译 Windows x86_64 客户端...")
+    env = env_base.copy()
+    env["GOOS"] = "windows"
+    env["GOARCH"] = "amd64"
+    out_path = amd_dir / "CompanyVPN.exe"
+    cmd = [go_bin, "build", "-trimpath", "-ldflags", ldflags, "-o", str(out_path), "."]
+    return_code, output_tail = run_logged_process(
+        cmd,
+        cwd=client_go_dir,
+        env=env,
+        log_callback=log_callback,
+    )
+    logs.append(f"x86_64: exit={return_code}")
+    if output_tail:
+        logs.append(output_tail[-3000:])
+    if return_code != 0:
+        return False, "\n".join(logs)
+    if log_callback:
+        log_callback("Windows x86_64 客户端编译完成。")
+
+    updater_path = amd_dir / "Updater.exe"
+    if log_callback:
+        log_callback("开始编译 Windows x86_64 更新程序...")
+    updater_cmd = [go_bin, "build", "-trimpath", "-ldflags", "-H windowsgui -s -w", "-o", str(updater_path), "./updater"]
+    updater_code, updater_output = run_logged_process(
+        updater_cmd,
+        cwd=client_go_dir,
+        env=env,
+        log_callback=log_callback,
+    )
+    logs.append(f"updater-x86_64: exit={updater_code}")
+    if updater_output:
+        logs.append(updater_output[-3000:])
+    if updater_code != 0:
+        return False, "\n".join(logs)
+    if log_callback:
+        log_callback("Windows x86_64 更新程序编译完成。")
+
+    wintun_src = client_go_dir / "assets" / "wintun" / "amd64" / "wintun.dll"
+    if not wintun_src.exists():
+        return False, "\n".join(logs + ["缺少 assets/wintun/amd64/wintun.dll，无法打包 TUN 全局模式客户端。"])
+    shutil.copy2(wintun_src, amd_dir / "wintun.dll")
+    if log_callback:
+        log_callback("已打包 Windows TUN 驱动: wintun.dll")
+
+    zip_path = dist_dir / f"client-{build_version}.zip"
+    if log_callback:
+        log_callback(f"开始打包 {zip_path.name}...")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in amd_dir.rglob("*"):
+            if path.is_dir():
+                continue
+            write_client_package_file(archive, path, path.relative_to(amd_dir).as_posix())
+    logs.append(f"package: {zip_path.name}")
+    if log_callback:
+        log_callback(f"打包完成: {zip_path.name}")
+        log_callback(f"默认下载包已更新为: {zip_path.name}")
+    for old_package in dist_dir.glob("*.zip"):
+        if old_package == zip_path:
+            continue
+        try:
+            old_package.unlink()
+            if log_callback:
+                log_callback(f"已删除旧包: {old_package.name}")
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"删除旧包失败: {old_package.name} - {exc}")
+    for legacy_file in list(dist_dir.glob("company-vpn-windows-*.exe")) + list(dist_dir.glob("README-Windows.txt")):
+        try:
+            legacy_file.unlink()
+            if log_callback:
+                log_callback(f"已删除旧客户端下载文件: {legacy_file.name}")
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"删除旧客户端下载文件失败: {legacy_file.name} - {exc}")
+    return True, "客户端编译完成。"
+
+
+def run_client_build_background(web_url: str) -> None:
+    try:
+        append_client_build_log("客户端编译任务启动。")
+        ok, message = build_client_packages_on_server(web_url, log_callback=append_client_build_log)
+    except Exception as exc:
+        ok, message = False, f"客户端编译失败：{exc}"
+        append_client_build_log(message)
+    finished_at = utcnow_iso()
+    append_client_build_log("客户端编译完成。" if ok else "客户端编译失败。")
+    save_client_build_state(
+        {
+            "running": False,
+            "ok": bool(ok),
+            "message": message,
+            "started_at": read_client_build_state().get("started_at", ""),
+            "finished_at": finished_at,
+        }
+    )
+
+
+@app.route("/admin/client/build", methods=["POST"])
+@login_required
+@admin_required
+def admin_build_client_packages():
+    web_url = (request.form.get("web_url", "") or "").strip() or request.url_root.rstrip("/")
+    try:
+        ok, message = build_client_packages_on_server(web_url)
+    except subprocess.TimeoutExpired:
+        ok, message = False, "客户端编译超时。"
+    except Exception as exc:
+        ok, message = False, f"客户端编译失败：{exc}"
+    if ok:
+        flash("客户端已在服务器编译完成，内置地址：" + web_url.rstrip("/"), "success")
+    else:
+        flash(message, "error")
+    return redirect_admin_subscriptions()
+
+
+@app.route("/admin/client/build/start", methods=["POST"])
+@login_required
+@admin_required
+def admin_start_client_build_packages():
+    web_url = (request.form.get("web_url", "") or "").strip() or request.url_root.rstrip("/")
+    with CLIENT_BUILD_LOCK:
+        state = read_client_build_state()
+        if state.get("running"):
+            return {"ok": True, "running": True, "message": "客户端编译任务正在运行。"}
+        CLIENT_BUILD_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CLIENT_BUILD_LOG_FILE.write_text("", encoding="utf-8")
+        save_client_build_state(
+            {
+                "running": True,
+                "ok": None,
+                "message": "客户端编译任务已启动。",
+                "started_at": utcnow_iso(),
+                "finished_at": "",
+            }
+        )
+        worker = threading.Thread(
+            target=run_client_build_background,
+            args=(web_url,),
+            daemon=True,
+        )
+        worker.start()
+    return {"ok": True, "running": True, "message": "客户端编译任务已启动。"}
+
+
+@app.route("/admin/client/build/status")
+@login_required
+@admin_required
+def admin_client_build_status():
+    state = read_client_build_state()
+    return {
+        "ok": True,
+        "running": bool(state.get("running")),
+        "build_ok": state.get("ok"),
+        "message": state.get("message", ""),
+        "started_at": state.get("started_at", ""),
+        "finished_at": state.get("finished_at", ""),
+        "log": read_client_build_log(),
+    }
+
+
+@app.route("/client/download")
+def public_client_download():
+    dist_dir = BASE_DIR / "client" / "dist"
+    candidates = sort_client_packages_by_version(dist_dir.glob("client-*.zip"))
+    zip_path = candidates[0] if candidates else None
+    if not zip_path:
+        legacy_candidates = sorted(
+            dist_dir.glob("*.zip"),
+            key=lambda item: (item.stat().st_mtime, item.name),
+            reverse=True,
+        )
+        zip_path = legacy_candidates[0] if legacy_candidates else None
+    if not zip_path or not zip_path.exists():
+        return Response("client package not found", status=404, mimetype="text/plain")
+    return send_file(
+        zip_path,
+        as_attachment=True,
+        download_name=zip_path.name,
+        mimetype="application/zip",
+        max_age=0,
+    )
+
+
+@app.route("/client/latest")
+def public_client_latest():
+    dist_dir = BASE_DIR / "client" / "dist"
+    candidates = sort_client_packages_by_version(dist_dir.glob("client-*.zip"))
+    zip_path = candidates[0] if candidates else None
+    if not zip_path or not zip_path.exists():
+        return {"ok": False, "error": "client package not found"}, 404
+    filename = zip_path.name
+    version = filename
+    if version.startswith("client-"):
+        version = version[len("client-") :]
+    if version.endswith(".zip"):
+        version = version[:-4]
+    return {
+        "ok": True,
+        "version": version,
+        "filename": filename,
+        "download_url": absolute_url_for("public_client_download"),
+    }
+
+
+@app.route("/admin/users/<int:user_id>/client-package")
+@login_required
+@admin_required
+def admin_download_client_package(user_id: int):
+    db = get_db()
+    user = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'user' LIMIT 1",
+        (int(user_id),),
+    ).fetchone()
+    if not user:
+        flash("用户不存在。", "error")
+        return redirect_admin_subscriptions()
+
+    arch = (request.args.get("arch", "") or "").strip().lower()
+    if arch in {"arm", "arm64", "windows-arm64"}:
+        package_arch = "windows-arm64"
+    else:
+        package_arch = "windows-amd64"
+    package_dir = BASE_DIR / "client" / "package" / package_arch
+    if not package_dir.exists():
+        flash("客户端完整包不存在，请先构建客户端。", "error")
+        return redirect_admin_subscriptions()
+
+    token = ensure_user_client_config_token(db, user)
+    bootstrap_payload = build_client_bootstrap_payload(user, token)
+    bootstrap_name = f"company-vpn-{safe_name(user['username'])}.json"
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            bootstrap_name,
+            json.dumps(bootstrap_payload, ensure_ascii=False, indent=2),
+        )
+        for path in package_dir.rglob("*"):
+            if path.is_dir():
+                continue
+            arcname = path.relative_to(package_dir).as_posix()
+            write_client_package_file(archive, path, arcname)
+
+    filename = f"company-vpn-{safe_name(user['username'])}-{package_arch}.zip"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return Response(
+        buffer.getvalue(),
+        headers=headers,
+        mimetype="application/zip",
+    )
+
+
+@app.route("/client-api/ssh-tunnel/cleanup", methods=["POST"])
+def client_ssh_tunnel_cleanup():
+    token = ""
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = (request.form.get("token") or "").strip()
+    if not token and request.is_json:
+        token = (request.get_json(silent=True) or {}).get("token", "")
+    payload = verify_ssh_cleanup_token(token)
+    if not payload:
+        return {"ok": False, "error": "invalid cleanup token"}, 401
+
+    db = get_db()
+    server_row = db.execute(
+        "SELECT * FROM vpn_servers WHERE id = ? LIMIT 1",
+        (int(payload.get("server_id") or 0),),
+    ).fetchone()
+    if not server_row:
+        return {"ok": False, "error": "server not found"}, 404
+
+    admin_host = normalize_remote_host(row_get(server_row, "host", ""))
+    admin_port = normalize_server_port(row_get(server_row, "port", 22), 22)
+    admin_username = (row_get(server_row, "username", "") or "").strip()
+    admin_password = row_get(server_row, "password", "") or ""
+    admin_private_key = (row_get(server_row, "ssh_private_key", "") or "").strip()
+    if not admin_host or not admin_username or (not admin_password and not admin_private_key):
+        return {"ok": False, "error": "server ssh credential missing"}, 500
+
+    ok, message = run_remote_ssh_script(
+        host=admin_host,
+        port=admin_port,
+        username=admin_username,
+        password=admin_password,
+        private_key_text=admin_private_key,
+        script=build_ssh_tunnel_cleanup_script(str(payload.get("temp_username") or "")),
+        timeout=60,
+    )
+    if not ok:
+        return {"ok": False, "error": message}, 500
+    return {"ok": True, "message": message}
+
+
+@app.route("/client-api/profiles/<username>/<profile_type>")
+def client_profile_config(username: str, profile_type: str):
+    db = get_db()
+    user = resolve_client_config_user(db, username, extract_client_config_token())
+    if not user:
+        return {"ok": False, "error": "invalid token"}, 401
+    client_token = (row_get(user, "client_config_token", "") or "").strip()
+    if (row_get(user, "status", "approved") or "approved").strip().lower() == "disabled":
+        return encrypt_client_api_payload({"ok": False, "error": "account disabled"}, client_token), 403
+    if int(row_get(user, "vpn_enabled", 0) or 0) != 1:
+        return encrypt_client_api_payload({"ok": False, "error": "vpn disabled"}, client_token), 403
+
+    profile = (profile_type or "").strip().lower()
+    reconcile_expired_subscriptions(db)
+    user = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+    client_token = (row_get(user, "client_config_token", "") or "").strip() if user else client_token
+    if not user or (row_get(user, "status", "approved") or "approved").strip().lower() == "disabled":
+        return encrypt_client_api_payload({"ok": False, "error": "account disabled"}, client_token), 403
+    try:
+        client_ip = normalize_public_client_ip(get_client_ip())
+        if client_ip:
+            db.execute(
+                "UPDATE users SET last_login_ip = ? WHERE id = ?",
+                (client_ip, int(user["id"])),
+            )
+            db.commit()
+            user = db.execute("SELECT * FROM users WHERE id = ?", (int(user["id"]),)).fetchone()
+    except Exception:
+        app.logger.exception("Failed to update client config source ip")
+
+    try:
+        if profile in {"openvpn", "ovpn"}:
+            return encrypt_client_api_payload({"ok": False, "error": "OpenVPN is no longer supported"}, client_token), 410
+
+        if profile in {"clash", "ss", "ss-kcptun", "shadowsocks", "kcptun"}:
+            return encrypt_client_api_payload({"ok": False, "error": "SS/KCPTUN is no longer supported"}, client_token), 410
+
+        if profile in {"ssh", "ssh-tunnel", "tunnel"}:
+            target_server = get_requested_allowed_server(db, user)
+            if not server_supports_ssh_tunnel(target_server):
+                return encrypt_client_api_payload({"ok": False, "error": "SSH Tunnel is disabled for this server"}, client_token), 503
+            config_text = build_user_ssh_tunnel_config(db, user, target_server)
+            payload = {
+                "ok": True,
+                "type": "ssh-tunnel",
+                "filename": f"ssh-tunnel-{safe_name(user['username'])}.json",
+                "config": config_text,
+                "server": serialize_runtime_server(target_server),
+            }
+            return encrypt_client_api_payload(
+                payload,
+                client_token,
+            )
+    except Exception as exc:
+        return encrypt_client_api_payload({"ok": False, "error": str(exc)}, client_token), 500
+
+    return encrypt_client_api_payload({"ok": False, "error": "unknown profile type"}, client_token), 404
+
+
 @app.route("/d/<path:access_token>")
 def download_via_token(access_token: str):
     token = (access_token or "").strip()
@@ -14430,19 +12747,24 @@ def download_via_token(access_token: str):
     build_raw = output_format in {"json", "raw"}
     db = get_db()
 
-    def response_with_content(config_text: str, filename: str):
+    def response_with_content(
+        config_text: str,
+        filename: str,
+        *,
+        mimetype: str | None = None,
+    ):
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
         }
-        mimetype = "application/json" if build_raw else "text/yaml; charset=utf-8"
-        return Response(config_text, headers=headers, mimetype=mimetype)
+        response_mimetype = (
+            mimetype or ("application/json" if build_raw else "text/yaml; charset=utf-8")
+        )
+        return Response(config_text, headers=headers, mimetype=response_mimetype)
 
     admin_ss = resolve_download_access_user(db, token, "download-config-admin")
     if admin_ss is not None:
-        if not SHADOWSOCKS_ENABLED:
-            return config_download_error("Shadowsocks is disabled", status=503)
         if row_get(admin_ss, "role") != "admin":
             return config_download_error("forbidden", status=403)
         admin = db.execute(
@@ -14451,6 +12773,26 @@ def download_via_token(access_token: str):
         ).fetchone()
         if not admin:
             return config_download_error("admin not found", status=404)
+        target_server = choose_runtime_server_for_admin(db, admin)
+        wants_openvpn = output_format in {"ovpn", "openvpn"}
+        if wants_openvpn:
+            if not OPENVPN_ENABLED or not server_supports_openvpn(target_server):
+                return config_download_error("OpenVPN is disabled for this server", status=503)
+            admin = ensure_admin_self_vpn_ready(db, admin)
+            db.commit()
+            config_text = build_openvpn_client_config(
+                admin["username"],
+                user=admin,
+                server_row=target_server,
+            )
+            filename = f"openvpn-admin-{safe_name(admin['username'])}.ovpn"
+            return response_with_content(
+                config_text,
+                filename,
+                mimetype="application/x-openvpn-profile; charset=utf-8",
+            )
+        if not server_supports_ss_kcptun(target_server):
+            return config_download_error("Shadowsocks + kcptun is disabled for this server", status=503)
         config_text = (
             build_user_shadowsocks_config(admin)
             if build_raw
@@ -14461,8 +12803,6 @@ def download_via_token(access_token: str):
 
     user_ss = resolve_download_access_user(db, token, "download-config-user")
     if user_ss is not None:
-        if not SHADOWSOCKS_ENABLED:
-            return config_download_error("Shadowsocks is disabled", status=503)
         if row_get(user_ss, "role") != "user":
             return config_download_error("forbidden", status=403)
         reconcile_expired_subscriptions(db)
@@ -14471,6 +12811,34 @@ def download_via_token(access_token: str):
             return config_download_error("user not found", status=404)
         if not is_subscription_active(user):
             return config_download_error("subscription inactive", status=403)
+        target_server = get_persisted_runtime_server_for_account(db, user)
+        wants_openvpn = output_format in {"ovpn", "openvpn"}
+        if wants_openvpn:
+            if not OPENVPN_ENABLED or not server_supports_openvpn(target_server):
+                return config_download_error("OpenVPN is disabled for this server", status=503)
+            vpn_data = ensure_user_vpn_ready(db, user)
+            assigned_server_id = vpn_data.get("assigned_server_id")
+            if assigned_server_id is not None:
+                db.execute(
+                    "UPDATE users SET assigned_server_id = ?, vpn_enabled = 1 WHERE id = ?",
+                    (assigned_server_id, int(user["id"])),
+                )
+            db.commit()
+            user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+            config_text = build_openvpn_client_config(
+                user["username"],
+                user=user,
+                server_row=get_persisted_runtime_server_for_account(db, user),
+            )
+            filename = f"openvpn-{safe_name(user['username'])}.ovpn"
+            return response_with_content(
+                config_text,
+                filename,
+                mimetype="application/x-openvpn-profile; charset=utf-8",
+            )
+        target_server = get_persisted_runtime_server_for_account(db, user)
+        if not server_supports_ss_kcptun(target_server):
+            return config_download_error("Shadowsocks + kcptun is disabled for this server", status=503)
         config_text = (
             build_user_shadowsocks_config(user)
             if build_raw
@@ -14481,8 +12849,6 @@ def download_via_token(access_token: str):
 
     admin_kcptun = resolve_download_access_user(db, token, "download-kcptun-admin")
     if admin_kcptun is not None:
-        if not KCPTUN_ENABLED:
-            return config_download_error("kcptun is disabled", status=503)
         if row_get(admin_kcptun, "role") != "admin":
             return config_download_error("forbidden", status=403)
         admin = db.execute(
@@ -14491,6 +12857,8 @@ def download_via_token(access_token: str):
         ).fetchone()
         if not admin:
             return config_download_error("admin not found", status=404)
+        if not server_supports_ss_kcptun(choose_runtime_server_for_admin(db, admin)):
+            return config_download_error("kcptun is disabled for this server", status=503)
         config_text = (
             build_user_kcptun_config(admin)
             if build_raw
@@ -14501,8 +12869,6 @@ def download_via_token(access_token: str):
 
     user_kcptun = resolve_download_access_user(db, token, "download-kcptun-user")
     if user_kcptun is not None:
-        if not KCPTUN_ENABLED:
-            return config_download_error("kcptun is disabled", status=503)
         if row_get(user_kcptun, "role") != "user":
             return config_download_error("forbidden", status=403)
         reconcile_expired_subscriptions(db)
@@ -14511,6 +12877,8 @@ def download_via_token(access_token: str):
             return config_download_error("user not found", status=404)
         if not is_subscription_active(user):
             return config_download_error("subscription inactive", status=403)
+        if not server_supports_ss_kcptun(get_persisted_runtime_server_for_account(db, user)):
+            return config_download_error("kcptun is disabled for this server", status=503)
         config_text = (
             build_user_kcptun_config(user)
             if build_raw
@@ -14524,8 +12892,9 @@ def download_via_token(access_token: str):
 
 @app.route("/download/config")
 def download_config():
-    if not SHADOWSOCKS_ENABLED:
-        return config_download_error("Shadowsocks is disabled", status=503)
+    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    if output_format in {"ovpn", "openvpn"}:
+        return download_openvpn_config()
 
     db = get_db()
     user = current_user()
@@ -14555,7 +12924,9 @@ def download_config():
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
 
-    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    if not server_supports_ss_kcptun(get_persisted_runtime_server_for_account(db, user)):
+        return config_download_error("Shadowsocks + kcptun is disabled for this server", status=503)
+
     build_raw = output_format in {"json", "raw"}
     try:
         config_text = (
@@ -14580,8 +12951,9 @@ def download_config():
 @app.route("/admin/download/config")
 def admin_download_config():
     db = get_db()
-    if not SHADOWSOCKS_ENABLED:
-        return config_download_error("Shadowsocks is disabled", status=503)
+    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    if output_format in {"ovpn", "openvpn"}:
+        return admin_download_openvpn_config()
 
     admin = current_user()
     used_access_token = False
@@ -14607,7 +12979,9 @@ def admin_download_config():
     if not admin:
         return config_download_error("admin not found", status=404)
 
-    output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
+    if not server_supports_ss_kcptun(choose_runtime_server_for_admin(db, admin)):
+        return config_download_error("Shadowsocks + kcptun is disabled for this server", status=503)
+
     build_raw = output_format in {"json", "raw"}
     try:
         config_text = (
@@ -14617,7 +12991,7 @@ def admin_download_config():
         )
     except Exception as exc:
         flash(f"管理员 Shadowsocks 配置生成失败：{exc}", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     filename = build_download_filename_for_user(admin, build_raw=build_raw)
     headers = {
@@ -14631,9 +13005,6 @@ def admin_download_config():
 
 @app.route("/download/kcptun")
 def download_kcptun_config():
-    if not KCPTUN_ENABLED:
-        return config_download_error("kcptun is disabled", status=503)
-
     db = get_db()
     user = current_user()
     used_access_token = False
@@ -14661,6 +13032,8 @@ def download_kcptun_config():
             return config_download_error("subscription inactive", status=403)
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
+    if not server_supports_ss_kcptun(get_persisted_runtime_server_for_account(db, user)):
+        return config_download_error("kcptun is disabled for this server", status=503)
 
     output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
     build_raw = output_format in {"json", "raw"}
@@ -14686,9 +13059,6 @@ def download_kcptun_config():
 
 @app.route("/admin/download/kcptun")
 def admin_download_kcptun_config():
-    if not KCPTUN_ENABLED:
-        return config_download_error("kcptun is disabled", status=503)
-
     db = get_db()
     admin = current_user()
     used_access_token = False
@@ -14713,6 +13083,8 @@ def admin_download_kcptun_config():
     ).fetchone()
     if not admin:
         return config_download_error("admin not found", status=404)
+    if not server_supports_ss_kcptun(choose_runtime_server_for_admin(db, admin)):
+        return config_download_error("kcptun is disabled for this server", status=503)
 
     output_format = (request.args.get("format", "yaml") or "yaml").strip().lower()
     build_raw = output_format in {"json", "raw"}
@@ -14724,7 +13096,7 @@ def admin_download_kcptun_config():
         )
     except Exception as exc:
         flash(f"管理员 kcptun 配置生成失败：{exc}", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     filename = build_download_filename_for_user(admin, build_raw=build_raw)
     headers = {
@@ -14739,16 +13111,102 @@ def admin_download_kcptun_config():
 @app.route("/download/openvpn")
 @login_required
 def download_openvpn_config():
-    flash("系统已切换为 Shadowsocks，OpenVPN 下载入口已停用。", "error")
-    return redirect(url_for("dashboard_config"))
+    if not OPENVPN_ENABLED or not is_openvpn_open():
+        flash("OpenVPN 当前未启用。", "error")
+        return redirect(url_for("dashboard_config"))
+
+    db = get_db()
+    user = current_user()
+    if not user or row_get(user, "role") != "user":
+        flash("仅普通用户可下载用户配置。", "error")
+        return redirect(url_for("dashboard"))
+
+    reconcile_expired_subscriptions(db)
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if not user or not is_subscription_active(user):
+        flash("账号未启用，请联系管理员。", "error")
+        return redirect(url_for("dashboard_config"))
+
+    try:
+        vpn_data = ensure_user_vpn_ready(db, user)
+        assigned_server_id = vpn_data.get("assigned_server_id")
+        if assigned_server_id is not None:
+            db.execute(
+                "UPDATE users SET assigned_server_id = ?, vpn_enabled = 1 WHERE id = ?",
+                (assigned_server_id, int(user["id"])),
+            )
+        db.commit()
+        user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+        target_server = get_persisted_runtime_server_for_account(db, user)
+        if not server_supports_openvpn(target_server):
+            flash("当前节点未启用 OpenVPN。", "error")
+            return redirect(url_for("dashboard_config"))
+        config_text = build_openvpn_client_config(
+            user["username"],
+            user=user,
+            server_row=target_server,
+        )
+    except Exception as exc:
+        flash(f"OpenVPN 配置生成失败：{exc}", "error")
+        return redirect(url_for("dashboard_config"))
+
+    filename = f"openvpn-{safe_name(user['username'])}.ovpn"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return Response(
+        config_text,
+        headers=headers,
+        mimetype="application/x-openvpn-profile; charset=utf-8",
+    )
 
 
 @app.route("/admin/download/openvpn")
 @login_required
 @admin_required
 def admin_download_openvpn_config():
-    flash("系统已切换为 Shadowsocks，OpenVPN 下载入口已停用。", "error")
-    return redirect(url_for("admin_configs"))
+    if not OPENVPN_ENABLED or not is_openvpn_open():
+        flash("OpenVPN 当前未启用。", "error")
+        return redirect(url_for("admin_subscriptions"))
+
+    db = get_db()
+    admin = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'admin'",
+        (current_user()["id"],),
+    ).fetchone()
+    if not admin:
+        flash("管理员账户不存在。", "error")
+        return redirect(url_for("admin_subscriptions"))
+
+    try:
+        admin = ensure_admin_self_vpn_ready(db, admin)
+        db.commit()
+        target_server = choose_runtime_server_for_admin(db, admin)
+        if not server_supports_openvpn(target_server):
+            flash("当前节点未启用 OpenVPN。", "error")
+            return redirect(url_for("admin_subscriptions"))
+        config_text = build_openvpn_client_config(
+            admin["username"],
+            user=admin,
+            server_row=target_server,
+        )
+    except Exception as exc:
+        flash(f"管理员 OpenVPN 配置生成失败：{exc}", "error")
+        return redirect(url_for("admin_subscriptions"))
+
+    filename = f"openvpn-admin-{safe_name(admin['username'])}.ovpn"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return Response(
+        config_text,
+        headers=headers,
+        mimetype="application/x-openvpn-profile; charset=utf-8",
+    )
 
 
 def render_qr_png(payload: str) -> bytes:
@@ -14806,10 +13264,6 @@ def render_qr_png(payload: str) -> bytes:
 @login_required
 @admin_required
 def admin_download_qr():
-    if not SHADOWSOCKS_ENABLED:
-        flash("Shadowsocks 当前未启用。", "error")
-        return redirect(url_for("admin_home"))
-
     db = get_db()
     admin = db.execute(
         "SELECT * FROM users WHERE id = ? AND role = 'admin'",
@@ -14817,20 +13271,23 @@ def admin_download_qr():
     ).fetchone()
     if not admin:
         flash("管理员账号不存在。", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
+    if not server_supports_ss_kcptun(choose_runtime_server_for_admin(db, admin)):
+        flash("当前节点未启用 Shadowsocks + kcptun。", "error")
+        return redirect(url_for("admin_subscriptions"))
 
     try:
         config_text = build_user_shadowsocks_uri(admin)
     except Exception as exc:
         flash(f"管理员二维码生成失败：{exc}", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     try:
         qr_png = render_qr_png(config_text)
     except Exception as exc:
         msg = str(exc).strip() or "未知错误"
         flash(f"管理员二维码生成失败：{msg}", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(url_for("admin_subscriptions"))
 
     filename = f"ss-admin-{safe_name(admin['username'])}.png"
     headers = {"Content-Disposition": f'inline; filename=\"{filename}\"'}
@@ -14845,9 +13302,6 @@ def download_qr():
     if user["role"] != "user":
         flash("管理员无需下载客户端配置。", "error")
         return redirect(url_for("dashboard"))
-    if not SHADOWSOCKS_ENABLED:
-        flash("Shadowsocks 当前未启用。", "error")
-        return redirect(url_for("dashboard"))
 
     db = get_db()
     reconcile_expired_subscriptions(db)
@@ -14855,6 +13309,9 @@ def download_qr():
     if not is_subscription_active(user):
         flash("订阅未生效或已过期，请先续费。", "error")
         return redirect(url_for("dashboard"))
+    if not server_supports_ss_kcptun(get_persisted_runtime_server_for_account(db, user)):
+        flash("当前节点未启用 Shadowsocks + kcptun。", "error")
+        return redirect(url_for("dashboard_config"))
 
     try:
         config_text = build_user_shadowsocks_uri(user)
@@ -14877,6 +13334,8 @@ def download_qr():
 @app.route("/subscription/payment-qr")
 @login_required
 def subscription_payment_qr():
+    return {"ok": False, "error": "payment_disabled"}, 404
+
     user = current_user()
     if not user or user["role"] != "user":
         return {"ok": False, "error": "仅普通用户可获取支付二维码"}, 403

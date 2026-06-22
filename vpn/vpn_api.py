@@ -14,6 +14,16 @@ KCPTUN_SYSTEMD_UNIT = (
     os.environ.get("KCPTUN_SYSTEMD_UNIT", "vpnmanager-kcptun.service").strip()
     or "vpnmanager-kcptun.service"
 )
+OPENVPN_SYSTEMD_UNIT = (
+    os.environ.get("OPENVPN_SYSTEMD_UNIT", "openvpn-server@server.service").strip()
+    or "openvpn-server@server.service"
+)
+OPENVPN_CA_CERT_FILE = Path(
+    os.environ.get("OPENVPN_CA_CERT_FILE", "/etc/openvpn/server/ca.crt")
+)
+OPENVPN_TLS_CRYPT_KEY_FILE = Path(
+    os.environ.get("OPENVPN_TLS_CRYPT_KEY_FILE", "/etc/openvpn/server/ta.key")
+)
 try:
     SHADOWSOCKS_SERVER_PORT = int(SHADOWSOCKS_SERVER_PORT_RAW)
 except Exception:
@@ -42,6 +52,38 @@ def run_command(args, input_text=None, check=True) -> str:
         stderr = (completed.stderr or "").strip()
         raise RuntimeError(f"command failed: {' '.join(args)}; {stderr}")
     return completed.stdout.strip()
+
+
+def read_ipv6_state() -> dict:
+    keys = [
+        "net.ipv6.conf.all.disable_ipv6",
+        "net.ipv6.conf.default.disable_ipv6",
+        "net.ipv6.conf.lo.disable_ipv6",
+    ]
+    values = {}
+    for key in keys:
+        raw = run_command(["sysctl", "-n", key], check=False).strip()
+        values[key] = raw
+    disabled = values.get("net.ipv6.conf.all.disable_ipv6") == "1"
+    return {"enabled": not disabled, "disabled": disabled, "values": values}
+
+
+def write_ipv6_state(enable: bool) -> dict:
+    target_value = "0" if enable else "1"
+    Path("/etc/sysctl.d").mkdir(parents=True, exist_ok=True)
+    Path("/etc/sysctl.d/99-vpnmanager-ipv6.conf").write_text(
+        "\n".join(
+            [
+                f"net.ipv6.conf.all.disable_ipv6 = {target_value}",
+                f"net.ipv6.conf.default.disable_ipv6 = {target_value}",
+                f"net.ipv6.conf.lo.disable_ipv6 = {target_value}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_command(["sysctl", "-p", "/etc/sysctl.d/99-vpnmanager-ipv6.conf"])
+    return read_ipv6_state()
 
 
 def unauthorized():
@@ -322,6 +364,49 @@ def kcptun_active_peers():
         "aggregate": ss_aggregate,
         "aggregate_by_port": {str(port): stat for port, stat in ss_port_stats.items()},
     }
+
+
+@app.route("/openvpn/control", methods=["POST"])
+def openvpn_control():
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip().lower()
+    if action in {"start", "up", "enable"}:
+        run_command(["systemctl", "enable", "--now", OPENVPN_SYSTEMD_UNIT])
+    elif action in {"stop", "down", "disable"}:
+        run_command(["systemctl", "disable", "--now", OPENVPN_SYSTEMD_UNIT])
+    elif action == "restart":
+        run_command(["systemctl", "restart", OPENVPN_SYSTEMD_UNIT])
+    else:
+        return {"ok": False, "error": "invalid action"}, 400
+    return {"ok": True, "unit": OPENVPN_SYSTEMD_UNIT, "action": action}
+
+
+@app.route("/openvpn/status")
+def openvpn_status():
+    status = run_command(["systemctl", "is-active", OPENVPN_SYSTEMD_UNIT], check=False)
+    return {"ok": True, "unit": OPENVPN_SYSTEMD_UNIT, "status": status or "unknown"}
+
+
+@app.route("/openvpn/client-materials")
+def openvpn_client_materials():
+    ca_text = OPENVPN_CA_CERT_FILE.read_text(encoding="utf-8").strip()
+    tls_crypt_text = OPENVPN_TLS_CRYPT_KEY_FILE.read_text(encoding="utf-8").strip()
+    return {"ok": True, "ca_cert": ca_text, "tls_crypt_key": tls_crypt_text}
+
+
+@app.route("/system/ipv6")
+def system_ipv6_status():
+    return {"ok": True, **read_ipv6_state()}
+
+
+@app.route("/system/ipv6/control", methods=["POST"])
+def system_ipv6_control():
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"enable", "disable"}:
+        return {"ok": False, "error": "invalid action"}, 400
+    state = write_ipv6_state(enable=(action == "enable"))
+    return {"ok": True, "action": action, **state}
 
 
 @app.errorhandler(Exception)

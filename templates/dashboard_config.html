@@ -44,7 +44,7 @@
 
     <section class="feature-item" style="margin-bottom:12px;">
       <h4>切换默认服务器</h4>
-      <p>切换后请重新下载 Shadowsocks 配置并重新连接。</p>
+      <p>切换后请重新下载对应配置并重新连接。</p>
       {% if available_servers %}
         <form method="post" action="{{ url_for('dashboard_select_server') }}" class="form">
           <label>默认服务器
@@ -52,6 +52,13 @@
               {% for server in available_servers %}
                 <option value="{{ server['id'] }}" {% if server['is_preferred'] or (not preferred_server and server['is_current']) %}selected{% endif %}>
                   {{ server["server_region_display"] }} / {{ server["server_name"] }} / {{ server["endpoint_host"] }}
+                  {% if server["openvpn_enabled"] and server["shadowsocks_enabled"] and server["kcptun_enabled"] %}
+                    / OpenVPN + SS+kcptun
+                  {% elif server["openvpn_enabled"] %}
+                    / OpenVPN
+                  {% elif server["shadowsocks_enabled"] and server["kcptun_enabled"] %}
+                    / SS+kcptun
+                  {% endif %}
                 </option>
               {% endfor %}
             </select>
@@ -67,37 +74,47 @@
 
     <div class="feature-grid guide-grid">
       <div class="feature-item">
-        <h4>Shadowsocks</h4>
-        <p>当前系统仅需下载 Shadowsocks 配置文件即可使用。</p>
+        <h4>OpenVPN</h4>
+        <p>当前节点支持 OpenVPN 时可下载 `.ovpn` 配置。</p>
         <div class="actions">
-          {% if active and shadowsocks_enabled %}
-            <a class="btn" href="{{ ss_download_link }}">下载 Shadowsocks 配置</a>
-          {% elif not shadowsocks_enabled %}
-            <button type="button" disabled>Shadowsocks 已关闭</button>
+          {% if active and current_supports_openvpn %}
+            <a class="btn" href="{{ openvpn_download_link }}">下载 OpenVPN 配置</a>
+          {% elif not current_supports_openvpn %}
+            <button type="button" disabled>当前节点未启用 OpenVPN</button>
           {% else %}
-            <button type="button" disabled>下载 Shadowsocks 配置（未生效）</button>
+            <button type="button" disabled>下载 OpenVPN 配置（未生效）</button>
           {% endif %}
         </div>
-        {% if active and shadowsocks_enabled %}
+        {% if active and current_supports_openvpn %}
           <div class="form" style="margin-top:10px;">
-            <label>Shadowsocks 下载链接
-              <input type="text" readonly value="{{ ss_download_link }}">
+            <label>OpenVPN 下载链接
+              <input type="text" readonly value="{{ openvpn_download_link }}">
             </label>
           </div>
-          <div class="payment-qr-wrap payment-qr-wrap-inline">
-            <img src="{{ url_for('download_qr') }}" alt="Shadowsocks 二维码" loading="eager">
-          </div>
-          <p class="helper">二维码链接：{{ ss_qr_link }}</p>
-          <p class="helper">二维码内容为 `ss://` 导入链接，切换节点后请重新扫码。</p>
+          <p class="helper">配置文件为 `.ovpn`，切换节点后请重新下载并导入。</p>
         {% endif %}
       </div>
 
       <div class="feature-item">
-        <h4>客户端下载</h4>
-        <p>推荐使用 KaringX / ClashMi 统一客户端，支持多平台安装。</p>
+        <h4>Shadowsocks + kcptun</h4>
+        <p>当前节点支持 SS+kcptun 时可下载 Clash/YAML 配置。</p>
         <div class="actions">
-          <a class="btn secondary" href="https://github.com/KaringX/clashmi/releases" target="_blank" rel="noopener">点此下载</a>
+          {% if active and current_supports_ss_kcptun %}
+            <a class="btn" href="{{ ss_download_link }}">下载 Clash 配置</a>
+            <a class="btn secondary" href="{{ kcptun_download_link }}">下载 kcptun 配置</a>
+          {% elif not current_supports_ss_kcptun %}
+            <button type="button" disabled>当前节点未启用 SS+kcptun</button>
+          {% else %}
+            <button type="button" disabled>下载代理配置（未生效）</button>
+          {% endif %}
         </div>
+        {% if active and current_supports_ss_kcptun %}
+          <div class="form" style="margin-top:10px;">
+            <label>Clash 下载链接
+              <input type="text" readonly value="{{ ss_download_link }}">
+            </label>
+          </div>
+        {% endif %}
       </div>
     </div>
 
@@ -106,7 +123,7 @@
     <h4>使用说明</h4>
     <ol class="guide-steps">
       <li>先选择默认服务器节点，再下载配置。</li>
-      <li>下载 `Shadowsocks` 配置（`*.yaml`）并导入客户端。</li>
+      <li>按当前节点启用的类型下载 `OpenVPN` 或 `Shadowsocks + kcptun` 配置。</li>
       <li>连接成功后访问 `https://ip.sb` 核对出口 IP。</li>
       <li>切换节点后请重新下载并导入配置。</li>
     </ol>

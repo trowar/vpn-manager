@@ -4,41 +4,42 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title or site_title }}</title>
-  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg', v='20260409-1') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260412-2') }}">
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg', v='20260619-3') }}">
+		  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260619-2') }}">
 </head>
 <body>
   <div class="app-shell{% if not current_user %} app-shell-guest{% endif %}">
     {% if current_user %}
     <aside class="site-sidebar">
-      <h1 class="site-brand"><a href="{{ url_for('index') }}">VPN 门户</a></h1>
-
       <p class="site-user">当前用户：<span class="tag">{{ current_user["username"] }}</span></p>
 
-      <nav class="site-nav">
-        {% if current_user["role"] == "admin" %}
-          <a class="site-nav-link {% if admin_page == 'home' %}active{% endif %}" href="{{ url_for('admin_home') }}">仪表盘</a>
-          <a class="site-nav-link {% if admin_page == 'pending_orders' %}active{% endif %}" href="{{ url_for('admin_pending_orders') }}">订单</a>
-          <a class="site-nav-link {% if admin_page == 'payment' %}active{% endif %}" href="{{ url_for('admin_payment_settings') }}">套餐与收款</a>
-          <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户</a>
-          <a class="site-nav-link {% if admin_page == 'online_users' %}active{% endif %}" href="{{ url_for('admin_online_users') }}">在线用户</a>
-          <a class="site-nav-link {% if admin_page == 'configs' %}active{% endif %}" href="{{ url_for('admin_configs') }}">配置下载</a>
-          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器</a>
-          <a class="site-nav-link {% if admin_page == 'mail_servers' %}active{% endif %}" href="{{ url_for('admin_mail_servers') }}">邮件服务器配置</a>
-          <a class="site-nav-link {% if admin_page == 'system_settings' %}active{% endif %}" href="{{ url_for('admin_settings') }}">设置</a>
+	    <nav class="site-nav">
+	        {% if current_user["role"] == "admin" %}
+	          <a class="site-nav-link {% if admin_page == 'subscriptions' %}active{% endif %}" href="{{ url_for('admin_subscriptions') }}">用户列表</a>
+	          <a class="site-nav-link {% if admin_page == 'servers' %}active{% endif %}" href="{{ url_for('admin_servers') }}">服务器列表</a>
         {% else %}
           <a class="site-nav-link {% if dashboard_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard_home') }}">首页</a>
-          <a class="site-nav-link {% if dashboard_page == 'orders' %}active{% endif %}" href="{{ url_for('dashboard_orders') }}">订单管理</a>
           <a class="site-nav-link {% if dashboard_page == 'config' %}active{% endif %}" href="{{ url_for('dashboard_config') }}">配置</a>
           <a class="site-nav-link {% if dashboard_page == 'profile' %}active{% endif %}" href="{{ url_for('dashboard_profile') }}">个人中心</a>
-        {% endif %}
-        <a class="site-nav-link" href="{{ url_for('logout') }}">退出登录</a>
-      </nav>
-    </aside>
+	        {% endif %}
+	        <a class="site-nav-link" href="{{ url_for('logout') }}">退出登录</a>
+	      </nav>
+	      {% if current_user["role"] == "admin" and version_nav %}
+	        <a
+	          class="version-nav-badge {% if version_nav['has_update'] %}version-nav-badge-update{% else %}version-nav-badge-muted{% endif %}"
+	          href="{{ url_for('admin_subscriptions') }}"
+	          title="{% if version_nav['has_update'] %}发现新版本：{{ version_nav['remote_version'] }}，当前版本：{{ version_nav['current_version'] }}{% else %}当前版本：{{ version_nav['current_version'] }}{% endif %}"
+	        >
+	          <span class="version-nav-current">{{ version_nav["current_version"] }}</span>
+	          <span class="version-nav-pill">{% if version_nav["has_update"] %}v{{ version_nav["remote_version"] }}{% else %}已是最新{% endif %}</span>
+	        </a>
+	      {% endif %}
+	    </aside>
     {% endif %}
 
     <main class="site-main">
       <div class="site-content">
+        {% if current_user or request.args.get("login") == "1" %}
         {% with messages = get_flashed_messages(with_categories=true) %}
           {% if messages %}
             {% for category, message in messages %}
@@ -46,10 +47,145 @@
             {% endfor %}
           {% endif %}
         {% endwith %}
+        {% else %}
+          {% set _discarded_messages = get_flashed_messages(with_categories=true) %}
+        {% endif %}
         {% block content %}{% endblock %}
       </div>
     </main>
   </div>
+  <div class="app-dialog" id="app-dialog" hidden>
+    <div class="app-dialog-card" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
+      <div class="app-dialog-head">
+        <h3 id="app-dialog-title">确认操作</h3>
+        <button type="button" class="app-dialog-close" id="app-dialog-close">×</button>
+      </div>
+      <p class="app-dialog-message" id="app-dialog-message"></p>
+      <input class="app-dialog-input" id="app-dialog-input" type="text" hidden>
+      <div class="app-dialog-actions">
+        <button type="button" class="btn secondary" id="app-dialog-cancel">取消</button>
+        <button type="button" class="btn" id="app-dialog-ok">确定</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var dialog = document.getElementById("app-dialog");
+      var title = document.getElementById("app-dialog-title");
+      var message = document.getElementById("app-dialog-message");
+      var input = document.getElementById("app-dialog-input");
+      var ok = document.getElementById("app-dialog-ok");
+      var cancel = document.getElementById("app-dialog-cancel");
+      var close = document.getElementById("app-dialog-close");
+      var resolver = null;
+
+      function openDialog(options) {
+        options = options || {};
+        title.textContent = options.title || "确认操作";
+        message.textContent = options.message || "";
+        ok.textContent = options.okText || "确定";
+        cancel.textContent = options.cancelText || "取消";
+        if (options.input) {
+          input.hidden = false;
+          input.type = options.inputType || "text";
+          input.value = options.defaultValue || "";
+          input.placeholder = options.placeholder || "";
+        } else {
+          input.hidden = true;
+          input.value = "";
+        }
+        dialog.hidden = false;
+        document.body.classList.add("modal-open");
+        setTimeout(function () {
+          if (!input.hidden) {
+            input.focus();
+            input.select();
+          } else {
+            ok.focus();
+          }
+        }, 0);
+        return new Promise(function (resolve) {
+          resolver = resolve;
+        });
+      }
+
+      function resolveDialog(value) {
+        if (!resolver) return;
+        var done = resolver;
+        resolver = null;
+        dialog.hidden = true;
+        document.body.classList.remove("modal-open");
+        done(value);
+      }
+
+      ok.addEventListener("click", function () {
+        resolveDialog(input.hidden ? true : input.value);
+      });
+      cancel.addEventListener("click", function () {
+        resolveDialog(input.hidden ? false : null);
+      });
+      close.addEventListener("click", function () {
+        resolveDialog(input.hidden ? false : null);
+      });
+      dialog.addEventListener("click", function (event) {
+        if (event.target === dialog) resolveDialog(input.hidden ? false : null);
+      });
+      document.addEventListener("keydown", function (event) {
+        if (dialog.hidden) return;
+        if (event.key === "Escape") resolveDialog(input.hidden ? false : null);
+        if (event.key === "Enter" && document.activeElement === input) {
+          event.preventDefault();
+          resolveDialog(input.value);
+        }
+      });
+
+      window.AppDialog = {
+        confirm: function (message, options) {
+          options = options || {};
+          return openDialog({
+            title: options.title || "确认操作",
+            message: message,
+            okText: options.okText || "确定",
+            cancelText: options.cancelText || "取消"
+          });
+        },
+        input: function (message, options) {
+          options = options || {};
+          return openDialog({
+            title: options.title || "输入确认",
+            message: message,
+            input: true,
+            inputType: options.inputType || "text",
+            placeholder: options.placeholder || "",
+            defaultValue: options.defaultValue || "",
+            okText: options.okText || "确定",
+            cancelText: options.cancelText || "取消"
+          });
+        },
+        alert: function (message, options) {
+          options = options || {};
+          return openDialog({
+            title: options.title || "提示",
+            message: message,
+            okText: options.okText || "知道了",
+            cancelText: options.cancelText || "关闭"
+          });
+        }
+      };
+
+      document.addEventListener("submit", function (event) {
+        var form = event.target;
+        if (!form || !form.dataset || !form.dataset.confirm || form.dataset.confirmed === "1") {
+          return;
+        }
+        event.preventDefault();
+        window.AppDialog.confirm(form.dataset.confirm).then(function (confirmed) {
+          if (!confirmed) return;
+          form.dataset.confirmed = "1";
+          form.submit();
+        });
+      }, true);
+    })();
+  </script>
 </body>
 </html>
-

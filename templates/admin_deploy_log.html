@@ -71,16 +71,17 @@
       cursor: pointer;
       text-decoration: none;
       color: #fff;
-      background: #153d77;
+      background: #0f766e;
     }
     button.secondary, a.btn.secondary {
-      background: #4c5f85;
+      background: #e2e8f0;
+      color: #334155;
     }
     .log-box {
       border: 1px solid var(--border);
       border-radius: 10px;
-      background: #0b1220;
-      color: #d6e0f5;
+      background: #f8fafc;
+      color: #1f2937;
       height: 62vh;
       min-height: 320px;
       overflow: auto;
@@ -112,7 +113,7 @@
       <div class="toolbar">
         <button type="button" id="copy-deploy-log">复制日志</button>
         <button type="button" class="secondary" onclick="window.close()">关闭窗口</button>
-        <a class="btn secondary" href="{{ url_for('admin_home') }}" target="_blank" rel="noopener">打开管理首页</a>
+        <a class="btn secondary" href="{{ url_for('admin_subscriptions') }}" target="_blank" rel="noopener">打开用户列表</a>
       </div>
 
       <pre class="log-box" id="deploy-log-box">{{ deploy_log }}</pre>

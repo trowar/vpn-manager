@@ -272,9 +272,9 @@
     if (deleteBtn) {
       deleteBtn.addEventListener("click", function () {
         if (!deleteForm || !deleteForm.action) return;
-        if (confirm("确定删除邮件服务器“" + deleteTargetName + "”吗？此操作不可恢复。")) {
-          deleteForm.submit();
-        }
+        AppDialog.confirm("确定删除邮件服务器“" + deleteTargetName + "”吗？此操作不可恢复。").then(function (confirmed) {
+          if (confirmed) deleteForm.submit();
+        });
       });
     }
   })();

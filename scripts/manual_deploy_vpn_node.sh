@@ -10,6 +10,7 @@ APP_DIR="${APP_DIR:-/srv/vpn-node}"
 REPO_URL="${REPO_URL:-https://github.com/trowar/vpn-manager.git}"
 BRANCH="${BRANCH:-main}"
 
+SHADOWSOCKS_ENABLED="${SHADOWSOCKS_ENABLED:-0}"
 SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
 SHADOWSOCKS_PORT_RANGE_START="${SHADOWSOCKS_PORT_RANGE_START:-29000}"
 SHADOWSOCKS_PORT_RANGE_END="${SHADOWSOCKS_PORT_RANGE_END:-33999}"
@@ -21,8 +22,19 @@ KCPTUN_KEY="${KCPTUN_KEY:-}"
 KCPTUN_CRYPT="${KCPTUN_CRYPT:-aes}"
 KCPTUN_MODE="${KCPTUN_MODE:-fast3}"
 KCPTUN_MTU="${KCPTUN_MTU:-1350}"
+KCPTUN_DATASHARD="${KCPTUN_DATASHARD:-10}"
+KCPTUN_PARITYSHARD="${KCPTUN_PARITYSHARD:-10}"
+KCPTUN_NOCOMP="${KCPTUN_NOCOMP:-1}"
 KCPTUN_VERSION="${KCPTUN_VERSION:-latest}"
 KCPTUN_DOWNLOAD_URL="${KCPTUN_DOWNLOAD_URL:-}"
+OPENVPN_ENABLED="${OPENVPN_ENABLED:-1}"
+OPENVPN_ENDPOINT_PORT="${OPENVPN_ENDPOINT_PORT:-443}"
+OPENVPN_PROTO="${OPENVPN_PROTO:-tcp}"
+OPENVPN_CLIENT_DNS="${OPENVPN_CLIENT_DNS:-1.1.1.1}"
+OPENVPN_NETWORK="${OPENVPN_NETWORK:-10.8.0.0}"
+OPENVPN_NETMASK="${OPENVPN_NETMASK:-255.255.255.0}"
+OPENVPN_MATERIALS_DIR="${OPENVPN_MATERIALS_DIR:-/etc/openvpn/server-materials}"
+PORTAL_POSTGRES_DSN="${PORTAL_POSTGRES_DSN:-}"
 
 VPN_API_PUBLIC_PORT="${VPN_API_PUBLIC_PORT:-8081}"
 VPN_API_TOKEN="${VPN_API_TOKEN:-}"
@@ -36,9 +48,18 @@ SHADOWSOCKS_CONF_FILE="${SHADOWSOCKS_CONF_DIR}/vpnmanager.json"
 KCPTUN_CONF_DIR="/etc/kcptun"
 KCPTUN_CONF_FILE="${KCPTUN_CONF_DIR}/server.json"
 KCPTUN_BIN="/usr/local/bin/kcptun-server"
+OPENVPN_SERVER_DIR="/etc/openvpn/server"
+OPENVPN_SERVER_CONF="${OPENVPN_SERVER_DIR}/server.conf"
+OPENVPN_CA_KEY_FILE="${OPENVPN_MATERIALS_DIR}/openvpn_ca.key"
+OPENVPN_CA_CERT_FILE="${OPENVPN_MATERIALS_DIR}/openvpn_ca.crt"
+OPENVPN_SERVER_KEY_FILE="${OPENVPN_MATERIALS_DIR}/openvpn_server.key"
+OPENVPN_SERVER_CERT_FILE="${OPENVPN_MATERIALS_DIR}/openvpn_server.crt"
+OPENVPN_TLS_CRYPT_KEY_FILE="${OPENVPN_MATERIALS_DIR}/openvpn_tls_crypt.key"
 
 SHADOWSOCKS_SERVICE_NAME="vpnmanager-shadowsocks.service"
 KCPTUN_SERVICE_NAME="vpnmanager-kcptun.service"
+OPENVPN_SERVICE_NAME="openvpn-server@server.service"
+OPENVPN_NAT_SERVICE_NAME="vpnmanager-openvpn-nat.service"
 VPN_API_SERVICE_NAME="vpnmanager-server.service"
 
 PM=""
@@ -170,26 +191,31 @@ install_base_deps() {
   pkg_update
   pkg_upgrade
 
+  local base_packages vpn_packages
   if [ "$PM" = "apt" ]; then
-    pkg_install \
-      ca-certificates curl git openssl \
-      iproute2 iptables net-tools \
-      shadowsocks-libev tar unzip \
-      python3 python3-venv python3-pip
+    base_packages="ca-certificates curl git openssl iproute2 iptables net-tools tar unzip python3 python3-venv python3-pip"
   else
-    pkg_install \
-      ca-certificates curl git openssl \
-      iproute iptables net-tools \
-      shadowsocks-libev tar unzip \
-      python3 python3-pip
+    base_packages="ca-certificates curl git openssl iproute iptables net-tools tar unzip python3 python3-pip"
   fi
+  vpn_packages=""
+  if is_enabled "${OPENVPN_ENABLED}"; then
+    vpn_packages="${vpn_packages} openvpn"
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}"; then
+    vpn_packages="${vpn_packages} shadowsocks-libev"
+  fi
+  pkg_install ${base_packages} ${vpn_packages}
 
-  if ! has_cmd ss-server; then
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && ! has_cmd ss-server; then
     err "shadowsocks-libev install failed (ss-server missing)"
     exit 1
   fi
   if ! has_cmd python3; then
     err "python3 install failed"
+    exit 1
+  fi
+  if is_enabled "${OPENVPN_ENABLED}" && ! has_cmd openvpn; then
+    err "openvpn install failed"
     exit 1
   fi
 }
@@ -407,35 +433,24 @@ write_shadowsocks_config() {
   if [ "$SHADOWSOCKS_PORT_RANGE_END" -lt "$SHADOWSOCKS_PORT_RANGE_START" ]; then
     SHADOWSOCKS_PORT_RANGE_END="$SHADOWSOCKS_PORT_RANGE_START"
   fi
-  python3 - "$SHADOWSOCKS_CONF_FILE" "$SHADOWSOCKS_SERVER_PORT" "$SHADOWSOCKS_PORT_RANGE_START" "$SHADOWSOCKS_PORT_RANGE_END" "$SHADOWSOCKS_PASSWORD" "$SHADOWSOCKS_METHOD" <<'PY'
-import hashlib
+  python3 - "$SHADOWSOCKS_CONF_FILE" "$SHADOWSOCKS_SERVER_PORT" "$SHADOWSOCKS_PASSWORD" "$SHADOWSOCKS_METHOD" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 out_path = Path(sys.argv[1])
 server_port = int(sys.argv[2])
-range_start = int(sys.argv[3])
-range_end = int(sys.argv[4])
-base_password = sys.argv[5]
-method = sys.argv[6]
-
-port_password = {str(server_port): base_password}
-for port in range(range_start, range_end + 1):
-    if port == server_port:
-        continue
-    token = hashlib.sha256(f"{base_password}:{port}".encode("utf-8")).hexdigest()[:32]
-    port_password[str(port)] = token
+base_password = sys.argv[3]
+method = sys.argv[4]
 
 payload = {
     "server": "0.0.0.0",
-    "port_password": port_password,
+    "server_port": server_port,
+    "password": base_password,
     "method": method,
     "mode": "tcp_and_udp",
     "timeout": 300,
     "fast_open": False,
-    "reuse_port": True,
-    "no_delay": True,
 }
 out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
@@ -444,6 +459,11 @@ PY
 
 write_kcptun_config() {
   mkdir -p "$KCPTUN_CONF_DIR"
+  local kcptun_nocomp_json
+  kcptun_nocomp_json="false"
+  if is_enabled "${KCPTUN_NOCOMP}"; then
+    kcptun_nocomp_json="true"
+  fi
   cat > "$KCPTUN_CONF_FILE" <<EOF
 {
   "listen": ":${KCPTUN_SERVER_PORT}",
@@ -454,10 +474,10 @@ write_kcptun_config() {
   "mtu": ${KCPTUN_MTU},
   "sndwnd": 256,
   "rcvwnd": 512,
-  "datashard": 10,
-  "parityshard": 3,
+  "datashard": ${KCPTUN_DATASHARD},
+  "parityshard": ${KCPTUN_PARITYSHARD},
   "dscp": 0,
-  "nocomp": false,
+  "nocomp": ${kcptun_nocomp_json},
   "acknodelay": true,
   "nodelay": 1,
   "interval": 20,
@@ -470,17 +490,146 @@ EOF
   chmod 600 "$KCPTUN_CONF_FILE"
 }
 
+write_openvpn_config() {
+  if ! is_enabled "${OPENVPN_ENABLED}"; then
+    return 0
+  fi
+
+  mkdir -p "$OPENVPN_SERVER_DIR" "$OPENVPN_MATERIALS_DIR" /var/log/openvpn
+  OPENVPN_ENDPOINT_PORT="$(normalize_port "$OPENVPN_ENDPOINT_PORT" 443)"
+  if [ "${OPENVPN_PROTO}" != "udp" ]; then
+    OPENVPN_PROTO="tcp"
+  fi
+
+  if [ ! -s "$OPENVPN_CA_KEY_FILE" ] || [ ! -s "$OPENVPN_CA_CERT_FILE" ]; then
+    log "generating OpenVPN CA materials"
+    openssl genrsa -out "$OPENVPN_CA_KEY_FILE" 2048 >/dev/null 2>&1
+    openssl req -x509 -new -nodes -key "$OPENVPN_CA_KEY_FILE" -sha256 -days 3650 \
+      -subj "/CN=vpn-manager-ca/O=vpn-manager" \
+      -out "$OPENVPN_CA_CERT_FILE" >/dev/null 2>&1
+  fi
+
+  if [ ! -s "$OPENVPN_SERVER_KEY_FILE" ] || [ ! -s "$OPENVPN_SERVER_CERT_FILE" ]; then
+    log "generating OpenVPN server certificate"
+    local csr_file ext_file
+    csr_file="$(mktemp /tmp/openvpn-server.XXXXXX.csr)"
+    ext_file="$(mktemp /tmp/openvpn-server.XXXXXX.ext)"
+    openssl genrsa -out "$OPENVPN_SERVER_KEY_FILE" 2048 >/dev/null 2>&1
+    openssl req -new -key "$OPENVPN_SERVER_KEY_FILE" \
+      -subj "/CN=vpn-manager-server/O=vpn-manager" \
+      -out "$csr_file" >/dev/null 2>&1
+    cat > "$ext_file" <<'EOF'
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+    openssl x509 -req -in "$csr_file" \
+      -CA "$OPENVPN_CA_CERT_FILE" -CAkey "$OPENVPN_CA_KEY_FILE" -CAcreateserial \
+      -out "$OPENVPN_SERVER_CERT_FILE" -days 1825 -sha256 -extfile "$ext_file" >/dev/null 2>&1
+    rm -f "$csr_file" "$ext_file"
+  fi
+
+  if [ ! -s "$OPENVPN_TLS_CRYPT_KEY_FILE" ]; then
+    log "generating OpenVPN tls-crypt key"
+    openvpn --genkey secret "$OPENVPN_TLS_CRYPT_KEY_FILE" >/dev/null 2>&1
+  fi
+
+  install -m 0644 "$OPENVPN_CA_CERT_FILE" "${OPENVPN_SERVER_DIR}/ca.crt"
+  install -m 0644 "$OPENVPN_SERVER_CERT_FILE" "${OPENVPN_SERVER_DIR}/server.crt"
+  install -m 0600 "$OPENVPN_SERVER_KEY_FILE" "${OPENVPN_SERVER_DIR}/server.key"
+  install -m 0600 "$OPENVPN_TLS_CRYPT_KEY_FILE" "${OPENVPN_SERVER_DIR}/ta.key"
+
+  local proto_line
+  proto_line="tcp-server"
+  if [ "${OPENVPN_PROTO}" = "udp" ]; then
+    proto_line="udp"
+  fi
+
+  cat > "$OPENVPN_SERVER_CONF" <<EOF
+port ${OPENVPN_ENDPOINT_PORT}
+proto ${proto_line}
+dev tun
+topology subnet
+server ${OPENVPN_NETWORK} ${OPENVPN_NETMASK}
+ifconfig-pool-persist /var/log/openvpn/ipp.txt
+ca ${OPENVPN_SERVER_DIR}/ca.crt
+cert ${OPENVPN_SERVER_DIR}/server.crt
+key ${OPENVPN_SERVER_DIR}/server.key
+dh none
+tls-crypt ${OPENVPN_SERVER_DIR}/ta.key
+auth SHA256
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+cipher AES-256-GCM
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS ${OPENVPN_CLIENT_DNS}"
+keepalive 10 120
+user nobody
+group nogroup
+persist-key
+persist-tun
+status /var/log/openvpn/status.log
+log-append /var/log/openvpn/server.log
+verb 3
+EOF
+
+  if [ -n "${PORTAL_POSTGRES_DSN}" ]; then
+    cat > "${OPENVPN_SERVER_DIR}/check-client.py" <<EOF
+#!${PY_VENV_DIR}/bin/python
+import os
+import re
+import sys
+import psycopg
+
+dsn = ${PORTAL_POSTGRES_DSN@Q}
+common_name = (os.environ.get("common_name") or "").strip()
+match = re.fullmatch(r"vpn-user-(\\d+)", common_name)
+if not match:
+    sys.exit(1)
+
+try:
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, status, vpn_enabled FROM users WHERE id = %s LIMIT 1",
+                (int(match.group(1)),),
+            )
+            row = cur.fetchone()
+except Exception:
+    sys.exit(1)
+
+if not row:
+    sys.exit(1)
+role, status, vpn_enabled = row
+role = (role or "user").strip().lower()
+status = (status or "approved").strip().lower()
+if status == "disabled":
+    sys.exit(1)
+if role == "admin" or int(vpn_enabled or 0) == 1:
+    sys.exit(0)
+sys.exit(1)
+EOF
+    chmod 0755 "${OPENVPN_SERVER_DIR}/check-client.py"
+    cat >> "$OPENVPN_SERVER_CONF" <<EOF
+script-security 2
+client-connect ${OPENVPN_SERVER_DIR}/check-client.py
+EOF
+  fi
+}
+
 ensure_python_runtime() {
   mkdir -p "${APP_DIR}" "${APP_DIR}/data"
   if [ ! -d "${PY_VENV_DIR}" ]; then
     python3 -m venv "${PY_VENV_DIR}"
   fi
   "${PY_VENV_DIR}/bin/pip" install --upgrade pip >/dev/null
-  "${PY_VENV_DIR}/bin/pip" install "Flask==3.0.3" "gunicorn==22.0.0" "werkzeug==3.0.2" >/dev/null
+  "${PY_VENV_DIR}/bin/pip" install "Flask==3.0.3" "gunicorn==22.0.0" "werkzeug==3.0.2" "psycopg[binary]>=3.2,<4" >/dev/null
 }
 
 write_systemd_units() {
-  cat > "/etc/systemd/system/${SHADOWSOCKS_SERVICE_NAME}" <<EOF
+  if is_enabled "${SHADOWSOCKS_ENABLED:-0}"; then
+    cat > "/etc/systemd/system/${SHADOWSOCKS_SERVICE_NAME}" <<EOF
 [Unit]
 Description=VPN Manager Shadowsocks Server
 After=network-online.target
@@ -488,15 +637,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ss-server -c ${SHADOWSOCKS_CONF_FILE} -u
+ExecStart=/usr/bin/ss-server -s 0.0.0.0 -p ${SHADOWSOCKS_SERVER_PORT} -c ${SHADOWSOCKS_CONF_FILE} -u
 Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
+  else
+    rm -f "/etc/systemd/system/${SHADOWSOCKS_SERVICE_NAME}"
+  fi
 
-  if is_enabled "${KCPTUN_ENABLED}"; then
+  if is_enabled "${SHADOWSOCKS_ENABLED:-0}" && is_enabled "${KCPTUN_ENABLED}"; then
     cat > "/etc/systemd/system/${KCPTUN_SERVICE_NAME}" <<EOF
 [Unit]
 Description=VPN Manager kcptun Server
@@ -517,9 +669,34 @@ EOF
     rm -f "/etc/systemd/system/${KCPTUN_SERVICE_NAME}"
   fi
 
+  if is_enabled "${OPENVPN_ENABLED}"; then
+    cat > "/etc/systemd/system/${OPENVPN_NAT_SERVICE_NAME}" <<EOF
+[Unit]
+Description=VPN Manager OpenVPN NAT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C POSTROUTING -s ${OPENVPN_NETWORK}/24 -j MASQUERADE 2>/dev/null || /usr/sbin/iptables -t nat -A POSTROUTING -s ${OPENVPN_NETWORK}/24 -j MASQUERADE; /usr/sbin/iptables -C FORWARD -s ${OPENVPN_NETWORK}/24 -j ACCEPT 2>/dev/null || /usr/sbin/iptables -A FORWARD -s ${OPENVPN_NETWORK}/24 -j ACCEPT; /usr/sbin/iptables -C FORWARD -d ${OPENVPN_NETWORK}/24 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || /usr/sbin/iptables -A FORWARD -d ${OPENVPN_NETWORK}/24 -m state --state ESTABLISHED,RELATED -j ACCEPT'
+ExecStop=/bin/sh -c '/usr/sbin/iptables -t nat -D POSTROUTING -s ${OPENVPN_NETWORK}/24 -j MASQUERADE 2>/dev/null || true; /usr/sbin/iptables -D FORWARD -s ${OPENVPN_NETWORK}/24 -j ACCEPT 2>/dev/null || true; /usr/sbin/iptables -D FORWARD -d ${OPENVPN_NETWORK}/24 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  else
+    rm -f "/etc/systemd/system/${OPENVPN_NAT_SERVICE_NAME}"
+  fi
+
   local api_after
-  api_after="network-online.target ${SHADOWSOCKS_SERVICE_NAME}"
-  if is_enabled "${KCPTUN_ENABLED}"; then
+  api_after="network-online.target"
+  if is_enabled "${OPENVPN_ENABLED}"; then
+    api_after="${api_after} ${OPENVPN_SERVICE_NAME}"
+  elif is_enabled "${SHADOWSOCKS_ENABLED:-0}"; then
+    api_after="${api_after} ${SHADOWSOCKS_SERVICE_NAME}"
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED:-0}" && is_enabled "${KCPTUN_ENABLED}"; then
     api_after="${api_after} ${KCPTUN_SERVICE_NAME}"
   fi
   cat > "/etc/systemd/system/${VPN_API_SERVICE_NAME}" <<EOF
@@ -533,6 +710,7 @@ Type=simple
 WorkingDirectory=${APP_DIR}/vpn
 Environment=PATH=${PY_VENV_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=VPN_API_TOKEN=${VPN_API_TOKEN}
+Environment=OPENVPN_SYSTEMD_UNIT=${OPENVPN_SERVICE_NAME}
 ExecStart=${PY_VENV_DIR}/bin/gunicorn --workers 1 --bind 0.0.0.0:${VPN_API_PUBLIC_PORT} vpn_api:app
 Restart=always
 RestartSec=3
@@ -548,9 +726,33 @@ start_services() {
     exit 1
   fi
 
+  if [ ! -f /etc/sysctl.d/99-vpnmanager-ipv6.conf ]; then
+    cat > /etc/sysctl.d/99-vpnmanager-ipv6.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+  fi
+  sysctl -p /etc/sysctl.d/99-vpnmanager-ipv6.conf >/dev/null || true
+
   systemctl daemon-reload
-  systemctl enable --now "${SHADOWSOCKS_SERVICE_NAME}"
-  if is_enabled "${KCPTUN_ENABLED}"; then
+  if is_enabled "${OPENVPN_ENABLED}"; then
+    cat > /etc/sysctl.d/99-vpnmanager-openvpn.conf <<'EOF'
+net.ipv4.ip_forward=1
+EOF
+    sysctl --system >/dev/null || sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    systemctl enable --now "${OPENVPN_NAT_SERVICE_NAME}"
+    systemctl enable --now "${OPENVPN_SERVICE_NAME}"
+  else
+    systemctl disable --now "${OPENVPN_SERVICE_NAME}" >/dev/null 2>&1 || true
+    systemctl disable --now "${OPENVPN_NAT_SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}" ; then
+    systemctl enable --now "${SHADOWSOCKS_SERVICE_NAME}"
+  else
+    systemctl disable --now "${SHADOWSOCKS_SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && is_enabled "${KCPTUN_ENABLED}"; then
     systemctl enable --now "${KCPTUN_SERVICE_NAME}"
   else
     systemctl disable --now "${KCPTUN_SERVICE_NAME}" >/dev/null 2>&1 || true
@@ -575,23 +777,32 @@ print_summary() {
   echo
   echo "================ Local Deploy Completed ================"
   echo "APP_DIR: ${APP_DIR}"
-  echo "Shadowsocks control port: ${SHADOWSOCKS_SERVER_PORT}/tcp+udp (${SHADOWSOCKS_METHOD})"
-  echo "Shadowsocks user port range: ${SHADOWSOCKS_PORT_RANGE_START}-${SHADOWSOCKS_PORT_RANGE_END}/tcp+udp"
-  if is_enabled "${KCPTUN_ENABLED}"; then
+  if is_enabled "${OPENVPN_ENABLED}"; then
+    echo "OpenVPN: ${OPENVPN_ENDPOINT_PORT}/${OPENVPN_PROTO}"
+    echo "OpenVPN service: ${OPENVPN_SERVICE_NAME}"
+    echo "OpenVPN NAT service: ${OPENVPN_NAT_SERVICE_NAME}"
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}"; then
+    echo "Shadowsocks: ${SHADOWSOCKS_SERVER_PORT}/tcp+udp"
+    echo "Shadowsocks service: ${SHADOWSOCKS_SERVICE_NAME}"
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && is_enabled "${KCPTUN_ENABLED}"; then
     echo "kcptun: ${KCPTUN_SERVER_PORT}/udp"
-  else
-    echo "kcptun: disabled"
+    echo "kcptun service: ${KCPTUN_SERVICE_NAME}"
   fi
   echo "VPN API: ${VPN_API_PUBLIC_PORT}/tcp"
+  echo "VPN API service: ${VPN_API_SERVICE_NAME}"
   echo "VPN_API_TOKEN: ${VPN_API_TOKEN}"
-  echo "SHADOWSOCKS_PASSWORD: ${SHADOWSOCKS_PASSWORD}"
-  if is_enabled "${KCPTUN_ENABLED}"; then
-    echo "KCPTUN_KEY: ${KCPTUN_KEY}"
-  fi
   echo
   echo "Service status checks:"
-  systemctl --no-pager --full status "${SHADOWSOCKS_SERVICE_NAME}" | sed -n '1,6p' || true
-  if is_enabled "${KCPTUN_ENABLED}"; then
+  if is_enabled "${OPENVPN_ENABLED}"; then
+    systemctl --no-pager --full status "${OPENVPN_SERVICE_NAME}" | sed -n '1,6p' || true
+    systemctl --no-pager --full status "${OPENVPN_NAT_SERVICE_NAME}" | sed -n '1,6p' || true
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}"; then
+    systemctl --no-pager --full status "${SHADOWSOCKS_SERVICE_NAME}" | sed -n '1,6p' || true
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && is_enabled "${KCPTUN_ENABLED}"; then
     systemctl --no-pager --full status "${KCPTUN_SERVICE_NAME}" | sed -n '1,6p' || true
   fi
   systemctl --no-pager --full status "${VPN_API_SERVICE_NAME}" | sed -n '1,6p' || true
@@ -610,20 +821,23 @@ main() {
   if [ -z "${VPN_API_TOKEN}" ]; then
     VPN_API_TOKEN="$(generate_token)"
   fi
-  if [ -z "${SHADOWSOCKS_PASSWORD}" ]; then
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && [ -z "${SHADOWSOCKS_PASSWORD}" ]; then
     SHADOWSOCKS_PASSWORD="$(generate_token)"
   fi
-  if is_enabled "${KCPTUN_ENABLED}" && [ -z "${KCPTUN_KEY}" ]; then
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && is_enabled "${KCPTUN_ENABLED}" && [ -z "${KCPTUN_KEY}" ]; then
     KCPTUN_KEY="$(generate_token)"
   fi
 
-  if is_enabled "${KCPTUN_ENABLED}"; then
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && is_enabled "${KCPTUN_ENABLED}"; then
     ensure_kcptun_binary
   fi
-  write_shadowsocks_config
-  if is_enabled "${KCPTUN_ENABLED}"; then
+  if is_enabled "${SHADOWSOCKS_ENABLED}"; then
+    write_shadowsocks_config
+  fi
+  if is_enabled "${SHADOWSOCKS_ENABLED}" && is_enabled "${KCPTUN_ENABLED}"; then
     write_kcptun_config
   fi
+  write_openvpn_config
   ensure_python_runtime
   write_systemd_units
   start_services
@@ -637,4 +851,3 @@ main() {
 }
 
 main "$@"
-

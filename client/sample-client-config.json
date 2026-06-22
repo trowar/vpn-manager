@@ -1,0 +1,19 @@
+{
+  "schema": "company-vpn-client.v1",
+  "name": "company-user-demo",
+  "account": "demo",
+  "profiles": [
+    {
+      "name": "OpenVPN 主线路",
+      "type": "openvpn",
+      "update_url": "https://vpn.example.com/client-api/profiles/demo/openvpn",
+      "update_token": "replace-with-issued-token"
+    },
+    {
+      "name": "SS/KCPTUN 备用线路",
+      "type": "clash",
+      "update_url": "https://vpn.example.com/client-api/profiles/demo/clash",
+      "update_token": "replace-with-issued-token"
+    }
+  ]
+}

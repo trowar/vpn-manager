@@ -14,9 +14,13 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-vpnportal}"
 
 LOCAL_VPN_APP_DIR="${LOCAL_VPN_APP_DIR:-/srv/vpn-node}"
 INSTALL_LOCAL_VPN_SERVER="${INSTALL_LOCAL_VPN_SERVER:-1}"
+OPENVPN_ENDPOINT_PORT="${OPENVPN_ENDPOINT_PORT:-443}"
+OPENVPN_PROTO="${OPENVPN_PROTO:-tcp}"
+OPENVPN_CLIENT_DNS="${OPENVPN_CLIENT_DNS:-1.1.1.1}"
+OPENVPN_MATERIALS_DIR="${OPENVPN_MATERIALS_DIR:-/etc/openvpn/server-materials}"
 SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
 KCPTUN_SERVER_PORT="${KCPTUN_SERVER_PORT:-29900}"
-KCPTUN_ENABLED="${KCPTUN_ENABLED:-}"
+KCPTUN_ENABLED="${KCPTUN_ENABLED:-0}"
 SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD:-chacha20-ietf-poly1305}"
 SHADOWSOCKS_PASSWORD="${SHADOWSOCKS_PASSWORD:-}"
 KCPTUN_KEY="${KCPTUN_KEY:-}"
@@ -496,7 +500,7 @@ prepare_env_install() {
   INSTALL_API_TOKEN="${api_token}"
   kcptun_enabled_final="${KCPTUN_ENABLED}"
   if [ -z "${kcptun_enabled_final}" ]; then
-    kcptun_enabled_final="1"
+    kcptun_enabled_final="0"
   fi
 
   mkdir -p "${APP_DIR}"
@@ -516,7 +520,15 @@ prepare_env_install() {
 
   upsert_env "VPN_API_TOKEN" "${api_token}"
   upsert_env "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
-  upsert_env "SHADOWSOCKS_ENABLED" "1"
+  upsert_env "OPENVPN_ENABLED" "1"
+  upsert_env "OPENVPN_ENDPOINT_HOST" "${ip}"
+  upsert_env "OPENVPN_ENDPOINT_PORT" "${OPENVPN_ENDPOINT_PORT}"
+  upsert_env "OPENVPN_PROTO" "${OPENVPN_PROTO}"
+  upsert_env "OPENVPN_CLIENT_DNS" "${OPENVPN_CLIENT_DNS}"
+  upsert_env "PORTAL_SHARED_VPN_MATERIALS_DIR" "${OPENVPN_MATERIALS_DIR}"
+  upsert_env "OPENVPN_CA_CERT_FILE" "/etc/openvpn/server/ca.crt"
+  upsert_env "OPENVPN_TLS_CRYPT_KEY_FILE" "/etc/openvpn/server/ta.key"
+  upsert_env "SHADOWSOCKS_ENABLED" "0"
   upsert_env "KCPTUN_ENABLED" "${kcptun_enabled_final}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
   upsert_env "SHADOWSOCKS_SERVER_PORT" "${SHADOWSOCKS_PUBLIC_PORT}"
@@ -557,7 +569,7 @@ prepare_env_upgrade() {
     kcptun_enabled_final="$(read_env_value KCPTUN_ENABLED || true)"
   fi
   if [ -z "${kcptun_enabled_final}" ]; then
-    kcptun_enabled_final="1"
+    kcptun_enabled_final="0"
   fi
 
   upsert_env_if_missing "PORTAL_SECRET_KEY" "${portal_secret}"
@@ -574,7 +586,15 @@ prepare_env_upgrade() {
 
   upsert_env_if_missing "VPN_API_TOKEN" "${api_token}"
   upsert_env_if_missing "VPN_API_URL" "http://${ip}:${VPN_API_PUBLIC_PORT}"
-  upsert_env "SHADOWSOCKS_ENABLED" "1"
+  upsert_env "OPENVPN_ENABLED" "1"
+  upsert_env "OPENVPN_ENDPOINT_HOST" "${ip}"
+  upsert_env "OPENVPN_ENDPOINT_PORT" "${OPENVPN_ENDPOINT_PORT}"
+  upsert_env "OPENVPN_PROTO" "${OPENVPN_PROTO}"
+  upsert_env "OPENVPN_CLIENT_DNS" "${OPENVPN_CLIENT_DNS}"
+  upsert_env "PORTAL_SHARED_VPN_MATERIALS_DIR" "${OPENVPN_MATERIALS_DIR}"
+  upsert_env "OPENVPN_CA_CERT_FILE" "/etc/openvpn/server/ca.crt"
+  upsert_env "OPENVPN_TLS_CRYPT_KEY_FILE" "/etc/openvpn/server/ta.key"
+  upsert_env "SHADOWSOCKS_ENABLED" "0"
   upsert_env "KCPTUN_ENABLED" "${kcptun_enabled_final}"
   upsert_env "SHADOWSOCKS_ENDPOINT_HOST" "${ip}"
   upsert_env "SHADOWSOCKS_SERVER_PORT" "${SHADOWSOCKS_PUBLIC_PORT}"
@@ -633,7 +653,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
-ExecStart=${APP_DIR}/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${WEB_PUBLIC_PORT} wsgi:app
+ExecStart=${APP_DIR}/.venv/bin/gunicorn --workers 2 --timeout 900 --graceful-timeout 60 --bind 0.0.0.0:${WEB_PUBLIC_PORT} wsgi:app
 Restart=always
 RestartSec=3
 User=root
@@ -660,6 +680,7 @@ start_or_restart_web_service() {
 deploy_local_vpn_server() {
   local kcptun_enabled_value ss_password_value kcptun_key_value
   local kcptun_crypt_value kcptun_mode_value kcptun_mtu_value
+  local postgres_dsn_value
 
   if [ "${INSTALL_LOCAL_VPN_SERVER}" != "1" ]; then
     log "Skipping local vpn-server deploy (INSTALL_LOCAL_VPN_SERVER=${INSTALL_LOCAL_VPN_SERVER})"
@@ -696,13 +717,21 @@ deploy_local_vpn_server() {
   if [ -z "${kcptun_mtu_value}" ]; then
     kcptun_mtu_value="${KCPTUN_MTU}"
   fi
+  postgres_dsn_value="$(read_env_value PORTAL_POSTGRES_DSN || true)"
 
   log "Deploying local vpn-server on host (systemd mode)"
   APP_DIR="${LOCAL_VPN_APP_DIR}" \
   REPO_URL="${REPO_URL}" \
   BRANCH="${BRANCH}" \
+  OPENVPN_ENABLED="1" \
+  OPENVPN_ENDPOINT_PORT="${OPENVPN_ENDPOINT_PORT}" \
+  OPENVPN_PROTO="${OPENVPN_PROTO}" \
+  OPENVPN_CLIENT_DNS="${OPENVPN_CLIENT_DNS}" \
+  OPENVPN_MATERIALS_DIR="${OPENVPN_MATERIALS_DIR}" \
+  PORTAL_POSTGRES_DSN="${postgres_dsn_value}" \
   KCPTUN_SERVER_PORT="${KCPTUN_PUBLIC_PORT}" \
   KCPTUN_ENABLED="${kcptun_enabled_value}" \
+  SHADOWSOCKS_ENABLED="0" \
   SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_PUBLIC_PORT}" \
   SHADOWSOCKS_METHOD="${SHADOWSOCKS_METHOD}" \
   SHADOWSOCKS_PASSWORD="${ss_password_value}" \
@@ -743,9 +772,11 @@ register_local_vpn_server_record() {
     LOCAL_SERVER_HOST="${host}" \
     LOCAL_SERVER_NAME="${server_name}" \
     LOCAL_SERVER_REGION="Local" \
+    LOCAL_SERVER_PASSWORD="${LOCAL_SERVER_PASSWORD:-}" \
+    LOCAL_SERVER_SSH_PRIVATE_KEY="${LOCAL_SERVER_SSH_PRIVATE_KEY:-}" \
     LOCAL_VPN_API_TOKEN="${api_token}" \
     LOCAL_KCPTUN_PORT="${KCPTUN_PUBLIC_PORT}" \
-    LOCAL_SHADOWSOCKS_PORT="${SHADOWSOCKS_PUBLIC_PORT}" \
+    LOCAL_OPENVPN_PORT="${OPENVPN_ENDPOINT_PORT}" \
     LOCAL_DNS_PORT="${DNS_PUBLIC_PORT}" \
     "${APP_DIR}/.venv/bin/python" - <<'PY'
 import os
@@ -755,9 +786,11 @@ import app as portal
 host = (os.environ.get("LOCAL_SERVER_HOST") or "").strip()
 server_name = (os.environ.get("LOCAL_SERVER_NAME") or "").strip() or host
 server_region = (os.environ.get("LOCAL_SERVER_REGION") or "Local").strip()
+server_password = os.environ.get("LOCAL_SERVER_PASSWORD") or ""
+server_private_key = os.environ.get("LOCAL_SERVER_SSH_PRIVATE_KEY") or ""
 vpn_api_token = (os.environ.get("LOCAL_VPN_API_TOKEN") or "").strip()
 kcptun_port = portal.normalize_server_port(os.environ.get("LOCAL_KCPTUN_PORT"), portal.SERVER_DEPLOY_DEFAULT_WG_PORT)
-shadowsocks_port = portal.normalize_server_port(os.environ.get("LOCAL_SHADOWSOCKS_PORT"), portal.SERVER_DEPLOY_DEFAULT_SHADOWSOCKS_PORT)
+openvpn_port = portal.normalize_server_port(os.environ.get("LOCAL_OPENVPN_PORT"), portal.SERVER_DEPLOY_DEFAULT_OPENVPN_PORT)
 dns_port = portal.normalize_server_port(os.environ.get("LOCAL_DNS_PORT"), portal.SERVER_DEPLOY_DEFAULT_DNS_PORT)
 now_iso = portal.utcnow_iso()
 message = "Local vpn-server deployed by install script."
@@ -788,6 +821,8 @@ with portal.app.app_context():
                 host = ?,
                 port = 22,
                 username = COALESCE(NULLIF(username, ''), 'root'),
+                password = CASE WHEN trim(COALESCE(password, '')) = '' AND trim(?) <> '' THEN ? ELSE password END,
+                ssh_private_key = CASE WHEN trim(COALESCE(ssh_private_key, '')) = '' AND trim(?) <> '' THEN ? ELSE ssh_private_key END,
                 domain = COALESCE(domain, ''),
                 vpn_api_token = ?,
                 wg_port = ?,
@@ -804,9 +839,13 @@ with portal.app.app_context():
                 server_name,
                 server_region,
                 host,
+                server_password,
+                server_password,
+                server_private_key,
+                server_private_key,
                 vpn_api_token,
                 kcptun_port,
-                shadowsocks_port,
+                openvpn_port,
                 dns_port,
                 now_iso,
                 message,
@@ -822,11 +861,11 @@ with portal.app.app_context():
             host=host,
             port=22,
             username="root",
-            password="",
-            ssh_private_key="",
+            password=server_password,
+            ssh_private_key=server_private_key,
             domain="",
             wg_port=kcptun_port,
-            openvpn_port=shadowsocks_port,
+            openvpn_port=openvpn_port,
             dns_port=dns_port,
             vpn_api_token=vpn_api_token,
             status="online",
@@ -852,12 +891,6 @@ PY
 }
 
 verify_components() {
-  local kcptun_enabled_current
-  kcptun_enabled_current="$(read_env_value KCPTUN_ENABLED || true)"
-  if [ -z "${kcptun_enabled_current}" ]; then
-    kcptun_enabled_current="${KCPTUN_ENABLED:-1}"
-  fi
-
   if ! systemctl is-active --quiet postgresql; then
     err "postgresql service is not active"
     systemctl --no-pager --full status postgresql || true
@@ -871,17 +904,15 @@ verify_components() {
   fi
 
   if [ "${INSTALL_LOCAL_VPN_SERVER}" = "1" ] && { [ "${SCRIPT_MODE}" = "install" ] || [ "${UPGRADE_INCLUDE_VPN_SERVER}" = "1" ]; }; then
-    if ! systemctl is-active --quiet "vpnmanager-shadowsocks.service"; then
-      err "vpnmanager-shadowsocks.service is not active"
-      systemctl --no-pager --full status "vpnmanager-shadowsocks.service" || true
+    if ! systemctl is-active --quiet "openvpn-server@server.service"; then
+      err "openvpn-server@server.service is not active"
+      systemctl --no-pager --full status "openvpn-server@server.service" || true
       exit 1
     fi
-    if [ "${kcptun_enabled_current}" = "1" ]; then
-      if ! systemctl is-active --quiet "vpnmanager-kcptun.service"; then
-        err "vpnmanager-kcptun.service is not active"
-        systemctl --no-pager --full status "vpnmanager-kcptun.service" || true
-        exit 1
-      fi
+    if ! systemctl is-active --quiet "vpnmanager-openvpn-nat.service"; then
+      err "vpnmanager-openvpn-nat.service is not active"
+      systemctl --no-pager --full status "vpnmanager-openvpn-nat.service" || true
+      exit 1
     fi
     if ! systemctl is-active --quiet "vpnmanager-server.service"; then
       err "vpnmanager-server.service is not active"
@@ -908,19 +939,22 @@ Default username: admin
 Default password: admin
 Notes:
 1) Local web service (systemd): ${WEB_SERVICE_NAME}
-2) Local database (systemd): postgresql
-3) Local vpn-server path: ${LOCAL_VPN_APP_DIR}
-4) Web path: ${APP_DIR}
-5) Upgrade mode keeps existing account/secret/token values in ${APP_DIR}/${ENV_FILE}
-6) Upgrade DB backup: ${UPGRADE_DB_BACKUP_FILE:-skipped}
+2) Local VPN service (systemd): openvpn-server@server.service
+3) Local VPN NAT service (systemd): vpnmanager-openvpn-nat.service
+4) Local VPN API service (systemd): vpnmanager-server.service
+5) Local database (systemd): postgresql
+6) Local vpn-server path: ${LOCAL_VPN_APP_DIR}
+7) Web path: ${APP_DIR}
+8) Upgrade mode keeps existing account/secret/token values in ${APP_DIR}/${ENV_FILE}
+9) Upgrade DB backup: ${UPGRADE_DB_BACKUP_FILE:-skipped}
 ===================================================
 
 EOF
 
   echo "[status] postgresql: $(systemctl is-active postgresql 2>/dev/null || true)"
   echo "[status] web: $(systemctl is-active "${WEB_SERVICE_NAME}" 2>/dev/null || true)"
-  echo "[status] shadowsocks: $(systemctl is-active vpnmanager-shadowsocks.service 2>/dev/null || true)"
-  echo "[status] kcptun: $(systemctl is-active vpnmanager-kcptun.service 2>/dev/null || true)"
+  echo "[status] openvpn: $(systemctl is-active openvpn-server@server.service 2>/dev/null || true)"
+  echo "[status] openvpn-nat: $(systemctl is-active vpnmanager-openvpn-nat.service 2>/dev/null || true)"
   echo "[status] vpn-api: $(systemctl is-active vpnmanager-server.service 2>/dev/null || true)"
 }
 
@@ -972,4 +1006,3 @@ main() {
 }
 
 main "$@"
-

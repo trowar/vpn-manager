@@ -127,7 +127,7 @@
                   method="post"
                   action="{{ url_for('cancel_subscription_order', order_id=o['id']) }}"
                   class="inline-form"
-                  onsubmit="return confirm('确定要取消这个订单吗？取消后需要重新下单。');"
+                  data-confirm="确定要取消这个订单吗？取消后需要重新下单。"
                 >
                   <button type="submit" class="danger">取消订单</button>
                 </form>

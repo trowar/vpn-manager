@@ -1,47 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="card">
-  <h2>用户订阅（{{ subscriptions|length }}）</h2>
-  <p class="helper">手动设置期限时间基准：{{ admin_ui_tz_name }}</p>
-
-  <div id="expiring-rights" class="onboarding-entry">
-    <h3>即将到期权益（7天内）</h3>
-    {% if expiring_subscriptions %}
-      <div class="table-scroll">
-        <table class="subscriptions-table">
-          <thead>
-            <tr>
-              <th>邮箱</th>
-              <th>到期时间</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for u in expiring_subscriptions %}
-              <tr>
-                <td>{{ u["email"] }}</td>
-                <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% else %}
-      <p class="helper">最近 7 天没有到期权益。</p>
-    {% endif %}
+  <div class="section-title-row">
+    <div>
+      <h2>内部用户（{{ subscriptions|length }}）</h2>
+      <p class="helper">管理员创建账号后分发给员工；账号不设置有效期，可随时启用或停用。当前在线 {{ online_summary["online_users"] or 0 }} 人。</p>
+    </div>
+    <div class="header-actions">
+      <form
+        method="post"
+        action="{{ url_for('admin_start_client_build_packages') }}"
+        class="inline-form"
+        id="client-build-form"
+        data-status-url="{{ url_for('admin_client_build_status') }}"
+      >
+        <input type="hidden" name="web_url" value="{{ request.url_root.rstrip('/') }}">
+        <button type="submit" class="btn secondary">编译客户端</button>
+      </form>
+      <a class="btn secondary" href="{{ url_for('public_client_download') }}">下载客户端</a>
+      <button type="button" class="btn" id="open-user-create-modal">创建账号</button>
+    </div>
   </div>
 
   <form method="get" action="{{ url_for('admin_subscriptions') }}" class="admin-subscriptions-search">
-    <label for="admin-email-search">搜索用户邮箱</label>
+    <label for="admin-username-search">搜索用户名</label>
     <div class="admin-subscriptions-search-row">
       <input
-        id="admin-email-search"
+        id="admin-username-search"
         type="text"
         name="q"
-        value="{{ search_email or '' }}"
-        placeholder="输入邮箱关键词，例如 gmail.com"
+        value="{{ search_username or '' }}"
+        placeholder="输入用户名关键词"
       >
       <button type="submit">搜索</button>
-      {% if search_email %}
+      {% if search_username %}
         <a class="btn secondary" href="{{ url_for('admin_subscriptions') }}">清空</a>
       {% endif %}
     </div>
@@ -49,52 +41,107 @@
 
   {% if subscriptions %}
     <div class="table-scroll">
-      <table class="subscriptions-table">
+      <table class="subscriptions-table admin-user-table">
         <thead>
           <tr>
-            <th>邮箱</th>
-            <th>IP</th>
-            <th>到期时间</th>
-            <th>流量总量/已用流量</th>
-            <th>VPN 状态</th>
+            <th>用户名</th>
+            <th>可连接服务器</th>
+            <th>连接状态</th>
+            <th>连接服务器</th>
+            <th>连接模式</th>
+            <th>源 IP</th>
+            <th>下载/上传</th>
+            <th>状态</th>
             <th>编辑</th>
           </tr>
         </thead>
         <tbody>
           {% for u in subscriptions %}
+            {% set online = online_by_user_id.get(u["id"]) %}
             <tr>
               <td>
-                {{ u["email"] }}
+                {{ u["username"] }}
                 {% if u["role"] == "admin" %}
                   <span class="tag">管理员</span>
                 {% endif %}
               </td>
-              <td>{{ u["assigned_ip"] or "-" }}</td>
-              <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
-              <td>{{ u["traffic_plan_usage_display"] }}</td>
               <td>
-                {% if u["wg_enabled"] == 1 %}
-                  <span class="tag tag-ok">已启用</span>
+                {% if u["role"] == "admin" %}
+                  -
                 {% else %}
-                  <span class="tag tag-warn">已停用</span>
+                  {% set allowed_ids = u["allowed_server_ids"] or [] %}
+                  {% if allowed_ids %}
+                    <span class="tag">{{ allowed_ids|length }} 台</span>
+                  {% else %}
+                    <span class="tag tag-warn">未配置</span>
+                  {% endif %}
+                {% endif %}
+              </td>
+              <td>
+                {% if online %}
+                  <span class="tag tag-ok">在线</span>
+                {% else %}
+                  <span class="tag tag-warn">不在线</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if online %}
+                  <span class="table-code-wrap">{{ online["server_name"] or "-" }}</span>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+              <td>
+                {% if online %}
+                  <span class="tag">{{ online["connection_mode"] or "-" }}</span>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+              <td>
+                {% if online %}
+                  <span class="table-code-wrap">{{ online["endpoint"] or "-" }}</span>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+              <td>
+                {% if online %}
+                  {{ online["tx_human"] or "0 B" }} / {{ online["rx_human"] or "0 B" }}
+                {% else %}
+                  -
                 {% endif %}
               </td>
               <td>
                 {% if u["role"] == "admin" %}
-                  <span class="helper">管理员账号，不可修改</span>
+                  <span class="tag tag-ok">开启</span>
                 {% else %}
-                  <button
-                    type="button"
-                    class="btn secondary open-user-edit-modal"
-                    data-user-email="{{ u['email'] }}"
-                    data-expires-local="{{ u['subscription_expires_at']|fmt_local_date_input }}"
-                    data-set-expiry-url="{{ url_for('admin_set_user_expiry', user_id=u['id']) }}"
-                    data-enable-url="{{ url_for('admin_enable_user', user_id=u['id']) }}"
-                    data-disable-url="{{ url_for('admin_disable_user', user_id=u['id']) }}"
-                    data-reset-url="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
-                    data-delete-url="{{ url_for('admin_delete_user', user_id=u['id']) }}"
-                  >编辑</button>
+                  {% if (u["status"] or "approved") == "disabled" %}
+                    <form method="post" action="{{ url_for('admin_enable_user', user_id=u['id']) }}" class="inline-form">
+                      <input type="hidden" name="q" value="{{ search_username or '' }}">
+                      <button type="submit" class="status-toggle status-toggle-off">关闭</button>
+                    </form>
+                  {% else %}
+                    <form method="post" action="{{ url_for('admin_disable_user', user_id=u['id']) }}" class="inline-form">
+                      <input type="hidden" name="q" value="{{ search_username or '' }}">
+                      <button type="submit" class="status-toggle status-toggle-on">开启</button>
+                    </form>
+                  {% endif %}
                 {% endif %}
+              </td>
+              <td>
+                <button
+                  type="button"
+                  class="btn secondary open-user-edit-modal"
+                  data-role="{{ u['role'] }}"
+                  data-username="{{ u['username'] }}"
+                  data-enable-url="{{ url_for('admin_enable_user', user_id=u['id']) }}"
+                  data-disable-url="{{ url_for('admin_disable_user', user_id=u['id']) }}"
+                  data-reset-url="{{ url_for('admin_reset_user_password', user_id=u['id']) }}"
+                  data-delete-url="{{ url_for('admin_delete_user', user_id=u['id']) }}"
+                  data-permissions-url="{{ url_for('admin_update_user_server_permissions', user_id=u['id']) }}"
+                  data-allowed-server-ids="{{ (u['allowed_server_ids'] or [])|join(',') }}"
+                >编辑</button>
               </td>
             </tr>
           {% endfor %}
@@ -103,8 +150,8 @@
     </div>
   {% else %}
     <p class="helper">
-      {% if search_email %}
-        没有找到匹配邮箱“{{ search_email }}”的用户。
+      {% if search_username %}
+        没有找到匹配用户名“{{ search_username }}”的用户。
       {% else %}
         暂无用户订阅记录。
       {% endif %}
@@ -112,35 +159,68 @@
   {% endif %}
 </section>
 
+<div class="payment-modal" id="client-build-modal" hidden>
+  <div class="payment-modal-card user-edit-modal-card client-build-modal-card">
+    <div class="section-title-row">
+      <div>
+        <h4>编译客户端</h4>
+        <p class="helper" id="client-build-message">准备开始。</p>
+      </div>
+      <button type="button" class="btn secondary" id="close-client-build-modal">关闭</button>
+    </div>
+    <pre class="client-build-log" id="client-build-log">等待开始...</pre>
+  </div>
+</div>
+
+<div class="payment-modal" id="user-create-modal" hidden>
+  <div class="payment-modal-card user-edit-modal-card">
+    <div class="section-title-row">
+      <h4>创建员工账号</h4>
+      <button type="button" class="btn secondary" id="close-user-create-modal">关闭</button>
+    </div>
+
+    <form method="post" action="{{ url_for('admin_create_user') }}" class="form">
+      <label>用户名
+        <input type="text" name="username" placeholder="例如：zhangsan" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" required>
+      </label>
+      <label>客户端登录密码
+        <input type="password" name="password" placeholder="至少 8 位" minlength="8" required>
+      </label>
+      {% if available_servers %}
+        <fieldset class="server-permission-list">
+          <legend>可连接服务器</legend>
+          {% for server in available_servers %}
+            <label class="checkbox-line">
+              <span>{{ server["endpoint_host"] }}{% if server["server_region"] %} / {{ server["server_region"] }}{% endif %} / {{ server["server_name"] }}</span>
+              <input type="checkbox" name="allowed_server_ids" value="{{ server['id'] }}" checked>
+            </label>
+          {% endfor %}
+        </fieldset>
+        <p class="helper">用户登录客户端后，只能看到这里勾选的服务器；连接时会临时生成一次性配置。</p>
+        <button type="submit">创建并启用账号</button>
+      {% else %}
+        <p class="helper">暂无带域名的在线服务器，请先到服务器列表配置服务器域名。</p>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
 <div class="payment-modal" id="user-edit-modal" hidden>
   <div class="payment-modal-card user-edit-modal-card">
     <div class="section-title-row">
       <h4>编辑用户</h4>
       <button type="button" class="btn secondary" id="close-user-edit-modal">关闭</button>
     </div>
-    <p class="helper">当前用户：<strong id="user-edit-email">-</strong></p>
+    <p class="helper">当前用户：<strong id="user-edit-username">-</strong></p>
 
     <div class="user-edit-modal-actions">
-      <form method="post" id="user-edit-expiry-form" class="form expiry-form">
-        <input type="hidden" name="q" value="{{ search_email or '' }}">
-        <label>保存期限
-          <input
-            type="date"
-            id="user-edit-expiry-input"
-            name="expires_at_local"
-            required
-          >
-        </label>
-        <button type="submit">保存期限</button>
-      </form>
-
       <form
         method="post"
         id="user-edit-enable-form"
         class="form"
-        onsubmit="return confirm('确认启用该用户吗？启用后会恢复 VPN 连接。');"
+        data-confirm="确认启用该用户吗？启用后会恢复 VPN 连接。"
       >
-        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <input type="hidden" name="q" value="{{ search_username or '' }}">
         <button type="submit" class="btn">启用用户</button>
       </form>
 
@@ -148,9 +228,9 @@
         method="post"
         id="user-edit-disable-form"
         class="form"
-        onsubmit="return confirm('确定停用该用户吗？停用后将立刻断开 VPN。');"
+        data-confirm="确定停用该用户吗？停用后将立刻断开 VPN。"
       >
-        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <input type="hidden" name="q" value="{{ search_username or '' }}">
         <button type="submit">停用用户</button>
       </form>
 
@@ -158,9 +238,9 @@
         method="post"
         id="user-edit-reset-form"
         class="form"
-        onsubmit="return confirm('确定重置该用户密码吗？重置后会断开其旧 VPN 会话。');"
+        data-confirm="确定重置该用户密码吗？重置后会断开其旧 VPN 会话。"
       >
-        <input type="hidden" name="q" value="{{ search_email or '' }}">
+        <input type="hidden" name="q" value="{{ search_username or '' }}">
         <input
           type="password"
           class="admin-reset-password-input"
@@ -172,9 +252,32 @@
         <button type="submit" class="btn secondary">重置密码</button>
       </form>
 
+      <form
+        method="post"
+        id="user-edit-permissions-form"
+        class="form"
+      >
+        <input type="hidden" name="q" value="{{ search_username or '' }}">
+        <fieldset class="server-permission-list">
+          <legend>可连接服务器</legend>
+          {% for server in available_servers %}
+            <label class="checkbox-line">
+              <span>{{ server["endpoint_host"] }}{% if server["server_region"] %} / {{ server["server_region"] }}{% endif %} / {{ server["server_name"] }}</span>
+              <input
+                type="checkbox"
+                name="allowed_server_ids"
+                value="{{ server['id'] }}"
+                class="user-edit-server-permission"
+              >
+            </label>
+          {% endfor %}
+        </fieldset>
+        <button type="submit" class="btn secondary">保存</button>
+      </form>
+
       <form method="post" id="user-edit-delete-form" class="form">
-        <input type="hidden" name="q" value="{{ search_email or '' }}">
-        <input type="hidden" name="confirm_email" value="">
+        <input type="hidden" name="q" value="{{ search_username or '' }}">
+        <input type="hidden" name="confirm_username" value="">
         <button type="submit" class="danger">删除用户</button>
       </form>
     </div>
@@ -183,22 +286,25 @@
 
 <script>
   (function () {
+    var createModal = document.getElementById("user-create-modal");
+    var createOpenButton = document.getElementById("open-user-create-modal");
+    var createCloseButton = document.getElementById("close-user-create-modal");
+    var clientBuildForm = document.getElementById("client-build-form");
+    var clientBuildModal = document.getElementById("client-build-modal");
+    var clientBuildCloseButton = document.getElementById("close-client-build-modal");
+    var clientBuildMessage = document.getElementById("client-build-message");
+    var clientBuildLog = document.getElementById("client-build-log");
+    var clientBuildTimer = null;
     var editModal = document.getElementById("user-edit-modal");
     var openButtons = document.querySelectorAll(".open-user-edit-modal");
     var closeButton = document.getElementById("close-user-edit-modal");
-    var userEmailText = document.getElementById("user-edit-email");
-    var expiryForm = document.getElementById("user-edit-expiry-form");
-    var expiryInput = document.getElementById("user-edit-expiry-input");
+    var usernameText = document.getElementById("user-edit-username");
     var enableForm = document.getElementById("user-edit-enable-form");
     var disableForm = document.getElementById("user-edit-disable-form");
     var resetForm = document.getElementById("user-edit-reset-form");
+    var permissionsForm = document.getElementById("user-edit-permissions-form");
+    var permissionChecks = document.querySelectorAll(".user-edit-server-permission");
     var deleteForm = document.getElementById("user-edit-delete-form");
-
-    function todayDateInput() {
-      var now = new Date();
-      now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-      return now.toISOString().slice(0, 10);
-    }
 
     function openModal(modal) {
       if (!modal) {
@@ -222,6 +328,156 @@
       });
     }
 
+    if (createOpenButton) {
+      createOpenButton.addEventListener("click", function () {
+        openModal(createModal);
+      });
+    }
+
+    if (createCloseButton) {
+      createCloseButton.addEventListener("click", function () {
+        closeModal(createModal);
+      });
+    }
+
+    if (createModal) {
+      createModal.addEventListener("click", function (event) {
+        if (event.target === createModal) {
+          closeModal(createModal);
+        }
+      });
+    }
+
+    function setClientBuildLog(text) {
+      if (!clientBuildLog) return;
+      clientBuildLog.textContent = text || "暂无日志。";
+      clientBuildLog.scrollTop = clientBuildLog.scrollHeight;
+    }
+
+    function buildSameOriginUrl(pathOrUrl) {
+      if (!pathOrUrl) {
+        return "";
+      }
+      try {
+        return new URL(pathOrUrl, window.location.origin).toString();
+      } catch (error) {
+        return pathOrUrl;
+      }
+    }
+
+    function parseJSONResponse(response) {
+      return response.text().then(function (text) {
+        var payload = null;
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch (error) {
+            payload = null;
+          }
+        }
+        if (!response.ok) {
+          var message = payload && payload.message ? payload.message : "";
+          if (!message && payload && payload.error) {
+            message = payload.error;
+          }
+          if (!message) {
+            message = text ? text.slice(0, 220) : response.statusText;
+          }
+          throw new Error("HTTP " + response.status + " " + message);
+        }
+        if (!payload) {
+          throw new Error("服务器未返回 JSON：" + (text ? text.slice(0, 220) : "空响应"));
+        }
+        return payload;
+      });
+    }
+
+    function pollClientBuildStatus() {
+      if (!clientBuildForm) return;
+      fetch(buildSameOriginUrl(clientBuildForm.dataset.statusUrl || ""), {
+        credentials: "same-origin",
+        headers: { "Accept": "application/json" }
+      })
+        .then(parseJSONResponse)
+        .then(function (payload) {
+          if (clientBuildMessage) {
+            clientBuildMessage.textContent = payload.message || (payload.running ? "正在编译..." : "已结束。");
+          }
+          setClientBuildLog(payload.log || "");
+          if (!payload.running && clientBuildTimer) {
+            clearInterval(clientBuildTimer);
+            clientBuildTimer = null;
+          }
+        })
+        .catch(function (error) {
+          if (clientBuildMessage) {
+            clientBuildMessage.textContent = "读取编译状态失败：" + (error && error.message ? error.message : error);
+          }
+        });
+    }
+
+    function startClientBuild() {
+      if (!clientBuildForm) return;
+      openModal(clientBuildModal);
+      if (clientBuildMessage) {
+        clientBuildMessage.textContent = "正在启动编译任务...";
+      }
+      setClientBuildLog("正在启动编译任务...");
+      fetch(buildSameOriginUrl(clientBuildForm.getAttribute("action") || clientBuildForm.action), {
+        method: "POST",
+        body: new FormData(clientBuildForm),
+        credentials: "same-origin",
+        headers: { "Accept": "application/json" }
+      })
+        .then(parseJSONResponse)
+        .then(function (payload) {
+          if (clientBuildMessage) {
+            clientBuildMessage.textContent = payload.message || "客户端编译任务已启动。";
+          }
+          pollClientBuildStatus();
+          if (clientBuildTimer) {
+            clearInterval(clientBuildTimer);
+          }
+          clientBuildTimer = setInterval(pollClientBuildStatus, 1000);
+        })
+        .catch(function (error) {
+          if (clientBuildMessage) {
+            clientBuildMessage.textContent = "启动失败：" + (error && error.message ? error.message : error);
+          }
+          pollClientBuildStatus();
+        });
+    }
+
+    if (clientBuildForm) {
+      clientBuildForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var run = function () { startClientBuild(); };
+        if (window.AppDialog && typeof window.AppDialog.confirm === "function") {
+          window.AppDialog.confirm("将使用当前访问地址重新编译客户端安装包，确定继续吗？", {
+            title: "编译客户端"
+          }).then(function (ok) {
+            if (ok) run();
+          });
+        } else {
+          run();
+        }
+      });
+    }
+
+    if (clientBuildCloseButton) {
+      clientBuildCloseButton.addEventListener("click", function () {
+        closeModal(clientBuildModal);
+      });
+    }
+
+    if (clientBuildModal) {
+      clientBuildModal.addEventListener("click", function (event) {
+        if (event.target === clientBuildModal) {
+          closeModal(clientBuildModal);
+        }
+      });
+    }
+
     if (editModal) {
       editModal.addEventListener("click", function (event) {
         if (event.target === editModal) {
@@ -232,15 +488,11 @@
 
     openButtons.forEach(function (button) {
       button.addEventListener("click", function () {
-        var userEmail = (button.dataset.userEmail || "").trim();
-        if (userEmailText) {
-          userEmailText.textContent = userEmail || "-";
-        }
-        if (expiryForm) {
-          expiryForm.action = button.dataset.setExpiryUrl || "";
-        }
-        if (expiryInput) {
-          expiryInput.value = button.dataset.expiresLocal || todayDateInput();
+        var username = (button.dataset.username || "").trim();
+        var role = (button.dataset.role || "user").trim();
+        var isAdmin = role === "admin";
+        if (usernameText) {
+          usernameText.textContent = username || "-";
         }
         if (enableForm) {
           enableForm.action = button.dataset.enableUrl || "";
@@ -251,13 +503,33 @@
         if (resetForm) {
           resetForm.action = button.dataset.resetUrl || "";
         }
+        if (permissionsForm) {
+          permissionsForm.action = button.dataset.permissionsUrl || "";
+        }
+        var allowed = (button.dataset.allowedServerIds || "")
+          .split(",")
+          .map(function (item) { return item.trim(); })
+          .filter(Boolean);
+        permissionChecks.forEach(function (checkbox) {
+          checkbox.checked = allowed.indexOf(checkbox.value) !== -1;
+        });
         if (deleteForm) {
           deleteForm.action = button.dataset.deleteUrl || "";
-          deleteForm.dataset.userEmail = userEmail;
-          var confirmEmailInput = deleteForm.querySelector("input[name='confirm_email']");
-          if (confirmEmailInput) {
-            confirmEmailInput.value = "";
+          deleteForm.dataset.username = username;
+          var confirmUsernameInput = deleteForm.querySelector("input[name='confirm_username']");
+          if (confirmUsernameInput) {
+            confirmUsernameInput.value = "";
           }
+        }
+        [enableForm, disableForm, permissionsForm, deleteForm].forEach(function (form) {
+          if (form) {
+            form.hidden = isAdmin;
+          }
+        });
+        if (resetForm) {
+          resetForm.dataset.confirm = isAdmin
+            ? "确定修改该管理员密码吗？修改后需要使用新密码重新登录。"
+            : "确定重置该用户密码吗？重置后会断开其旧 VPN 会话。";
         }
         openModal(editModal);
       });
@@ -265,22 +537,29 @@
 
     if (deleteForm) {
       deleteForm.addEventListener("submit", function (event) {
-        var expected = (deleteForm.dataset.userEmail || "").trim();
-        var entered = window.prompt("请输入该用户邮箱以确认删除：", "");
-        if (!entered) {
-          event.preventDefault();
+        if (deleteForm.dataset.confirmed === "1") {
+          deleteForm.dataset.confirmed = "";
           return;
         }
-        var normalized = entered.trim().toLowerCase();
-        if (normalized !== expected.toLowerCase()) {
-          event.preventDefault();
-          window.alert("邮箱不匹配，已取消删除。");
-          return;
-        }
-        var hidden = deleteForm.querySelector("input[name='confirm_email']");
-        if (hidden) {
-          hidden.value = entered.trim();
-        }
+        var expected = (deleteForm.dataset.username || "").trim();
+        event.preventDefault();
+        AppDialog.input("请输入该用户名以确认删除：", {
+          title: "删除用户",
+          placeholder: expected
+        }).then(function (entered) {
+          if (!entered) return;
+          var normalized = entered.trim();
+          if (normalized !== expected) {
+            AppDialog.alert("用户名不匹配，已取消删除。", { title: "无法删除" });
+            return;
+          }
+          var hidden = deleteForm.querySelector("input[name='confirm_username']");
+          if (hidden) {
+            hidden.value = normalized;
+          }
+          deleteForm.dataset.confirmed = "1";
+          deleteForm.submit();
+        });
       });
     }
   })();

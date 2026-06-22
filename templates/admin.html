@@ -137,8 +137,7 @@
       <thead>
         <tr>
           <th>用户</th>
-          <th>邮箱</th>
-          <th>IP</th>
+          <th>用户名</th>
           <th>到期时间</th>
           <th>VPN 状态</th>
           <th>手动设置期限</th>
@@ -148,11 +147,10 @@
         {% for u in subscriptions %}
           <tr>
             <td>{{ u["username"] }}</td>
-            <td>{{ u["email"] }}</td>
-            <td>{{ u["assigned_ip"] or "-" }}</td>
+            <td>{{ u["username"] }}</td>
             <td>{{ u["subscription_expires_at"]|fmt_utc }}</td>
             <td>
-              {% if u["wg_enabled"] == 1 %}
+              {% if u["vpn_enabled"] == 1 %}
                 <span class="tag tag-ok">已启用</span>
               {% else %}
                 <span class="tag tag-warn">已停用</span>

@@ -52,7 +52,7 @@
                     method="post"
                     action="{{ url_for('admin_delete_payment_method', method_id=method['id']) }}"
                     class="inline-form"
-                    onsubmit="return confirm('确定删除该支付方式吗？');"
+                    data-confirm="确定删除该支付方式吗？"
                   >
                     <input type="hidden" name="redirect_to" value="payment">
                     <button type="submit" class="danger">删除</button>
@@ -158,7 +158,7 @@
         <thead>
           <tr>
             <th>订单号</th>
-            <th>用户邮箱</th>
+            <th>用户名</th>
             <th>套餐</th>
             <th>金额</th>
             <th>过期时间</th>
@@ -172,7 +172,7 @@
           {% for o in pending_orders %}
             <tr>
               <td>{{ o["id"] }}</td>
-              <td>{{ o["email"] }}</td>
+              <td>{{ o["username"] }}</td>
               <td>{{ o|fmt_order_plan }}</td>
               <td>{{ o["usdt_amount"]|fmt_usdt }} USDT</td>
               <td>{{ o["expires_at"]|fmt_utc }}</td>
@@ -194,7 +194,7 @@
                   method="post"
                   action="{{ url_for('admin_cancel_pending_order', order_id=o['id']) }}"
                   class="inline-form"
-                  onsubmit="return confirm('确定取消该待处理订单吗？');"
+                  data-confirm="确定取消该待处理订单吗？"
                 >
                   <input type="hidden" name="redirect_to" value="payment">
                   <button type="submit" class="danger">取消订单</button>

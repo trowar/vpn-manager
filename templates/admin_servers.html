@@ -2,7 +2,7 @@
 {% block content %}
 <section class="card">
   <h2>服务器管理</h2>
-  <p class="helper">管理已接入的 VPN 服务器，支持补充地区信息，并可直接执行部署、升级、删除等维护操作。</p>
+  <p class="helper">管理已接入的 VPN 服务器；地区会根据服务器 IP 自动识别。</p>
 
   <div class="section-title-row">
     <h3>服务器列表</h3>
@@ -15,9 +15,12 @@
         <thead>
           <tr>
             <th>地址</th>
+            <th>域名</th>
             <th>地区</th>
             <th>账号</th>
+            <th>部署类型</th>
             <th>状态</th>
+            <th>IPv6</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -25,8 +28,14 @@
           {% for s in servers %}
             <tr>
               <td><strong>{{ s["host"] }}</strong></td>
+              <td>{{ s["domain"] or "-" }}</td>
               <td>{{ s["server_region_display"] }}</td>
               <td>{{ s["username"] }}</td>
+              <td>
+                <div class="backend-tags">
+                  <span class="tag">SSH Tunnel</span>
+                </div>
+              </td>
               <td>
                 {% if s["status"] == "online" %}
                   <span class="tag tag-ok">在线</span>
@@ -38,20 +47,32 @@
                   <span class="tag tag-warn">{{ s["status"] }}</span>
                 {% endif %}
               </td>
+              <td>
+                {% if s["ipv6_enabled"] is sameas true %}
+                  {% set ipv6_action = 'disable' %}
+                  {% set ipv6_label = '开启' %}
+                  {% set ipv6_class = 'ipv6-toggle-on' %}
+                {% else %}
+                  {% set ipv6_action = 'enable' %}
+                  {% set ipv6_label = '关闭' %}
+                  {% set ipv6_class = 'ipv6-toggle-off' %}
+                {% endif %}
+                <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action=ipv6_action) }}" class="inline-form">
+                  <button type="submit" class="ipv6-toggle {{ ipv6_class }}">{{ ipv6_label }}</button>
+                </form>
+              </td>
               <td class="server-actions-cell">
                 <div class="subscription-actions">
                   <form method="post" action="{{ url_for('admin_test_saved_server', server_id=s['id']) }}" class="inline-form">
                     <button type="submit" class="btn secondary">测试</button>
                   </form>
-                  <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='disable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器关闭 IPv6 吗？');">
-                    <button type="submit" class="btn secondary">关闭 IPv6</button>
-                  </form>
-                  <form method="post" action="{{ url_for('admin_toggle_server_ipv6', server_id=s['id'], action='enable') }}" class="inline-form" onsubmit="return confirm('确定在该服务器开启 IPv6 吗？');">
-                    <button type="submit" class="btn secondary">开启 IPv6</button>
-                  </form>
-                  <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
-                    <button type="submit">部署</button>
-                  </form>
+                  {% if s["status"] == "online" %}
+                    <button type="button" disabled>已部署</button>
+                  {% else %}
+                    <form method="post" action="{{ url_for('admin_deploy_saved_server', server_id=s['id']) }}" class="inline-form">
+                      <button type="submit">部署</button>
+                    </form>
+                  {% endif %}
                   <form method="post" action="{{ url_for('admin_upgrade_saved_server', server_id=s['id']) }}" class="inline-form">
                     <button type="submit" class="btn secondary">升级</button>
                   </form>
@@ -67,10 +88,11 @@
                     data-update-url="{{ url_for('admin_update_saved_server', server_id=s['id']) }}"
                     data-delete-url="{{ url_for('admin_delete_saved_server', server_id=s['id']) }}"
                     data-server-name="{{ s['server_name'] }}"
-                    data-region="{{ s['server_region'] }}"
                     data-host="{{ s['host'] }}"
+                    data-domain="{{ s['domain'] }}"
                     data-port="{{ s['port'] }}"
                     data-username="{{ s['username'] }}"
+                    data-ssh-tunnel-enabled="1"
                   >修改</button>
                 </div>
               </td>
@@ -92,11 +114,18 @@
     </div>
 
     <form method="post" action="{{ url_for('admin_create_server') }}" class="form" id="server-create-form">
-      <label>服务器地区（可选）
-        <input type="text" name="server_region" id="server-region-input" placeholder="例如：香港 / 日本东京 / 新加坡">
-      </label>
       <label>服务器 IP/域名
         <input type="text" name="host" id="server-host-input" placeholder="例如：193.134.209.54" required>
+      </label>
+      <p class="helper">地区会根据服务器 IP 自动识别，保存后显示在服务器列表。</p>
+      <label>客户端连接域名
+        <input type="text" name="domain" id="server-domain-input" placeholder="例如：vpn.example.com" required>
+      </label>
+      <label>部署类型
+        <span class="checkbox-group">
+          <label class="compact-checkbox"><input type="checkbox" checked disabled> SSH Tunnel</label>
+          <input type="hidden" name="ssh_tunnel_enabled" value="1">
+        </span>
       </label>
       <label>SSH 端口
         <input type="number" name="port" id="server-port-input" min="1" max="65535" value="22" required>
@@ -129,11 +158,18 @@
     </div>
 
     <form method="post" id="server-edit-form" class="form">
-      <label>服务器地区（可选）
-        <input type="text" name="server_region" id="server-edit-region">
-      </label>
       <label>服务器 IP/域名
         <input type="text" name="host" id="server-edit-host" required>
+      </label>
+      <p class="helper">地区会根据服务器 IP 自动识别；修改服务器地址后会重新识别。</p>
+      <label>客户端连接域名
+        <input type="text" name="domain" id="server-edit-domain" required>
+      </label>
+      <label>部署类型
+        <span class="checkbox-group">
+          <label class="compact-checkbox"><input type="checkbox" id="server-edit-ssh-tunnel" checked disabled> SSH Tunnel</label>
+          <input type="hidden" name="ssh_tunnel_enabled" value="1">
+        </span>
       </label>
       <label>SSH 端口
         <input type="number" name="port" id="server-edit-port" min="1" max="65535" required>
@@ -163,7 +199,7 @@
       <button type="button" class="btn secondary modal-close-x" id="close-server-log-modal">×</button>
     </div>
     <p class="helper" id="server-log-meta" style="white-space: pre-line;">加载中...</p>
-    <pre id="server-log-content" style="max-height:460px; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#0f172a; color:#e5e7eb; padding:12px; border-radius:8px;">加载中...</pre>
+    <pre id="server-log-content" style="max-height:460px; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#f8fafc; color:#1f2937; border:1px solid #d7deea; padding:12px; border-radius:8px;">加载中...</pre>
   </div>
 </div>
 
@@ -180,8 +216,8 @@
     var editCloseBtn = document.getElementById("close-server-edit-modal");
     var editButtons = document.querySelectorAll(".open-server-edit-modal");
     var editForm = document.getElementById("server-edit-form");
-    var editRegion = document.getElementById("server-edit-region");
     var editHost = document.getElementById("server-edit-host");
+    var editDomain = document.getElementById("server-edit-domain");
     var editPort = document.getElementById("server-edit-port");
     var editUser = document.getElementById("server-edit-username");
     var editPass = document.getElementById("server-edit-password");
@@ -313,8 +349,8 @@
       btn.addEventListener("click", function () {
         if (!editForm) return;
         editForm.action = btn.dataset.updateUrl || "";
-        if (editRegion) editRegion.value = btn.dataset.region || "";
         if (editHost) editHost.value = btn.dataset.host || "";
+        if (editDomain) editDomain.value = btn.dataset.domain || "";
         if (editPort) editPort.value = btn.dataset.port || "22";
         if (editUser) editUser.value = btn.dataset.username || "root";
         if (editPass) editPass.value = "";
@@ -328,9 +364,9 @@
       editDeleteBtn.addEventListener("click", function () {
         if (!editDeleteForm || !editDeleteForm.action) return;
         var targetName = editDeleteTargetName || "该服务器";
-        if (confirm("确定删除服务器“" + targetName + "”吗？远端主机不会被重装，只会从管理列表移除。")) {
-          editDeleteForm.submit();
-        }
+        AppDialog.confirm("确定删除服务器“" + targetName + "”吗？远端主机不会被重装，只会从管理列表移除。").then(function (confirmed) {
+          if (confirmed) editDeleteForm.submit();
+        });
       });
     }
 

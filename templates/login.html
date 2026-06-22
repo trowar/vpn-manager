@@ -3,38 +3,36 @@
 <section class="card narrow">
   <h2>登录</h2>
   <form method="post" class="form">
-    <label>邮箱或用户名
+    <label>用户名
       <input type="text" name="identity" required>
     </label>
     <label>密码
       <input type="password" name="password" required>
     </label>
-    <label>图片验证码</label>
-    <div class="captcha-row">
-      <input type="text" name="captcha" maxlength="6" required placeholder="输入右侧验证码">
-      <img
-        id="captcha-login"
-        class="captcha-img"
-        src="{{ url_for('captcha_svg', scene='login') }}"
-        alt="验证码"
-        title="点击刷新验证码"
-      >
-    </div>
+    <label class="login-captcha-line">
+      <span>图片验证码</span>
+      <span class="captcha-row">
+        <input type="text" name="captcha" maxlength="6" required placeholder="输入右侧验证码">
+        <img
+          id="captcha-login"
+          class="captcha-img"
+          src="{{ url_for('captcha_svg', scene='login') }}"
+          alt="验证码"
+          title="点击刷新验证码"
+        >
+      </span>
+    </label>
     <button type="submit">登录</button>
   </form>
-  <p class="helper">忘记密码？<a href="{{ url_for('password_recover') }}">找回密码</a></p>
-  {% if registration_open %}
-    <p class="helper">还没有账号？<a href="{{ url_for('register') }}">立即注册</a></p>
-  {% else %}
-    <p class="helper">当前暂停开放注册，请联系管理员。</p>
-  {% endif %}
+  <p class="helper">账号由管理员创建和分发。</p>
 </section>
 <script>
   (function () {
     var captcha = document.getElementById("captcha-login");
     if (!captcha) return;
     captcha.addEventListener("click", function () {
-      captcha.src = "{{ url_for('captcha_svg', scene='login') }}?t=" + Date.now();
+      var baseUrl = "{{ url_for('captcha_svg', scene='login') }}";
+      captcha.src = baseUrl + (baseUrl.indexOf("?") === -1 ? "?" : "&") + "t=" + Date.now();
     });
   })();
 </script>
