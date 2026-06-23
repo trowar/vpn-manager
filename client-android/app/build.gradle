@@ -1,0 +1,16 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.company.vpn"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.company.vpn"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName providers.environmentVariable("COMPANY_VPN_CLIENT_VERSION").orElse("client-dev").get()
+    }
+}

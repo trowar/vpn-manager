@@ -1,0 +1,7 @@
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">serif</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:colorAccent">#2e70d6</item>
+    </style>
+</resources>

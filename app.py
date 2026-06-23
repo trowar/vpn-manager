@@ -12448,6 +12448,34 @@ def build_client_packages_on_server(web_url: str, log_callback=None) -> tuple[bo
         except Exception as exc:
             if log_callback:
                 log_callback(f"删除旧客户端下载文件失败: {legacy_file.name} - {exc}")
+
+    platform_build_script = BASE_DIR / "scripts" / "build_platform_clients.sh"
+    if platform_build_script.exists():
+        if log_callback:
+            log_callback("开始编译 macOS / iOS / Android 客户端...")
+        platform_env = env_base.copy()
+        platform_env.update(
+            {
+                "COMPANY_VPN_WEB_URL": clean_url,
+                "COMPANY_VPN_CLIENT_KEY": key,
+                "COMPANY_VPN_CLIENT_VERSION": build_version,
+                "COMPANY_VPN_DIST_DIR": str(dist_dir),
+                "COMPANY_VPN_PACKAGE_DIR": str(package_root),
+            }
+        )
+        platform_code, platform_output = run_logged_process(
+            [str(platform_build_script)],
+            cwd=BASE_DIR,
+            env=platform_env,
+            log_callback=log_callback,
+        )
+        logs.append(f"platform-clients: exit={platform_code}")
+        if platform_output:
+            logs.append(platform_output[-3000:])
+        if platform_code != 0 and log_callback:
+            log_callback("部分平台客户端编译失败，请查看上方日志；Windows 默认包已生成。")
+    elif log_callback:
+        log_callback("未找到平台客户端构建脚本，跳过 macOS / iOS / Android。")
     return True, "客户端编译完成。"
 
 

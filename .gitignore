@@ -26,6 +26,9 @@ client/package/
 client-go/*.exe
 client-go/*.zip
 client-go/.tmp*
+client-apple/.build/
+client-android/.gradle/
+client-android/app/build/
 
 # Local visual previews
 client-*-preview*.png
