@@ -10935,9 +10935,6 @@ def admin_create_user():
         flash("请设置至少 8 位客户端登录密码。", "error")
         return redirect_admin_subscriptions()
     allowed_server_ids = [int(item) for item in allowed_server_ids_raw if str(item).isdigit()]
-    if not allowed_server_ids:
-        flash("请至少选择一台可连接服务器。", "error")
-        return redirect_admin_subscriptions()
 
     db = get_db()
     try:
@@ -10978,7 +10975,8 @@ def admin_create_user():
             ),
         )
         user_id = int(cursor.fetchone()["id"])
-        save_user_server_permissions(db, user_id, allowed_server_ids)
+        if allowed_server_ids:
+            save_user_server_permissions(db, user_id, allowed_server_ids)
         db.execute(
             """
             UPDATE users
@@ -10990,7 +10988,10 @@ def admin_create_user():
             (now_iso, user_id),
         )
         db.commit()
-        flash(f"内部账号 {username} 已创建并启用。", "success")
+        if allowed_server_ids:
+            flash(f"内部账号 {username} 已创建并启用。", "success")
+        else:
+            flash(f"内部账号 {username} 已创建并启用；当前未分配服务器权限。", "success")
     except DB_INTEGRITY_ERRORS:
         db.rollback()
         flash("该用户名已存在。", "error")

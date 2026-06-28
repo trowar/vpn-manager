@@ -197,10 +197,12 @@
           {% endfor %}
         </fieldset>
         <p class="helper">用户登录客户端后，只能看到这里勾选的服务器；连接时会临时生成一次性配置。</p>
-        <button type="submit">创建并启用账号</button>
       {% else %}
-        <p class="helper">暂无带域名的在线服务器，请先到服务器列表配置服务器域名。</p>
+        <p class="helper">暂无带域名的在线服务器，可以先创建账号，稍后到服务器列表配置域名后再分配权限。</p>
       {% endif %}
+      <div class="modal-actions">
+        <button type="submit" class="btn">创建并启用账号</button>
+      </div>
     </form>
   </div>
 </div>
