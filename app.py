@@ -12406,6 +12406,9 @@ def build_client_packages_on_server(web_url: str, log_callback=None) -> tuple[bo
     )
     logs: list[str] = [go_message, f"内置 Web 地址: {clean_url}", f"客户端版本号: {build_version}"]
     env_base = os.environ.copy()
+    env_base.setdefault("GOPROXY", "https://goproxy.cn,direct")
+    env_base.setdefault("GOSUMDB", "sum.golang.google.cn")
+    env_base.setdefault("GOTOOLCHAIN", "auto")
     if log_callback:
         log_callback("开始编译 Windows x86_64 客户端...")
     env = env_base.copy()

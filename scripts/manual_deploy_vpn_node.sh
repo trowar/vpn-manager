@@ -9,6 +9,7 @@ export NEEDRESTART_MODE=a
 APP_DIR="${APP_DIR:-/srv/vpn-node}"
 REPO_URL="${REPO_URL:-https://github.com/trowar/vpn-manager.git}"
 BRANCH="${BRANCH:-main}"
+LOCAL_SOURCE_DIR="${LOCAL_SOURCE_DIR:-/srv/vpn-platform-v1}"
 
 SHADOWSOCKS_ENABLED="${SHADOWSOCKS_ENABLED:-0}"
 SHADOWSOCKS_SERVER_PORT="${SHADOWSOCKS_SERVER_PORT:-8388}"
@@ -243,6 +244,31 @@ normalize_port() {
 
 setup_repo() {
   mkdir -p "$(dirname "${APP_DIR}")"
+
+  if [ -n "${LOCAL_SOURCE_DIR}" ] \
+    && [ -d "${LOCAL_SOURCE_DIR}" ] \
+    && [ -f "${LOCAL_SOURCE_DIR}/app.py" ] \
+    && [ -f "${LOCAL_SOURCE_DIR}/requirements.txt" ]; then
+    log "copying repository from local source ${LOCAL_SOURCE_DIR} to ${APP_DIR}"
+    rm -rf "${APP_DIR}"
+    mkdir -p "${APP_DIR}"
+    tar \
+      --exclude='.git' \
+      --exclude='.env' \
+      --exclude='.env.*' \
+      --exclude='.venv' \
+      --exclude='.venv-vpn' \
+      --exclude='data' \
+      --exclude='tmp' \
+      --exclude='__pycache__' \
+      --exclude='client/dist' \
+      --exclude='client/package' \
+      --exclude='client-apple/.build' \
+      --exclude='client-android/.gradle' \
+      --exclude='client-android/app/build' \
+      -C "${LOCAL_SOURCE_DIR}" -cf - . | tar -C "${APP_DIR}" -xf -
+    return
+  fi
 
   if [ -d "${APP_DIR}/.git" ]; then
     log "updating repository in ${APP_DIR}"
