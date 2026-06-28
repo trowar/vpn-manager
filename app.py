@@ -3828,6 +3828,40 @@ def init_db() -> None:
     )
     db.execute(
         """
+        CREATE TABLE IF NOT EXISTS vpn_servers (
+            id SERIAL PRIMARY KEY,
+            server_name TEXT NOT NULL,
+            server_region TEXT NOT NULL DEFAULT '',
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL DEFAULT 22,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            ssh_private_key TEXT NOT NULL DEFAULT '',
+            domain TEXT,
+            vpn_api_token TEXT,
+            kcptun_port INTEGER NOT NULL DEFAULT 51820,
+            openvpn_port INTEGER NOT NULL DEFAULT 443,
+            dns_port INTEGER NOT NULL DEFAULT 53,
+            openvpn_enabled INTEGER NOT NULL DEFAULT 1,
+            shadowsocks_enabled INTEGER NOT NULL DEFAULT 0,
+            kcptun_enabled INTEGER NOT NULL DEFAULT 0,
+            ssh_tunnel_enabled INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'pending',
+            last_test_at TEXT,
+            last_test_ok INTEGER NOT NULL DEFAULT 0,
+            last_test_message TEXT,
+            last_deploy_at TEXT,
+            last_deploy_ok INTEGER NOT NULL DEFAULT 0,
+            last_deploy_message TEXT,
+            last_deploy_log TEXT,
+            last_allocated_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS user_server_permissions (
             user_id INTEGER NOT NULL,
             server_id INTEGER NOT NULL,
