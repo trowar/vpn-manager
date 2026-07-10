@@ -74,6 +74,7 @@ from portal_web import (
 )
 from portal_vpn_profiles import (
     default_profile_mode_from_policy,
+    detect_client_platform,
     detect_openvpn_platform,
 )
 from portal_services.versioning import (
@@ -12603,22 +12604,38 @@ def admin_client_build_status():
 @app.route("/client/download")
 def public_client_download():
     dist_dir = BASE_DIR / "client" / "dist"
-    candidates = sort_client_packages_by_version(dist_dir.glob("client-*.zip"))
-    zip_path = candidates[0] if candidates else None
-    if not zip_path:
-        legacy_candidates = sorted(
-            dist_dir.glob("*.zip"),
-            key=lambda item: (item.stat().st_mtime, item.name),
-            reverse=True,
-        )
-        zip_path = legacy_candidates[0] if legacy_candidates else None
+    requested_platform = (request.args.get("platform", "") or "").strip().lower()
+    detected_platform = requested_platform or detect_client_platform(request.headers.get("User-Agent", ""))
+
+    def newest(pattern: str) -> Path | None:
+        matches = [path for path in dist_dir.glob(pattern) if path.is_file()]
+        if not matches:
+            return None
+        if pattern == "client-*.zip":
+            sorted_matches = sort_client_packages_by_version(matches)
+            return sorted_matches[0] if sorted_matches else None
+        return sorted(matches, key=lambda item: (item.stat().st_mtime, item.name), reverse=True)[0]
+
+    platform_candidates = {
+        "macos": ["client-macos-*.zip"],
+        "windows": ["client-*.zip"],
+        "android": ["client-android-*.apk"],
+        "ios": ["client-ios-source-*.zip"],
+    }.get(detected_platform, [])
+
+    zip_path = None
+    for pattern in platform_candidates + ["client-*.zip", "*.zip"]:
+        zip_path = newest(pattern)
+        if zip_path:
+            break
     if not zip_path or not zip_path.exists():
         return Response("client package not found", status=404, mimetype="text/plain")
+    mimetype = "application/vnd.android.package-archive" if zip_path.suffix.lower() == ".apk" else "application/zip"
     return send_file(
         zip_path,
         as_attachment=True,
         download_name=zip_path.name,
-        mimetype="application/zip",
+        mimetype=mimetype,
         max_age=0,
     )
 

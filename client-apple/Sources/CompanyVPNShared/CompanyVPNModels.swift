@@ -26,12 +26,86 @@ public struct VPNServerRoute: Identifiable, Hashable, Codable {
     public var displayHost: String
     public var account: String
     public var mode: String
+    public var updateURL: String
+    public var onlineURL: String
+    public var updateToken: String
+    public var server: VPNServerInfo
 
-    public init(id: String, displayHost: String, account: String, mode: String = "SSH Tunnel") {
+    public init(
+        id: String,
+        displayHost: String,
+        account: String,
+        mode: String = "SSH Tunnel",
+        updateURL: String = "",
+        onlineURL: String = "",
+        updateToken: String = "",
+        server: VPNServerInfo = VPNServerInfo()
+    ) {
         self.id = id
         self.displayHost = displayHost
         self.account = account
         self.mode = mode
+        self.updateURL = updateURL
+        self.onlineURL = onlineURL
+        self.updateToken = updateToken
+        self.server = server
+    }
+}
+
+public struct VPNServerInfo: Hashable, Codable {
+    public var id: Int
+    public var serverName: String
+    public var host: String
+    public var endpointHost: String
+    public var displayName: String
+    public var sshTunnelEnabled: Bool
+
+    public init(
+        id: Int = 0,
+        serverName: String = "",
+        host: String = "",
+        endpointHost: String = "",
+        displayName: String = "",
+        sshTunnelEnabled: Bool = false
+    ) {
+        self.id = id
+        self.serverName = serverName
+        self.host = host
+        self.endpointHost = endpointHost
+        self.displayName = displayName
+        self.sshTunnelEnabled = sshTunnelEnabled
+    }
+}
+
+public struct CompanyVPNBootstrap {
+    public var account: String
+    public var updateToken: String
+    public var routes: [VPNServerRoute]
+
+    public init(account: String, updateToken: String, routes: [VPNServerRoute]) {
+        self.account = account
+        self.updateToken = updateToken
+        self.routes = routes
+    }
+}
+
+public struct SSHTunnelConfig: Codable {
+    public var host: String
+    public var port: Int
+    public var username: String
+    public var privateKey: String
+    public var localSocks: String
+    public var cleanupURL: String
+    public var cleanupToken: String
+
+    enum CodingKeys: String, CodingKey {
+        case host
+        case port
+        case username
+        case privateKey = "private_key"
+        case localSocks = "local_socks"
+        case cleanupURL = "cleanup_url"
+        case cleanupToken = "cleanup_token"
     }
 }
 

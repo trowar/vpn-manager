@@ -62,9 +62,40 @@ build_macos() {
   log "开始编译 macOS 客户端..."
   (cd "$ROOT_DIR/client-apple" && swift build -c release)
   local out_dir="$PACKAGE_DIR/macos"
+  local app_dir="$out_dir/CompanyVPN.app"
   rm -rf "$out_dir"
-  mkdir -p "$out_dir"
-  cp "$ROOT_DIR/client-apple/.build/release/CompanyVPNMac" "$out_dir/CompanyVPN"
+  mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
+  cp "$ROOT_DIR/client-apple/.build/release/CompanyVPNMac" "$app_dir/Contents/MacOS/CompanyVPN"
+  chmod +x "$app_dir/Contents/MacOS/CompanyVPN"
+  cat > "$app_dir/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>CompanyVPN</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.companyvpn.client</string>
+  <key>CFBundleName</key>
+  <string>Company VPN</string>
+  <key>CFBundleDisplayName</key>
+  <string>Company VPN</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$VERSION</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+EOF
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --force --deep --sign - "$app_dir" >/dev/null 2>&1 || true
+  fi
   zip_dir "$out_dir" "$DIST_DIR/client-macos-$VERSION.zip"
   log "macOS 客户端打包完成: client-macos-$VERSION.zip"
 }
